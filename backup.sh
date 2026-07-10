@@ -331,6 +331,28 @@ render_s3_bucket_policy() {
 EOF
 }
 
+restic_is_initialized() {
+  restic snapshots >/dev/null 2>&1
+}
+
+cmd_init() {
+  require_root
+  if [[ ! -f "$BACKUP_ENV_FILE" ]]; then
+    die "$(render_missing_settings_message)"
+  fi
+
+  # shellcheck source=/dev/null
+  source "$BACKUP_ENV_FILE"
+
+  if restic_is_initialized; then
+    log_info "이미 초기화된 저장소입니다. 스킵합니다."
+    return 0
+  fi
+
+  restic init
+  log_info "restic init 완료"
+}
+
 cmd_setting() {
   require_root
   local parsed
@@ -522,7 +544,12 @@ main() {
       cmd_setting "$@"
       return $?
       ;;
-    init|schedule|run|status|uninstall|wizard)
+    init)
+      shift
+      cmd_init "$@"
+      return $?
+      ;;
+    schedule|run|status|uninstall|wizard)
       : # 이후 태스크에서 각 cmd_* 로 분기
       ;;
     *)
