@@ -8,6 +8,13 @@ BACKUP_SCRIPT_INSTALL_PATH="${BACKUP_SCRIPT_INSTALL_PATH:-/usr/local/sbin/backup
 SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 SYSTEMD_SERVICE_FILE="${SYSTEMD_UNIT_DIR}/restic-backup.service"
 SYSTEMD_TIMER_FILE="${SYSTEMD_UNIT_DIR}/restic-backup.timer"
+RESTICPROFILE_INSTALL_PATH="${RESTICPROFILE_INSTALL_PATH:-/usr/local/bin/resticprofile}"
+RESTICPROFILE_VERSION="0.33.1"
+RESTICPROFILE_SHA256="${RESTICPROFILE_SHA256:-1d7027d15e3e2456e585a210f811d0f72ec40f6b3388f00425642ed579165d70}"
+RESTICPROFILE_URL="${RESTICPROFILE_URL:-https://github.com/creativeprojects/resticprofile/releases/download/v${RESTICPROFILE_VERSION}/resticprofile_no_self_update_${RESTICPROFILE_VERSION}_linux_amd64.tar.gz}"
+RESTICPROFILE_CONFIG_FILE="${RESTICPROFILE_CONFIG_FILE:-${RESTIC_ETC_DIR}/profiles.yaml}"
+RESTICPROFILE_UNIT_TEMPLATE="${RESTICPROFILE_UNIT_TEMPLATE:-${RESTIC_ETC_DIR}/resticprofile-service.tmpl}"
+RESTICPROFILE_TIMER_TEMPLATE="${RESTICPROFILE_TIMER_TEMPLATE:-${RESTIC_ETC_DIR}/resticprofile-timer.tmpl}"
 
 DEFAULT_TARGETS="/var/log"
 DEFAULT_EXCLUDES="/tmp/*,/var/tmp/*"
@@ -228,6 +235,28 @@ dnf_install_packages() {
   dnf install -y restic rclone
 }
 
+install_resticprofile() {
+  if [[ -x "$RESTICPROFILE_INSTALL_PATH" ]]; then
+    return 0
+  fi
+
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  curl -fsSL -o "${tmp_dir}/resticprofile.tar.gz" "$RESTICPROFILE_URL"
+
+  local actual_sha256
+  actual_sha256=$(sha256sum "${tmp_dir}/resticprofile.tar.gz" | awk '{print $1}')
+  if [[ "$actual_sha256" != "$RESTICPROFILE_SHA256" ]]; then
+    rm -rf "$tmp_dir"
+    die "resticprofile 체크섬 불일치 (예상: ${RESTICPROFILE_SHA256}, 실제: ${actual_sha256}) - 설치를 중단합니다"
+  fi
+
+  tar -xzf "${tmp_dir}/resticprofile.tar.gz" -C "$tmp_dir" resticprofile
+  mkdir -p "$(dirname "$RESTICPROFILE_INSTALL_PATH")"
+  install -m 0755 "${tmp_dir}/resticprofile" "$RESTICPROFILE_INSTALL_PATH"
+  rm -rf "$tmp_dir"
+}
+
 self_install_copy() {
   local source_path="$1" force="$2"
   if [[ -e "$BACKUP_SCRIPT_INSTALL_PATH" && "$force" != 1 ]]; then
@@ -275,6 +304,7 @@ cmd_install() {
     cat <<EOF
 [dry-run] dnf install -y epel-release
 [dry-run] dnf install -y restic rclone
+[dry-run] resticprofile ${RESTICPROFILE_VERSION} 다운로드+체크섬 검증 후 ${RESTICPROFILE_INSTALL_PATH}에 설치
 [dry-run] install -m 0755 "\$0" "${BACKUP_SCRIPT_INSTALL_PATH}"
 [dry-run] mkdir -p "${RESTIC_ETC_DIR}" && chmod 700 "${RESTIC_ETC_DIR}"
 EOF
@@ -282,6 +312,7 @@ EOF
   fi
 
   dnf_install_packages
+  install_resticprofile
   self_install_copy "$0" "$force"
   ensure_restic_dir
   log_info "install 완료"
