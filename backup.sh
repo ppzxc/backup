@@ -206,6 +206,52 @@ WantedBy=timers.target
 EOF
 }
 
+dnf_install_packages() {
+  dnf install -y epel-release restic rclone
+}
+
+self_install_copy() {
+  local source_path="$1" force="$2"
+  if [[ -e "$BACKUP_SCRIPT_INSTALL_PATH" && "$force" != 1 ]]; then
+    log_info "이미 설치되어 있습니다: ${BACKUP_SCRIPT_INSTALL_PATH} (덮어쓰려면 install --force)"
+    return 0
+  fi
+  install -m 0755 "$source_path" "$BACKUP_SCRIPT_INSTALL_PATH"
+}
+
+ensure_restic_dir() {
+  mkdir -p "$RESTIC_ETC_DIR"
+  chmod 700 "$RESTIC_ETC_DIR"
+}
+
+cmd_install() {
+  require_root
+  local parsed
+  parsed=$(parse_long_opts "force dry-run" -- "$@") || die "$parsed"
+
+  local force=0 dry_run=0
+  while IFS=$'\t' read -r key val; do
+    case "$key" in
+      force) force=1 ;;
+      dry-run) dry_run=1 ;;
+    esac
+  done <<< "$parsed"
+
+  if (( dry_run )); then
+    cat <<EOF
+[dry-run] dnf install -y epel-release restic rclone
+[dry-run] install -m 0755 "\$0" "${BACKUP_SCRIPT_INSTALL_PATH}"
+[dry-run] mkdir -p "${RESTIC_ETC_DIR}" && chmod 700 "${RESTIC_ETC_DIR}"
+EOF
+    return 0
+  fi
+
+  dnf_install_packages
+  self_install_copy "$0" "$force"
+  ensure_restic_dir
+  log_info "install 완료"
+}
+
 render_help() {
   cat <<'EOF'
 backup.sh - restic 기반 백업 설치/운영 스크립트
@@ -235,7 +281,12 @@ main() {
       render_help
       return 0
       ;;
-    install|setting|init|schedule|run|status|uninstall|wizard)
+    install)
+      shift
+      cmd_install "$@"
+      return $?
+      ;;
+    setting|init|schedule|run|status|uninstall|wizard)
       : # 다음 태스크에서 각 cmd_* 로 분기
       ;;
     *)
