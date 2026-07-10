@@ -36,3 +36,24 @@ setup() {
   run cmd_schedule bogus
   [ "$status" -eq 1 ]
 }
+
+@test "cmd_schedule disable does not abort even if systemctl disable fails" {
+  stub_command "systemctl" '
+    if [[ "$1" == "disable" ]]; then
+      exit 1
+    fi
+    echo "systemctl $*" >> "'"${STUB_BIN}"'/systemctl.calls"
+  '
+  # Deliberately NOT using `run` here: bats' `run` does `set +eET` before
+  # invoking the command, which disables errexit for the duration of the
+  # call - so a missing `|| true` guard in systemd_disable_timer would
+  # never be observed via `run`'s captured $status (it would always be 0).
+  # backup.sh is sourced with `set -euo pipefail` still active in this test
+  # process (see the direct `cmd_schedule enable` call a few tests up), so
+  # calling cmd_schedule directly is what actually exercises errexit: if
+  # `systemctl disable` fails without the `|| true` guard, this call aborts
+  # and bats reports the test as failed before reaching the assertion below.
+  cmd_schedule disable
+  status=$?
+  [ "$status" -eq 0 ]
+}

@@ -245,6 +245,7 @@ cmd_install() {
   parsed=$(parse_long_opts "force dry-run" -- "$@") || die "$parsed"
 
   local force=0 dry_run=0
+  local key val
   while IFS=$'\t' read -r key val; do
     case "$key" in
       force) force=1 ;;
@@ -372,6 +373,7 @@ cmd_schedule() {
       local parsed
       parsed=$(parse_long_opts "on-calendar:" -- "$@") || die "$parsed"
       local on_calendar="$DEFAULT_ON_CALENDAR"
+      local key val
       while IFS=$'\t' read -r key val; do
         case "$key" in
           on-calendar) on_calendar="$val" ;;
