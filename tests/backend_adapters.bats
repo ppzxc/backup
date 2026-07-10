@@ -101,15 +101,18 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
-@test "backend_sftp_prepare generates an ssh key" {
+@test "backend_sftp_prepare generates an ssh key and records its pubkey in fields" {
   mkdir -p "$RESTIC_ETC_DIR"
-  backend_sftp_prepare
+  local -A fields=()
+  backend_sftp_prepare fields
   [ -f "$BACKUP_SSH_KEY" ]
   [ -f "${BACKUP_SSH_KEY}.pub" ]
+  [[ "${fields[pubkey]}" == *"ssh-ed25519 AAAAFAKEKEY test@stub"* ]]
 }
 
 @test "backend_s3_prepare is a no-op" {
-  run backend_s3_prepare
+  local -A fields=()
+  run backend_s3_prepare fields
   [ "$status" -eq 0 ]
 }
 
@@ -138,8 +141,8 @@ setup() {
 
 @test "backend_sftp_render_notice prints the generated pubkey for NAS registration" {
   mkdir -p "$RESTIC_ETC_DIR"
-  backend_sftp_prepare
   local -A fields=()
+  backend_sftp_prepare fields
   run backend_sftp_render_notice fields
   [[ "$output" == *"ssh-ed25519 AAAAFAKEKEY test@stub"* ]]
   [[ "$output" == *"backup.sh init"* ]]

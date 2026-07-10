@@ -442,11 +442,17 @@ backend_sftp_validate() {
 }
 
 backend_sftp_prepare() {
+  local -n fields_ref="$1"
   generate_ssh_key_if_missing
+  # pubkey는 nameref로 쓰는 연관 배열의 키일 뿐, 별도로 선언된 변수가 아니다.
+  # shellcheck disable=SC2154
+  fields_ref[pubkey]="$(cat "${BACKUP_SSH_KEY}.pub")"
 }
 
 backend_sftp_render_env() {
   local hostname_tag="$1"
+  # 다른 함수의 같은 이름 nameref 사용과 겹쳐 shellcheck가 배열/스칼라 재할당으로 오인한다.
+  # shellcheck disable=SC2178
   local -n fields_ref="$2" policy_ref="$3"
   cat <<EOF
 export RESTIC_REPOSITORY="rclone:syno_backup:/backup/${hostname_tag}"
@@ -466,13 +472,13 @@ EOF
 }
 
 backend_sftp_render_notice() {
-  # shellcheck disable=SC2034
-  # fields_ref는 s3 adapter와 시그니처를 맞추기 위한 것으로, sftp 공개키 안내에는 필요 없다.
+  # 같은 이유의 nameref 오탐.
+  # shellcheck disable=SC2178
   local -n fields_ref="$1"
   cat <<EOF
 아래 공개키를 NAS의 authorized_keys(또는 File Station)에 등록하세요:
 ----------------------------------------------------------
-$(cat "${BACKUP_SSH_KEY}.pub")
+${fields_ref[pubkey]}
 ----------------------------------------------------------
 등록 후 'backup.sh init'을 실행하세요.
 EOF
@@ -492,6 +498,8 @@ render_setting_hint_s3() {
 }
 
 backend_s3_resolve() {
+  # 같은 이유의 nameref 오탐.
+  # shellcheck disable=SC2178
   local -n cli_ref="$1" env_ref="$2" file_ref="$3" fields_ref="$4"
   fields_ref[endpoint]=$(resolve_value "${cli_ref[endpoint]:-}" "${env_ref[endpoint]:-}" "${file_ref[endpoint]:-}" "") || true
   fields_ref[bucket]=$(resolve_value "${cli_ref[bucket]:-}" "${env_ref[bucket]:-}" "${file_ref[bucket]:-}" "") || true
@@ -870,8 +878,8 @@ cmd_setting() {
 
   ensure_restic_dir
   case "$backend" in
-    sftp) backend_sftp_prepare ;;
-    s3) backend_s3_prepare ;;
+    sftp) backend_sftp_prepare fields ;;
+    s3) backend_s3_prepare fields ;;
   esac
 
   # policy is read via backend_*_render_env's nameref, not directly in this
