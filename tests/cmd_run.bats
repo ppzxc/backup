@@ -13,6 +13,7 @@ export BACKUP_EXCLUDES="/tmp/*,/var/tmp/*"
 export KEEP_DAILY="7"
 export KEEP_WEEKLY="4"
 export KEEP_MONTHLY="12"
+export BACKUP_PROFILE_NAME="web01"
 ENV
 }
 
@@ -23,34 +24,32 @@ ENV
   [[ "$output" == *"setting"* ]]
 }
 
-@test "cmd_run backs up then forgets/prunes on success" {
-  stub_command "restic" '
-    echo "restic $*" >> "'"${STUB_BIN}"'/restic.calls"
-    case "$1" in
-      unlock) exit 0 ;;
-      backup) exit 0 ;;
-      forget) exit 0 ;;
-    esac
+@test "cmd_run renders profiles.yaml fresh and delegates the backup to resticprofile" {
+  stub_command "resticprofile" '
+    echo "resticprofile $*" >> "'"${STUB_BIN}"'/resticprofile.calls"
+    exit 0
   '
   run cmd_run
   [ "$status" -eq 0 ]
-  run cat "${STUB_BIN}/restic.calls"
-  [[ "$output" == *"unlock --stale"* ]]
-  [[ "$output" == *"backup /var/log --exclude=/tmp/* --exclude=/var/tmp/*"* ]]
-  [[ "$output" == *"forget --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --prune"* ]]
+  [ -f "$RESTICPROFILE_CONFIG_FILE" ]
+  perm=$(stat -c '%a' "$RESTICPROFILE_CONFIG_FILE")
+  [ "$perm" = "600" ]
+  run cat "${STUB_BIN}/resticprofile.calls"
+  [[ "$output" == *"--config ${RESTICPROFILE_CONFIG_FILE} --name web01 backup"* ]]
+  [[ "$output" != *"restic unlock"* ]]
 }
 
-@test "cmd_run stops before forget/prune when backup fails" {
-  stub_command "restic" '
-    echo "restic $*" >> "'"${STUB_BIN}"'/restic.calls"
-    case "$1" in
-      unlock) exit 0 ;;
-      backup) exit 1 ;;
-      forget) exit 0 ;;
-    esac
-  '
+@test "cmd_run re-renders profiles.yaml every run so a stale copy never gets reused" {
+  stub_command "resticprofile" 'exit 0'
+  echo "stale placeholder, must be overwritten" > "$RESTICPROFILE_CONFIG_FILE"
+  chmod 600 "$RESTICPROFILE_CONFIG_FILE"
+  run cmd_run
+  [ "$status" -eq 0 ]
+  grep -q 'repository: "local:/tmp/fake-repo"' "$RESTICPROFILE_CONFIG_FILE"
+}
+
+@test "cmd_run dies when resticprofile fails" {
+  stub_command "resticprofile" 'exit 1'
   run cmd_run
   [ "$status" -eq 1 ]
-  run cat "${STUB_BIN}/restic.calls"
-  [[ "$output" != *"forget"* ]]
 }
