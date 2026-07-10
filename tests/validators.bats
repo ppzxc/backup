@@ -51,14 +51,16 @@ setup() {
   [[ "$output" == *"abc"* ]]
 }
 
-@test "validate_port accepts leading-zero values as decimal" {
-  run validate_port "008"
-  [ "$status" -eq 0 ]
+@test "validate_port rejects an out-of-range value containing an invalid octal digit" {
+  run validate_port "099999"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"099999"* ]]
 }
 
-@test "validate_port treats leading-zero as decimal, not octal" {
+@test "validate_port accepts a leading-zero value that is in range" {
   run validate_port "017"
   [ "$status" -eq 0 ]
+  [ -z "$output" ]
 }
 
 @test "validate_positive_int accepts positive integer" {
@@ -76,4 +78,10 @@ setup() {
   run validate_positive_int "seven" "keep-weekly"
   [ "$status" -eq 1 ]
   [[ "$output" == *"keep-weekly"* ]]
+}
+
+@test "validate_positive_int treats a leading-zero value as decimal, not octal" {
+  run validate_positive_int "0700" "test-field"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
 }
