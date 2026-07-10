@@ -16,7 +16,7 @@ setup() {
 }
 
 @test "render_backup_env_sftp produces expected export lines" {
-  run render_backup_env_sftp "host1" "1.2.3.4" "22" "backup_restic" "/etc/restic/backup_key" "secret" "/var/log" "/tmp/*,/var/tmp/*" "7" "4" "12"
+  run render_backup_env_sftp "host1" "1.2.3.4" "22" "backup_restic" "/etc/restic/backup_key" "secret" "/var/log" "/tmp/*,/var/tmp/*" "7" "4" "12" "web01"
   [[ "$output" == *'export RESTIC_REPOSITORY="rclone:syno_backup:/backup/host1"'* ]]
   [[ "$output" == *'export RCLONE_CONFIG_SYNO_BACKUP_TYPE="sftp"'* ]]
   [[ "$output" == *'export RCLONE_CONFIG_SYNO_BACKUP_HOST="1.2.3.4"'* ]]
@@ -26,6 +26,7 @@ setup() {
   [[ "$output" == *'export RESTIC_PASSWORD="secret"'* ]]
   [[ "$output" == *'export BACKUP_TARGETS="/var/log"'* ]]
   [[ "$output" == *'export KEEP_DAILY="7"'* ]]
+  [[ "$output" == *'export BACKUP_PROFILE_NAME="web01"'* ]]
 }
 
 @test "render_sftp_registration_notice includes the pubkey and next command" {
@@ -86,4 +87,20 @@ setup() {
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --force
   [ "$status" -eq 0 ]
   grep -q 'export BACKUP_EXCLUDES="/custom/exclude/\*"' "$BACKUP_ENV_FILE"
+}
+
+@test "cmd_setting sftp defaults profile-name to hostname and honors --profile-name override" {
+  run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret
+  [ "$status" -eq 0 ]
+  grep -q "export BACKUP_PROFILE_NAME=\"$(hostname)\"" "$BACKUP_ENV_FILE"
+
+  run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --profile-name web01 --force
+  [ "$status" -eq 0 ]
+  grep -q 'export BACKUP_PROFILE_NAME="web01"' "$BACKUP_ENV_FILE"
+}
+
+@test "cmd_setting rejects an invalid --profile-name" {
+  run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --profile-name "bad name"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"profile-name"* ]]
 }

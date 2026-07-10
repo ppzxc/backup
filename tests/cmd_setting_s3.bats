@@ -7,12 +7,13 @@ setup() {
 }
 
 @test "render_backup_env_s3 produces expected export lines" {
-  run render_backup_env_s3 "host1" "https://s3.example.com" "my-bucket" "AKIA123" "secretkey" "repopass" "/var/log" "/tmp/*,/var/tmp/*" "7" "4" "12"
+  run render_backup_env_s3 "host1" "https://s3.example.com" "my-bucket" "AKIA123" "secretkey" "repopass" "/var/log" "/tmp/*,/var/tmp/*" "7" "4" "12" "web01"
   [[ "$output" == *'export RESTIC_REPOSITORY="s3:https://s3.example.com/my-bucket/host1"'* ]]
   [[ "$output" == *'export AWS_ACCESS_KEY_ID="AKIA123"'* ]]
   [[ "$output" == *'export AWS_SECRET_ACCESS_KEY="secretkey"'* ]]
   [[ "$output" == *'export RESTIC_PASSWORD="repopass"'* ]]
   [[ "$output" == *'export BACKUP_TARGETS="/var/log"'* ]]
+  [[ "$output" == *'export BACKUP_PROFILE_NAME="web01"'* ]]
 }
 
 @test "render_s3_bucket_policy scopes actions and resource to the given bucket" {

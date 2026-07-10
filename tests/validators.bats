@@ -85,3 +85,27 @@ setup() {
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
+
+@test "validate_profile_name accepts letters, digits, underscore, hyphen" {
+  run validate_profile_name "web01-backup_1"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "validate_profile_name rejects a value containing a slash" {
+  run validate_profile_name "web01/backup"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"profile-name"* ]]
+}
+
+@test "validate_profile_name rejects a value containing a space" {
+  run validate_profile_name "web01 backup"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"profile-name"* ]]
+}
+
+@test "validate_profile_name rejects an empty value" {
+  run validate_profile_name ""
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"profile-name"* ]]
+}

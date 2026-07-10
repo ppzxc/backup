@@ -81,6 +81,19 @@ validate_positive_int() {
   return 0
 }
 
+validate_profile_name() {
+  local value="$1"
+  if [[ -z "$value" ]]; then
+    printf 'ERROR: profile-name must not be empty\n'
+    return 1
+  fi
+  if ! [[ "$value" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    printf 'ERROR: profile-name must contain only letters, digits, _ or -, got: %s\n' "$value"
+    return 1
+  fi
+  return 0
+}
+
 parse_long_opts() {
   local spec="$1"
   shift
@@ -277,7 +290,7 @@ EOF
 render_backup_env_sftp() {
   local hostname_tag="$1" host="$2" port="$3" user="$4" ssh_key_path="$5" \
         password="$6" targets="$7" excludes_csv="$8" \
-        keep_daily="$9" keep_weekly="${10}" keep_monthly="${11}"
+        keep_daily="$9" keep_weekly="${10}" keep_monthly="${11}" profile_name="${12}"
   cat <<EOF
 export RESTIC_REPOSITORY="rclone:syno_backup:/backup/${hostname_tag}"
 export RCLONE_CONFIG_SYNO_BACKUP_TYPE="sftp"
@@ -291,6 +304,7 @@ export BACKUP_EXCLUDES="${excludes_csv}"
 export KEEP_DAILY="${keep_daily}"
 export KEEP_WEEKLY="${keep_weekly}"
 export KEEP_MONTHLY="${keep_monthly}"
+export BACKUP_PROFILE_NAME="${profile_name}"
 EOF
 }
 
@@ -308,7 +322,7 @@ EOF
 render_backup_env_s3() {
   local hostname_tag="$1" endpoint="$2" bucket="$3" access_key="$4" secret_key="$5" \
         password="$6" targets="$7" excludes_csv="$8" \
-        keep_daily="$9" keep_weekly="${10}" keep_monthly="${11}"
+        keep_daily="$9" keep_weekly="${10}" keep_monthly="${11}" profile_name="${12}"
   cat <<EOF
 export RESTIC_REPOSITORY="s3:${endpoint}/${bucket}/${hostname_tag}"
 export AWS_ACCESS_KEY_ID="${access_key}"
@@ -319,6 +333,7 @@ export BACKUP_EXCLUDES="${excludes_csv}"
 export KEEP_DAILY="${keep_daily}"
 export KEEP_WEEKLY="${keep_weekly}"
 export KEEP_MONTHLY="${keep_monthly}"
+export BACKUP_PROFILE_NAME="${profile_name}"
 EOF
 }
 
@@ -595,9 +610,9 @@ cmd_wizard() {
 cmd_setting() {
   require_root
   local parsed
-  parsed=$(parse_long_opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: force dry-run" -- "$@") || die "$parsed"
+  parsed=$(parse_long_opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: force dry-run" -- "$@") || die "$parsed"
 
-  local backend="" targets_csv="" password="" keep_daily="" keep_weekly="" keep_monthly=""
+  local backend="" targets_csv="" password="" keep_daily="" keep_weekly="" keep_monthly="" profile_name=""
   local endpoint="" bucket="" access_key="" secret_key="" host="" port="" user=""
   local force=0 dry_run=0
   local -a excludes=()
@@ -619,6 +634,7 @@ cmd_setting() {
       host) host="$val" ;;
       port) port="$val" ;;
       user) user="$val" ;;
+      profile-name) profile_name="$val" ;;
       force) force=1 ;;
       dry-run) dry_run=1 ;;
     esac
@@ -639,6 +655,7 @@ cmd_setting() {
   local env_bucket="${BACKUP_BUCKET:-}"
   local env_access_key="${BACKUP_ACCESS_KEY:-}"
   local env_secret_key="${BACKUP_SECRET_KEY:-}"
+  local env_profile_name="${BACKUP_PROFILE_NAME:-}"
 
   if [[ -z "$backend" ]]; then
     die "$(render_missing_settings_message)"
@@ -650,7 +667,7 @@ cmd_setting() {
     die "이미 설정이 있습니다: ${BACKUP_ENV_FILE} (덮어쓰려면 setting --force)"
   fi
 
-  local file_targets="" file_keep_daily="" file_keep_weekly="" file_keep_monthly="" file_excludes=""
+  local file_targets="" file_keep_daily="" file_keep_weekly="" file_keep_monthly="" file_excludes="" file_profile_name=""
   if [[ -f "$BACKUP_ENV_FILE" ]]; then
     # shellcheck source=/dev/null
     source "$BACKUP_ENV_FILE"
@@ -659,6 +676,7 @@ cmd_setting() {
     file_keep_weekly="${KEEP_WEEKLY:-}"
     file_keep_monthly="${KEEP_MONTHLY:-}"
     file_excludes="${BACKUP_EXCLUDES:-}"
+    file_profile_name="${BACKUP_PROFILE_NAME:-}"
   fi
 
   targets_csv=$(resolve_value "$targets_csv" "$env_targets" "$file_targets" "$DEFAULT_TARGETS")
@@ -670,6 +688,9 @@ cmd_setting() {
   if ! err=$(validate_positive_int "$keep_daily" "keep-daily"); then die "$err"; fi
   if ! err=$(validate_positive_int "$keep_weekly" "keep-weekly"); then die "$err"; fi
   if ! err=$(validate_positive_int "$keep_monthly" "keep-monthly"); then die "$err"; fi
+
+  profile_name=$(resolve_value "$profile_name" "$env_profile_name" "$file_profile_name" "$(hostname)")
+  if ! err=$(validate_profile_name "$profile_name"); then die "$err"; fi
 
   # excludes는 반복 가능한 --exclude 플래그로만 CLI에서 받으므로 환경변수 계층은 없다.
   # CLI에서 하나도 주지 않았으면 기존 backup.env 값을 재사용하고, 그것도 없으면 기본값.
@@ -699,7 +720,7 @@ cmd_setting() {
     generate_ssh_key_if_missing
 
     local content
-    content=$(render_backup_env_sftp "$(hostname)" "$host" "$port" "$user" "$BACKUP_SSH_KEY" "$password" "$targets_csv" "$excludes_csv" "$keep_daily" "$keep_weekly" "$keep_monthly")
+    content=$(render_backup_env_sftp "$(hostname)" "$host" "$port" "$user" "$BACKUP_SSH_KEY" "$password" "$targets_csv" "$excludes_csv" "$keep_daily" "$keep_weekly" "$keep_monthly" "$profile_name")
     write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
 
     render_sftp_registration_notice "$(cat "${BACKUP_SSH_KEY}.pub")"
@@ -732,7 +753,7 @@ cmd_setting() {
     ensure_restic_dir
 
     local content
-    content=$(render_backup_env_s3 "$(hostname)" "$endpoint" "$bucket" "$access_key" "$secret_key" "$password" "$targets_csv" "$excludes_csv" "$keep_daily" "$keep_weekly" "$keep_monthly")
+    content=$(render_backup_env_s3 "$(hostname)" "$endpoint" "$bucket" "$access_key" "$secret_key" "$password" "$targets_csv" "$excludes_csv" "$keep_daily" "$keep_weekly" "$keep_monthly" "$profile_name")
     write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
 
     log_info "최소권한 버킷 정책을 아래와 같이 적용하세요:"
