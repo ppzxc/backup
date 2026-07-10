@@ -19,7 +19,8 @@ docker compose exec -T app bash -c '
   bash backup.sh install
   # atmoz/sftp 클라이언트 접속을 위한 ssh-keygen은 실제 RHEL에는 기본 포함되지만
   # 이 최소 rockylinux:9 이미지에는 없으므로 테스트 환경에서만 별도 설치한다.
-  dnf install -y openssh-clients
+  # systemd는 resticprofile schedule/unschedule이 만든 유닛 파일을 조회하기 위해 필요하다.
+  dnf install -y openssh-clients systemd
 '
 
 echo "=== S3 시나리오: setting -> init -> run ==="
@@ -39,6 +40,22 @@ docker compose exec -T app bash -c '
   set -euo pipefail
   source /etc/restic/backup.env
   restic snapshots --json | grep -q "\"hostname\""
+'
+
+echo "=== S3: schedule enable -> 생성된 유닛에 비밀값이 없는지 확인 -> disable ==="
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh schedule enable || true
+  # 이 컨테이너는 systemd가 PID 1이 아니라(entrypoint: sleep infinity) resticprofile의
+  # systemctl daemon-reload/enable 호출이 "Failed to connect to bus"로 실패한다.
+  # 하지만 유닛 파일 자체는 그 실패 이전에 이미 쓰여지므로(실측 확인됨), 여기서는
+  # "타이머가 활성화됐는가"가 아니라 "유닛 파일에 비밀값이 새지 않는가"만 검증한다.
+  unit_file=$(find /etc/systemd/system -maxdepth 1 -name "resticprofile-backup@profile-*.service")
+  test -n "$unit_file"
+  grep -q "ISMS Compliance" "$unit_file"
+  ! grep -q "RESTIC_PASSWORD" "$unit_file"
+  ! grep -q "AWS_SECRET_ACCESS_KEY" "$unit_file"
+  bash backup.sh schedule disable || true
 '
 
 echo "=== SFTP 시나리오: setting -> 키 등록 -> init -> run ==="
@@ -79,6 +96,17 @@ docker compose exec -T app bash -c '
   set -euo pipefail
   source /etc/restic/backup.env
   restic snapshots --json | grep -q "\"hostname\""
+'
+
+echo "=== SFTP: schedule enable -> 생성된 유닛에 비밀값이 없는지 확인 -> disable ==="
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh schedule enable || true
+  unit_file=$(find /etc/systemd/system -maxdepth 1 -name "resticprofile-backup@profile-*.service")
+  test -n "$unit_file"
+  grep -q "ISMS Compliance" "$unit_file"
+  ! grep -q "RESTIC_PASSWORD" "$unit_file"
+  bash backup.sh schedule disable || true
 '
 
 echo "=== 모든 통합 테스트 통과 ==="

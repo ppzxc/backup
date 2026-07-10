@@ -6,7 +6,11 @@ BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
 BACKUP_SSH_KEY="${BACKUP_SSH_KEY:-${RESTIC_ETC_DIR}/backup_key}"
 BACKUP_SCRIPT_INSTALL_PATH="${BACKUP_SCRIPT_INSTALL_PATH:-/usr/local/sbin/backup.sh}"
 SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+# resticprofile 마이그레이션(Task 20/22) 이후 아무 cmd_*도 참조하지 않지만, 죽은 코드로
+# 유지 중인 render_service_unit/render_timer_unit의 회귀 테스트 자산과 짝을 맞추기 위해 남긴다.
+# shellcheck disable=SC2034
 SYSTEMD_SERVICE_FILE="${SYSTEMD_UNIT_DIR}/restic-backup.service"
+# shellcheck disable=SC2034
 SYSTEMD_TIMER_FILE="${SYSTEMD_UNIT_DIR}/restic-backup.timer"
 RESTICPROFILE_INSTALL_PATH="${RESTICPROFILE_INSTALL_PATH:-/usr/local/bin/resticprofile}"
 RESTICPROFILE_VERSION="0.33.1"
@@ -615,11 +619,16 @@ cmd_uninstall() {
     esac
   done <<< "$parsed"
 
-  systemd_disable_timer
-  rm -f "$SYSTEMD_SERVICE_FILE" "$SYSTEMD_TIMER_FILE"
+  if [[ -f "$BACKUP_ENV_FILE" ]]; then
+    # shellcheck source=/dev/null
+    source "$BACKUP_ENV_FILE"
+    local profile_name="${BACKUP_PROFILE_NAME:-$(hostname)}"
+    resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" unschedule 2>/dev/null || true
+  fi
 
   if (( purge )); then
     rm -rf "$RESTIC_ETC_DIR"
+    rm -rf "${HOME:-/root}/.cache/restic"
     log_info "uninstall --purge 완료 (${RESTIC_ETC_DIR} 삭제됨)"
   else
     log_info "uninstall 완료 (${RESTIC_ETC_DIR}는 유지됨)"

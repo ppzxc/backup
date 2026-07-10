@@ -7,11 +7,11 @@
 - [ ] `backup.sh setting --backend sftp --host <NAS_IP> --port <PORT> --user <USER> --password <PW>` → `/etc/restic/backup.env`(600), `backup_key`(600)/`backup_key.pub`(644) 생성 확인
 - [ ] 출력된 공개키를 실제 NAS `authorized_keys`에 등록
 - [ ] `backup.sh init` → 저장소 초기화 성공
-- [ ] `backup.sh schedule enable` → `systemctl list-timers`에 `restic-backup.timer` 노출 확인
-- [ ] 타이머 시각을 임시로 1분 뒤로 맞추고 실제로 백업이 도는지 확인(또는 `systemctl start restic-backup.service`로 즉시 트리거)
+- [ ] `backup.sh schedule enable` → `systemctl list-timers`에 `resticprofile-backup@profile-<profile-name>.timer` 노출 확인(Tier 2 컨테이너는 systemd가 PID 1이 아니라 실제 활성화까지는 검증 못 함 — 유닛 파일 내용/비밀값 부재만 자동 검증됨)
+- [ ] 위 타이머를 즉시 트리거해 실제로 백업이 도는지 확인(`systemctl start resticprofile-backup@profile-<profile-name>.service` 또는 시각을 1분 뒤로 맞춤)
 - [ ] `backup.sh status` → 스냅샷/타이머 상태 정상 출력, 비밀번호 미노출 확인
 - [ ] `backup.sh schedule disable` → 타이머 비활성화 확인
-- [ ] `backup.sh uninstall --purge` → `/etc/restic` 삭제, 유닛 파일 제거 확인
+- [ ] `backup.sh uninstall --purge` → `/etc/restic` 삭제, 유닛 파일 제거(resticprofile unschedule) 확인
 
 ## S3 경로
 - [ ] `backup.sh install` → 위와 동일
