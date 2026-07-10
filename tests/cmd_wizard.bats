@@ -39,6 +39,26 @@ setup() {
   [[ "$output" == *"저장소 위치:"* ]]
 }
 
+@test "wizard's sftp prompts stay in sync with backend_sftp_resolve's field set" {
+  local -A cli=() env=() file=() fields=()
+  backend_sftp_resolve cli env file fields
+  local expected actual
+  expected=$(printf '%s\n' "${!fields[@]}" | sort)
+  actual=$(declare -f cmd_wizard | grep 'setting_args+=(--host' \
+    | grep -oE -- '--[a-z-]+' | sed 's/^--//; s/-/_/g' | sort)
+  [ "$actual" = "$expected" ]
+}
+
+@test "wizard's s3 prompts stay in sync with backend_s3_resolve's field set" {
+  local -A cli=() env=() file=() fields=()
+  backend_s3_resolve cli env file fields
+  local expected actual
+  expected=$(printf '%s\n' "${!fields[@]}" | sort)
+  actual=$(declare -f cmd_wizard | grep 'setting_args+=(--endpoint' \
+    | grep -oE -- '--[a-z-]+' | sed 's/^--//; s/-/_/g' | sort)
+  [ "$actual" = "$expected" ]
+}
+
 @test "wizard answering no at the confirm step cancels without applying settings" {
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
