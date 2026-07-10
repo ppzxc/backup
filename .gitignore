@@ -2,6 +2,7 @@
 !/backup.sh
 !/AGENTS.md
 !/CLAUDE.md
+!/README.md
 !/.gitignore
 !/tests/
 !/tests/**
