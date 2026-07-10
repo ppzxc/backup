@@ -453,6 +453,30 @@ cmd_status() {
   printf '%s 권한: %s\n' "$BACKUP_ENV_FILE" "$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '?')"
 }
 
+cmd_uninstall() {
+  require_root
+  local parsed
+  parsed=$(parse_long_opts "purge" -- "$@") || die "$parsed"
+
+  local purge=0
+  local key val
+  while IFS=$'\t' read -r key val; do
+    case "$key" in
+      purge) purge=1 ;;
+    esac
+  done <<< "$parsed"
+
+  systemd_disable_timer
+  rm -f "$SYSTEMD_SERVICE_FILE" "$SYSTEMD_TIMER_FILE"
+
+  if (( purge )); then
+    rm -rf "$RESTIC_ETC_DIR"
+    log_info "uninstall --purge 완료 (${RESTIC_ETC_DIR} 삭제됨)"
+  else
+    log_info "uninstall 완료 (${RESTIC_ETC_DIR}는 유지됨)"
+  fi
+}
+
 cmd_setting() {
   require_root
   local parsed
@@ -664,8 +688,13 @@ main() {
       cmd_status "$@"
       return $?
       ;;
-    uninstall|wizard)
-      : # 이후 태스크에서 각 cmd_* 로 분기
+    uninstall)
+      shift
+      cmd_uninstall "$@"
+      return $?
+      ;;
+    wizard)
+      : # Task 15에서 연결
       ;;
     *)
       render_help
