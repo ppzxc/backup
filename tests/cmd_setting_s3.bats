@@ -7,7 +7,8 @@ setup() {
 }
 
 @test "render_backup_env_s3 produces expected export lines" {
-  run render_backup_env_s3 "host1" "https://s3.example.com" "my-bucket" "AKIA123" "secretkey" "repopass" "/var/log" "/tmp/*,/var/tmp/*" "7" "4" "12" "web01"
+  local -A policy=([password]="repopass" [targets]="/var/log" [excludes_csv]="/tmp/*,/var/tmp/*" [keep_daily]="7" [keep_weekly]="4" [keep_monthly]="12" [profile_name]="web01")
+  run render_backup_env_s3 "host1" "https://s3.example.com" "my-bucket" "AKIA123" "secretkey" policy
   [[ "$output" == *'export RESTIC_REPOSITORY="s3:https://s3.example.com/my-bucket/host1"'* ]]
   [[ "$output" == *'export AWS_ACCESS_KEY_ID="AKIA123"'* ]]
   [[ "$output" == *'export AWS_SECRET_ACCESS_KEY="secretkey"'* ]]

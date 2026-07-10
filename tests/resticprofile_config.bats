@@ -14,8 +14,13 @@ setup() {
   export RCLONE_CONFIG_SYNO_BACKUP_USER="backup_restic"
   export RCLONE_CONFIG_SYNO_BACKUP_PORT="22"
   export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="/etc/restic/backup_key"
+  export BACKUP_TARGETS="/var/log,/etc"
+  export BACKUP_EXCLUDES="/tmp/*"
+  export KEEP_DAILY="7"
+  export KEEP_WEEKLY="4"
+  export KEEP_MONTHLY="12"
 
-  run render_resticprofile_config "web01" "*-*-* 02:00:00" "/var/log,/etc" "/tmp/*" "7" "4" "12"
+  run render_resticprofile_config "web01" "*-*-* 02:00:00"
   [ "$status" -eq 0 ]
   [[ "$output" == *'repository: "rclone:syno_backup:/backup/host1"'* ]]
   [[ "$output" == *'force-inactive-lock: true'* ]]
@@ -41,8 +46,13 @@ setup() {
   export RESTIC_PASSWORD="super-secret"
   export AWS_ACCESS_KEY_ID="AKIA123"
   export AWS_SECRET_ACCESS_KEY="secretkey"
+  export BACKUP_TARGETS="/var/log"
+  export BACKUP_EXCLUDES=""
+  export KEEP_DAILY="7"
+  export KEEP_WEEKLY="4"
+  export KEEP_MONTHLY="12"
 
-  run render_resticprofile_config "web01" "*-*-* 02:00:00" "/var/log" "" "7" "4" "12"
+  run render_resticprofile_config "web01" "*-*-* 02:00:00"
   [ "$status" -eq 0 ]
   [[ "$output" == *'AWS_ACCESS_KEY_ID: "AKIA123"'* ]]
   [[ "$output" == *'AWS_SECRET_ACCESS_KEY: "secretkey"'* ]]

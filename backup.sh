@@ -58,6 +58,18 @@ resolve_value() {
   return 1
 }
 
+require_backup_env() {
+  if [[ ! -f "$BACKUP_ENV_FILE" ]]; then
+    die "$(render_missing_settings_message)"
+  fi
+  # shellcheck source=/dev/null
+  source "$BACKUP_ENV_FILE"
+}
+
+resolve_profile_name() {
+  printf '%s' "${BACKUP_PROFILE_NAME:-$(hostname)}"
+}
+
 validate_backend() {
   local value="$1"
   case "$value" in
@@ -269,9 +281,24 @@ WantedBy=timers.target
 EOF
 }
 
+resticprofile_timer_unit_name() {
+  printf 'resticprofile-backup@profile-%s.timer' "$1"
+}
+
+write_resticprofile_assets() {
+  local profile_name="$1" on_calendar="$2"
+  write_secure_file "$RESTICPROFILE_UNIT_TEMPLATE" 644 "$(render_resticprofile_unit_template)"
+  write_secure_file "$RESTICPROFILE_TIMER_TEMPLATE" 644 "$(render_resticprofile_timer_template)"
+  write_secure_file "$RESTICPROFILE_CONFIG_FILE" 600 "$(render_resticprofile_config "$profile_name" "$on_calendar")"
+}
+
 render_resticprofile_config() {
-  local profile_name="$1" on_calendar="$2" targets_csv="$3" excludes_csv="$4" \
-        keep_daily="$5" keep_weekly="$6" keep_monthly="$7"
+  local profile_name="$1" on_calendar="$2"
+  local targets_csv="${BACKUP_TARGETS:-}" excludes_csv="${BACKUP_EXCLUDES:-}"
+  # KEEP_DAILY/KEEP_WEEKLY/KEEP_MONTHLY are exported by the caller having
+  # sourced backup.env, not assigned in this function - shellcheck can't see that.
+  # shellcheck disable=SC2153
+  local keep_daily="${KEEP_DAILY}" keep_weekly="${KEEP_WEEKLY}" keep_monthly="${KEEP_MONTHLY}"
   local -a sources=() excludes=()
   IFS=',' read -ra sources <<< "$targets_csv"
   if [[ -n "$excludes_csv" ]]; then
@@ -419,9 +446,8 @@ EOF
 }
 
 render_backup_env_sftp() {
-  local hostname_tag="$1" host="$2" port="$3" user="$4" ssh_key_path="$5" \
-        password="$6" targets="$7" excludes_csv="$8" \
-        keep_daily="$9" keep_weekly="${10}" keep_monthly="${11}" profile_name="${12}"
+  local hostname_tag="$1" host="$2" port="$3" user="$4" ssh_key_path="$5"
+  local -n policy_ref="$6"
   cat <<EOF
 export RESTIC_REPOSITORY="rclone:syno_backup:/backup/${hostname_tag}"
 export RCLONE_CONFIG_SYNO_BACKUP_TYPE="sftp"
@@ -429,13 +455,13 @@ export RCLONE_CONFIG_SYNO_BACKUP_HOST="${host}"
 export RCLONE_CONFIG_SYNO_BACKUP_USER="${user}"
 export RCLONE_CONFIG_SYNO_BACKUP_PORT="${port}"
 export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="${ssh_key_path}"
-export RESTIC_PASSWORD="${password}"
-export BACKUP_TARGETS="${targets}"
-export BACKUP_EXCLUDES="${excludes_csv}"
-export KEEP_DAILY="${keep_daily}"
-export KEEP_WEEKLY="${keep_weekly}"
-export KEEP_MONTHLY="${keep_monthly}"
-export BACKUP_PROFILE_NAME="${profile_name}"
+export RESTIC_PASSWORD="${policy_ref[password]}"
+export BACKUP_TARGETS="${policy_ref[targets]}"
+export BACKUP_EXCLUDES="${policy_ref[excludes_csv]}"
+export KEEP_DAILY="${policy_ref[keep_daily]}"
+export KEEP_WEEKLY="${policy_ref[keep_weekly]}"
+export KEEP_MONTHLY="${policy_ref[keep_monthly]}"
+export BACKUP_PROFILE_NAME="${policy_ref[profile_name]}"
 EOF
 }
 
@@ -451,20 +477,19 @@ EOF
 }
 
 render_backup_env_s3() {
-  local hostname_tag="$1" endpoint="$2" bucket="$3" access_key="$4" secret_key="$5" \
-        password="$6" targets="$7" excludes_csv="$8" \
-        keep_daily="$9" keep_weekly="${10}" keep_monthly="${11}" profile_name="${12}"
+  local hostname_tag="$1" endpoint="$2" bucket="$3" access_key="$4" secret_key="$5"
+  local -n policy_ref="$6"
   cat <<EOF
 export RESTIC_REPOSITORY="s3:${endpoint}/${bucket}/${hostname_tag}"
 export AWS_ACCESS_KEY_ID="${access_key}"
 export AWS_SECRET_ACCESS_KEY="${secret_key}"
-export RESTIC_PASSWORD="${password}"
-export BACKUP_TARGETS="${targets}"
-export BACKUP_EXCLUDES="${excludes_csv}"
-export KEEP_DAILY="${keep_daily}"
-export KEEP_WEEKLY="${keep_weekly}"
-export KEEP_MONTHLY="${keep_monthly}"
-export BACKUP_PROFILE_NAME="${profile_name}"
+export RESTIC_PASSWORD="${policy_ref[password]}"
+export BACKUP_TARGETS="${policy_ref[targets]}"
+export BACKUP_EXCLUDES="${policy_ref[excludes_csv]}"
+export KEEP_DAILY="${policy_ref[keep_daily]}"
+export KEEP_WEEKLY="${policy_ref[keep_weekly]}"
+export KEEP_MONTHLY="${policy_ref[keep_monthly]}"
+export BACKUP_PROFILE_NAME="${policy_ref[profile_name]}"
 EOF
 }
 
@@ -490,12 +515,7 @@ restic_is_initialized() {
 
 cmd_init() {
   require_root
-  if [[ ! -f "$BACKUP_ENV_FILE" ]]; then
-    die "$(render_missing_settings_message)"
-  fi
-
-  # shellcheck source=/dev/null
-  source "$BACKUP_ENV_FILE"
+  require_backup_env
 
   if restic_is_initialized; then
     log_info "이미 초기화된 저장소입니다. 스킵합니다."
@@ -520,12 +540,8 @@ cmd_schedule() {
   local action="${1:-}"
   shift || true
 
-  if [[ ! -f "$BACKUP_ENV_FILE" ]]; then
-    die "$(render_missing_settings_message)"
-  fi
-  # shellcheck source=/dev/null
-  source "$BACKUP_ENV_FILE"
-  local profile_name="${BACKUP_PROFILE_NAME:-$(hostname)}"
+  require_backup_env
+  local profile_name; profile_name=$(resolve_profile_name)
 
   case "$action" in
     enable)
@@ -539,13 +555,7 @@ cmd_schedule() {
         esac
       done <<< "$parsed"
 
-      write_secure_file "$RESTICPROFILE_UNIT_TEMPLATE" 644 "$(render_resticprofile_unit_template)"
-      write_secure_file "$RESTICPROFILE_TIMER_TEMPLATE" 644 "$(render_resticprofile_timer_template)"
-      # KEEP_DAILY/KEEP_WEEKLY/KEEP_MONTHLY are exported by sourcing backup.env above,
-      # not assigned in this function - shellcheck can't see that.
-      # shellcheck disable=SC2153
-      write_secure_file "$RESTICPROFILE_CONFIG_FILE" 600 \
-        "$(render_resticprofile_config "$profile_name" "$on_calendar" "${BACKUP_TARGETS:-}" "${BACKUP_EXCLUDES:-}" "${KEEP_DAILY}" "${KEEP_WEEKLY}" "${KEEP_MONTHLY}")"
+      write_resticprofile_assets "$profile_name" "$on_calendar"
       resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" schedule
       log_info "schedule enable 완료 (${on_calendar})"
       ;;
@@ -560,21 +570,10 @@ cmd_schedule() {
 }
 
 cmd_run() {
-  if [[ ! -f "$BACKUP_ENV_FILE" ]]; then
-    die "$(render_missing_settings_message)"
-  fi
+  require_backup_env
+  local profile_name; profile_name=$(resolve_profile_name)
 
-  # shellcheck source=/dev/null
-  source "$BACKUP_ENV_FILE"
-  local profile_name="${BACKUP_PROFILE_NAME:-$(hostname)}"
-
-  write_secure_file "$RESTICPROFILE_UNIT_TEMPLATE" 644 "$(render_resticprofile_unit_template)"
-  write_secure_file "$RESTICPROFILE_TIMER_TEMPLATE" 644 "$(render_resticprofile_timer_template)"
-  # KEEP_DAILY/KEEP_WEEKLY/KEEP_MONTHLY are exported by sourcing backup.env above,
-  # not a typo of cmd_setting's lowercase keep_daily/keep_weekly/keep_monthly locals.
-  # shellcheck disable=SC2153
-  write_secure_file "$RESTICPROFILE_CONFIG_FILE" 600 \
-    "$(render_resticprofile_config "$profile_name" "$DEFAULT_ON_CALENDAR" "${BACKUP_TARGETS:-}" "${BACKUP_EXCLUDES:-}" "${KEEP_DAILY}" "${KEEP_WEEKLY}" "${KEEP_MONTHLY}")"
+  write_resticprofile_assets "$profile_name" "$DEFAULT_ON_CALENDAR"
 
   if resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" backup; then
     log_info "백업 성공"
@@ -584,12 +583,7 @@ cmd_run() {
 }
 
 cmd_status() {
-  if [[ ! -f "$BACKUP_ENV_FILE" ]]; then
-    die "$(render_missing_settings_message)"
-  fi
-
-  # shellcheck source=/dev/null
-  source "$BACKUP_ENV_FILE"
+  require_backup_env
 
   printf '저장소 위치: %s\n' "${RESTIC_REPOSITORY:-알 수 없음}"
   printf '백업 대상: %s\n' "${BACKUP_TARGETS:-알 수 없음}"
@@ -597,9 +591,9 @@ cmd_status() {
   printf '최근 스냅샷:\n'
   restic snapshots --json 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
 
-  local profile_name="${BACKUP_PROFILE_NAME:-$(hostname)}"
+  local profile_name; profile_name=$(resolve_profile_name)
   local timer_state
-  timer_state=$(systemctl is-active "resticprofile-backup@profile-${profile_name}.timer" 2>/dev/null) || true
+  timer_state=$(systemctl is-active "$(resticprofile_timer_unit_name "$profile_name")" 2>/dev/null) || true
   printf '타이머 상태: %s\n' "${timer_state:-unknown}"
 
   printf '%s 권한: %s\n' "$RESTIC_ETC_DIR" "$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '?')"
@@ -622,7 +616,7 @@ cmd_uninstall() {
   if [[ -f "$BACKUP_ENV_FILE" ]]; then
     # shellcheck source=/dev/null
     source "$BACKUP_ENV_FILE"
-    local profile_name="${BACKUP_PROFILE_NAME:-$(hostname)}"
+    local profile_name; profile_name=$(resolve_profile_name)
     resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" unschedule 2>/dev/null || true
   fi
 
@@ -853,8 +847,13 @@ cmd_setting() {
     ensure_restic_dir
     generate_ssh_key_if_missing
 
+    local -A policy=(
+      [password]="$password" [targets]="$targets_csv" [excludes_csv]="$excludes_csv"
+      [keep_daily]="$keep_daily" [keep_weekly]="$keep_weekly" [keep_monthly]="$keep_monthly"
+      [profile_name]="$profile_name"
+    )
     local content
-    content=$(render_backup_env_sftp "$(hostname)" "$host" "$port" "$user" "$BACKUP_SSH_KEY" "$password" "$targets_csv" "$excludes_csv" "$keep_daily" "$keep_weekly" "$keep_monthly" "$profile_name")
+    content=$(render_backup_env_sftp "$(hostname)" "$host" "$port" "$user" "$BACKUP_SSH_KEY" policy)
     write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
 
     render_sftp_registration_notice "$(cat "${BACKUP_SSH_KEY}.pub")"
@@ -886,8 +885,16 @@ cmd_setting() {
 
     ensure_restic_dir
 
+    # policy is read via render_backup_env_s3's `local -n policy_ref="$6"` nameref,
+    # not directly in this scope - shellcheck can't see across that indirection.
+    # shellcheck disable=SC2034
+    local -A policy=(
+      [password]="$password" [targets]="$targets_csv" [excludes_csv]="$excludes_csv"
+      [keep_daily]="$keep_daily" [keep_weekly]="$keep_weekly" [keep_monthly]="$keep_monthly"
+      [profile_name]="$profile_name"
+    )
     local content
-    content=$(render_backup_env_s3 "$(hostname)" "$endpoint" "$bucket" "$access_key" "$secret_key" "$password" "$targets_csv" "$excludes_csv" "$keep_daily" "$keep_weekly" "$keep_monthly" "$profile_name")
+    content=$(render_backup_env_s3 "$(hostname)" "$endpoint" "$bucket" "$access_key" "$secret_key" policy)
     write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
 
     log_info "최소권한 버킷 정책을 아래와 같이 적용하세요:"
