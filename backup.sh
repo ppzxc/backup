@@ -186,21 +186,6 @@ render_placeholder_or_value() {
   fi
 }
 
-render_setting_hint_sftp() {
-  local host="$1" port="$2" user="$3"
-  printf "backup.sh setting --backend sftp --host %s --port %s --user %s --password '<REPO_PASSWORD>'\\n" \
-    "$(render_placeholder_or_value "$host" "NAS_IP")" \
-    "$(render_placeholder_or_value "$port" "PORT")" \
-    "$(render_placeholder_or_value "$user" "NAS_USER")"
-}
-
-render_setting_hint_s3() {
-  local endpoint="$1" bucket="$2"
-  printf "backup.sh setting --backend s3 --endpoint %s --bucket %s --access-key <ACCESS_KEY> --secret-key '<SECRET_KEY>' --password '<REPO_PASSWORD>'\\n" \
-    "$(render_placeholder_or_value "$endpoint" "S3_ENDPOINT")" \
-    "$(render_placeholder_or_value "$bucket" "BUCKET_NAME")"
-}
-
 render_missing_settings_message() {
   cat <<'EOF'
 [!] 설정이 없습니다. 먼저 아래 중 하나로 설정을 완료하세요:
@@ -445,16 +430,55 @@ EOF
   log_info "install 완료"
 }
 
-render_backup_env_sftp() {
-  local hostname_tag="$1" host="$2" port="$3" user="$4" ssh_key_path="$5"
-  local -n policy_ref="$6"
+# --- sftp backend adapter ---
+# 두 backend(sftp/s3)가 공유하는 계약: env_vars/resolve/validate/prepare/render_env/render_notice.
+# cmd_setting은 이 6개 함수만 알면 되고, 백엔드별 필드 지식은 각 adapter 블록 안에 갇혀 있다.
+
+backend_sftp_env_vars() {
+  printf 'host\tBACKUP_HOST\nport\tBACKUP_PORT\nuser\tBACKUP_USER\n'
+}
+
+render_setting_hint_sftp() {
+  local host="$1" port="$2" user="$3"
+  printf "backup.sh setting --backend sftp --host %s --port %s --user %s --password '<REPO_PASSWORD>'\\n" \
+    "$(render_placeholder_or_value "$host" "NAS_IP")" \
+    "$(render_placeholder_or_value "$port" "PORT")" \
+    "$(render_placeholder_or_value "$user" "NAS_USER")"
+}
+
+backend_sftp_resolve() {
+  local -n cli_ref="$1" env_ref="$2" file_ref="$3" fields_ref="$4"
+  fields_ref[host]=$(resolve_value "${cli_ref[host]:-}" "${env_ref[host]:-}" "${file_ref[host]:-}" "") || true
+  fields_ref[port]=$(resolve_value "${cli_ref[port]:-}" "${env_ref[port]:-}" "${file_ref[port]:-}" "$DEFAULT_SFTP_PORT") || true
+  fields_ref[user]=$(resolve_value "${cli_ref[user]:-}" "${env_ref[user]:-}" "${file_ref[user]:-}" "") || true
+}
+
+backend_sftp_validate() {
+  # fields_ref는 nameref로 연관 배열을 가리키는데, 같은 변수명이 다른 함수에서도
+  # nameref로 재사용되다 보니 shellcheck가 스칼라/배열 재할당으로 오인한다.
+  # shellcheck disable=SC2178
+  local -n fields_ref="$1"
+  if [[ -z "${fields_ref[host]:-}" || -z "${fields_ref[user]:-}" ]]; then
+    render_setting_hint_sftp "${fields_ref[host]:-}" "${fields_ref[port]:-}" "${fields_ref[user]:-}"
+    return 1
+  fi
+  validate_port "${fields_ref[port]:-}"
+}
+
+backend_sftp_prepare() {
+  generate_ssh_key_if_missing
+}
+
+backend_sftp_render_env() {
+  local hostname_tag="$1"
+  local -n fields_ref="$2" policy_ref="$3"
   cat <<EOF
 export RESTIC_REPOSITORY="rclone:syno_backup:/backup/${hostname_tag}"
 export RCLONE_CONFIG_SYNO_BACKUP_TYPE="sftp"
-export RCLONE_CONFIG_SYNO_BACKUP_HOST="${host}"
-export RCLONE_CONFIG_SYNO_BACKUP_USER="${user}"
-export RCLONE_CONFIG_SYNO_BACKUP_PORT="${port}"
-export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="${ssh_key_path}"
+export RCLONE_CONFIG_SYNO_BACKUP_HOST="${fields_ref[host]}"
+export RCLONE_CONFIG_SYNO_BACKUP_USER="${fields_ref[user]}"
+export RCLONE_CONFIG_SYNO_BACKUP_PORT="${fields_ref[port]}"
+export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="${BACKUP_SSH_KEY}"
 export RESTIC_PASSWORD="${policy_ref[password]}"
 export BACKUP_TARGETS="${policy_ref[targets]}"
 export BACKUP_EXCLUDES="${policy_ref[excludes_csv]}"
@@ -465,24 +489,66 @@ export BACKUP_PROFILE_NAME="${policy_ref[profile_name]}"
 EOF
 }
 
-render_sftp_registration_notice() {
-  local pubkey_content="$1"
+backend_sftp_render_notice() {
+  # shellcheck disable=SC2034
+  # fields_ref는 s3 adapter와 시그니처를 맞추기 위한 것으로, sftp 공개키 안내에는 필요 없다.
+  local -n fields_ref="$1"
   cat <<EOF
 아래 공개키를 NAS의 authorized_keys(또는 File Station)에 등록하세요:
 ----------------------------------------------------------
-${pubkey_content}
+$(cat "${BACKUP_SSH_KEY}.pub")
 ----------------------------------------------------------
 등록 후 'backup.sh init'을 실행하세요.
 EOF
 }
 
-render_backup_env_s3() {
-  local hostname_tag="$1" endpoint="$2" bucket="$3" access_key="$4" secret_key="$5"
-  local -n policy_ref="$6"
+# --- s3 backend adapter ---
+
+backend_s3_env_vars() {
+  printf 'endpoint\tBACKUP_ENDPOINT\nbucket\tBACKUP_BUCKET\naccess_key\tBACKUP_ACCESS_KEY\nsecret_key\tBACKUP_SECRET_KEY\n'
+}
+
+render_setting_hint_s3() {
+  local endpoint="$1" bucket="$2"
+  printf "backup.sh setting --backend s3 --endpoint %s --bucket %s --access-key <ACCESS_KEY> --secret-key '<SECRET_KEY>' --password '<REPO_PASSWORD>'\\n" \
+    "$(render_placeholder_or_value "$endpoint" "S3_ENDPOINT")" \
+    "$(render_placeholder_or_value "$bucket" "BUCKET_NAME")"
+}
+
+backend_s3_resolve() {
+  local -n cli_ref="$1" env_ref="$2" file_ref="$3" fields_ref="$4"
+  fields_ref[endpoint]=$(resolve_value "${cli_ref[endpoint]:-}" "${env_ref[endpoint]:-}" "${file_ref[endpoint]:-}" "") || true
+  fields_ref[bucket]=$(resolve_value "${cli_ref[bucket]:-}" "${env_ref[bucket]:-}" "${file_ref[bucket]:-}" "") || true
+  fields_ref[access_key]=$(resolve_value "${cli_ref[access_key]:-}" "${env_ref[access_key]:-}" "${file_ref[access_key]:-}" "") || true
+  fields_ref[secret_key]=$(resolve_value "${cli_ref[secret_key]:-}" "${env_ref[secret_key]:-}" "${file_ref[secret_key]:-}" "") || true
+}
+
+backend_s3_validate() {
+  # 위 backend_sftp_validate와 같은 이유의 nameref 오탐.
+  # shellcheck disable=SC2178
+  local -n fields_ref="$1"
+  if [[ -z "${fields_ref[endpoint]:-}" || -z "${fields_ref[bucket]:-}" ]]; then
+    render_setting_hint_s3 "${fields_ref[endpoint]:-}" "${fields_ref[bucket]:-}"
+    return 1
+  fi
+  if [[ -z "${fields_ref[access_key]:-}" || -z "${fields_ref[secret_key]:-}" ]]; then
+    render_setting_hint_s3 "${fields_ref[endpoint]:-}" "${fields_ref[bucket]:-}"
+    return 1
+  fi
+  return 0
+}
+
+backend_s3_prepare() {
+  :
+}
+
+backend_s3_render_env() {
+  local hostname_tag="$1"
+  local -n fields_ref="$2" policy_ref="$3"
   cat <<EOF
-export RESTIC_REPOSITORY="s3:${endpoint}/${bucket}/${hostname_tag}"
-export AWS_ACCESS_KEY_ID="${access_key}"
-export AWS_SECRET_ACCESS_KEY="${secret_key}"
+export RESTIC_REPOSITORY="s3:${fields_ref[endpoint]}/${fields_ref[bucket]}/${hostname_tag}"
+export AWS_ACCESS_KEY_ID="${fields_ref[access_key]}"
+export AWS_SECRET_ACCESS_KEY="${fields_ref[secret_key]}"
 export RESTIC_PASSWORD="${policy_ref[password]}"
 export BACKUP_TARGETS="${policy_ref[targets]}"
 export BACKUP_EXCLUDES="${policy_ref[excludes_csv]}"
@@ -507,6 +573,12 @@ render_s3_bucket_policy() {
   ]
 }
 EOF
+}
+
+backend_s3_render_notice() {
+  local -n fields_ref="$1"
+  printf '최소권한 버킷 정책을 아래와 같이 적용하세요:\n'
+  render_s3_bucket_policy "${fields_ref[bucket]}"
 }
 
 restic_is_initialized() {
@@ -741,9 +813,9 @@ cmd_setting() {
   parsed=$(parse_long_opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: force dry-run" -- "$@") || die "$parsed"
 
   local backend="" targets_csv="" password="" keep_daily="" keep_weekly="" keep_monthly="" profile_name=""
-  local endpoint="" bucket="" access_key="" secret_key="" host="" port="" user=""
   local force=0 dry_run=0
   local -a excludes=()
+  local -A cli=()
 
   local key val
   while IFS=$'\t' read -r key val; do
@@ -755,35 +827,18 @@ cmd_setting() {
       keep-daily) keep_daily="$val" ;;
       keep-weekly) keep_weekly="$val" ;;
       keep-monthly) keep_monthly="$val" ;;
-      endpoint) endpoint="$val" ;;
-      bucket) bucket="$val" ;;
-      access-key) access_key="$val" ;;
-      secret-key) secret_key="$val" ;;
-      host) host="$val" ;;
-      port) port="$val" ;;
-      user) user="$val" ;;
       profile-name) profile_name="$val" ;;
       force) force=1 ;;
       dry-run) dry_run=1 ;;
+      endpoint) cli[endpoint]="$val" ;;
+      bucket) cli[bucket]="$val" ;;
+      access-key) cli[access_key]="$val" ;;
+      secret-key) cli[secret_key]="$val" ;;
+      host) cli[host]="$val" ;;
+      port) cli[port]="$val" ;;
+      user) cli[user]="$val" ;;
     esac
   done <<< "$parsed"
-
-  # 실제 사용자가 export한 환경변수는 backup.env를 source하기 전에 미리 캡처해둔다.
-  # (source 이후에는 같은 변수명이 파일 값으로 덮어써지므로, 미리 캡처하지 않으면
-  #  "환경변수 값"과 "기존 backup.env 값"을 구분할 수 없다.)
-  local env_targets="${BACKUP_TARGETS:-}"
-  local env_keep_daily="${KEEP_DAILY:-}"
-  local env_keep_weekly="${KEEP_WEEKLY:-}"
-  local env_keep_monthly="${KEEP_MONTHLY:-}"
-  local env_password="${BACKUP_PASSWORD:-}"
-  local env_host="${BACKUP_HOST:-}"
-  local env_port="${BACKUP_PORT:-}"
-  local env_user="${BACKUP_USER:-}"
-  local env_endpoint="${BACKUP_ENDPOINT:-}"
-  local env_bucket="${BACKUP_BUCKET:-}"
-  local env_access_key="${BACKUP_ACCESS_KEY:-}"
-  local env_secret_key="${BACKUP_SECRET_KEY:-}"
-  local env_profile_name="${BACKUP_PROFILE_NAME:-}"
 
   if [[ -z "$backend" ]]; then
     die "$(render_missing_settings_message)"
@@ -794,6 +849,27 @@ cmd_setting() {
   if [[ -f "$BACKUP_ENV_FILE" && "$force" != 1 ]]; then
     die "이미 설정이 있습니다: ${BACKUP_ENV_FILE} (덮어쓰려면 setting --force)"
   fi
+
+  # 실제 사용자가 export한 환경변수는 backup.env를 source하기 전에 미리 캡처해둔다.
+  # (source 이후에는 같은 변수명이 파일 값으로 덮어써지므로, 미리 캡처하지 않으면
+  #  "환경변수 값"과 "기존 backup.env 값"을 구분할 수 없다.)
+  local env_targets="${BACKUP_TARGETS:-}"
+  local env_keep_daily="${KEEP_DAILY:-}"
+  local env_keep_weekly="${KEEP_WEEKLY:-}"
+  local env_keep_monthly="${KEEP_MONTHLY:-}"
+  local env_password="${BACKUP_PASSWORD:-}"
+  local env_profile_name="${BACKUP_PROFILE_NAME:-}"
+
+  # backend 전용 필드의 env-shadow는 adapter의 env_vars가 알려주는 이름만큼만 캡처한다.
+  # cmd_setting은 "어떤 이름을 캡처할지"를 모르고, 그 지식은 adapter 쪽에 남는다.
+  local -A env=()
+  local field_key var_name
+  while IFS=$'\t' read -r field_key var_name; do
+    [[ -z "$field_key" ]] && continue
+    env["$field_key"]="${!var_name:-}"
+  done < <(case "$backend" in sftp) backend_sftp_env_vars ;; s3) backend_s3_env_vars ;; esac)
+
+  local -A file=()
 
   local file_targets="" file_keep_daily="" file_keep_weekly="" file_keep_monthly="" file_excludes="" file_profile_name=""
   if [[ -f "$BACKUP_ENV_FILE" ]]; then
@@ -829,81 +905,50 @@ cmd_setting() {
     excludes_csv=$(IFS=,; printf '%s' "${excludes[*]}")
   fi
 
-  if [[ "$backend" == "sftp" ]]; then
-    host=$(resolve_value "$host" "$env_host" "" "") || true
-    port=$(resolve_value "$port" "$env_port" "" "$DEFAULT_SFTP_PORT") || true
-    user=$(resolve_value "$user" "$env_user" "" "") || true
+  # fields is populated via backend_*_resolve's nameref, not directly in this
+  # scope - shellcheck can't see across that indirection.
+  # shellcheck disable=SC2034
+  local -A fields=()
+  case "$backend" in
+    sftp) backend_sftp_resolve cli env file fields ;;
+    s3) backend_s3_resolve cli env file fields ;;
+  esac
 
-    if [[ -z "$host" || -z "$user" ]]; then
-      die "$(render_setting_hint_sftp "$host" "$port" "$user")"
-    fi
-    if ! err=$(validate_port "$port"); then die "$err"; fi
+  if ! err=$(case "$backend" in sftp) backend_sftp_validate fields ;; s3) backend_s3_validate fields ;; esac); then
+    die "$err"
+  fi
 
-    if (( dry_run )); then
-      log_info "[dry-run] backup.env(sftp) 생성 예정: ${BACKUP_ENV_FILE}"
-      return 0
-    fi
-
-    ensure_restic_dir
-    generate_ssh_key_if_missing
-
-    local -A policy=(
-      [password]="$password" [targets]="$targets_csv" [excludes_csv]="$excludes_csv"
-      [keep_daily]="$keep_daily" [keep_weekly]="$keep_weekly" [keep_monthly]="$keep_monthly"
-      [profile_name]="$profile_name"
-    )
-    local content
-    content=$(render_backup_env_sftp "$(hostname)" "$host" "$port" "$user" "$BACKUP_SSH_KEY" policy)
-    write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
-
-    render_sftp_registration_notice "$(cat "${BACKUP_SSH_KEY}.pub")"
-    log_info "setting(sftp) 완료"
+  if (( dry_run )); then
+    log_info "[dry-run] backup.env(${backend}) 생성 예정: ${BACKUP_ENV_FILE}"
     return 0
   fi
 
-  if [[ "$backend" == "s3" ]]; then
-    # Same `|| true` guard as the sftp branch: resolve_value returns 1 with no
-    # output when every source is empty, and under set -euo pipefail an
-    # unguarded assignment would abort here instead of reaching the emptiness
-    # check below.
-    endpoint=$(resolve_value "$endpoint" "$env_endpoint" "" "") || true
-    bucket=$(resolve_value "$bucket" "$env_bucket" "" "") || true
-    access_key=$(resolve_value "$access_key" "$env_access_key" "" "") || true
-    secret_key=$(resolve_value "$secret_key" "$env_secret_key" "" "") || true
+  ensure_restic_dir
+  case "$backend" in
+    sftp) backend_sftp_prepare ;;
+    s3) backend_s3_prepare ;;
+  esac
 
-    if [[ -z "$endpoint" || -z "$bucket" ]]; then
-      die "$(render_setting_hint_s3 "$endpoint" "$bucket")"
-    fi
-    if [[ -z "$access_key" || -z "$secret_key" ]]; then
-      die "$(render_setting_hint_s3 "$endpoint" "$bucket")"
-    fi
+  # policy is read via backend_*_render_env's nameref, not directly in this
+  # scope - shellcheck can't see across that indirection.
+  # shellcheck disable=SC2034
+  local -A policy=(
+    [password]="$password" [targets]="$targets_csv" [excludes_csv]="$excludes_csv"
+    [keep_daily]="$keep_daily" [keep_weekly]="$keep_weekly" [keep_monthly]="$keep_monthly"
+    [profile_name]="$profile_name"
+  )
+  local content
+  case "$backend" in
+    sftp) content=$(backend_sftp_render_env "$(hostname)" fields policy) ;;
+    s3) content=$(backend_s3_render_env "$(hostname)" fields policy) ;;
+  esac
+  write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
 
-    if (( dry_run )); then
-      log_info "[dry-run] backup.env(s3) 생성 예정: ${BACKUP_ENV_FILE}"
-      return 0
-    fi
-
-    ensure_restic_dir
-
-    # policy is read via render_backup_env_s3's `local -n policy_ref="$6"` nameref,
-    # not directly in this scope - shellcheck can't see across that indirection.
-    # shellcheck disable=SC2034
-    local -A policy=(
-      [password]="$password" [targets]="$targets_csv" [excludes_csv]="$excludes_csv"
-      [keep_daily]="$keep_daily" [keep_weekly]="$keep_weekly" [keep_monthly]="$keep_monthly"
-      [profile_name]="$profile_name"
-    )
-    local content
-    content=$(render_backup_env_s3 "$(hostname)" "$endpoint" "$bucket" "$access_key" "$secret_key" policy)
-    write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
-
-    log_info "최소권한 버킷 정책을 아래와 같이 적용하세요:"
-    render_s3_bucket_policy "$bucket"
-    log_info "setting(s3) 완료"
-    return 0
-  fi
-
-  die "지원하지 않는 backend입니다: ${backend}"
+  case "$backend" in
+    sftp) backend_sftp_render_notice fields ;;
+    s3) backend_s3_render_notice fields ;;
+  esac
+  log_info "setting(${backend}) 완료"
 }
 
 render_help() {
