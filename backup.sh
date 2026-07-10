@@ -176,6 +176,36 @@ render_missing_settings_message() {
 EOF
 }
 
+render_service_unit() {
+  cat <<EOF
+[Unit]
+Description=Restic System Backup Service (ISMS Compliance)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${BACKUP_SCRIPT_INSTALL_PATH} run
+User=root
+Group=root
+Restart=no
+EOF
+}
+
+render_timer_unit() {
+  local on_calendar="$1"
+  cat <<EOF
+[Unit]
+Description=Run Restic Backup on schedule
+
+[Timer]
+OnCalendar=${on_calendar}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
 render_help() {
   cat <<'EOF'
 backup.sh - restic 기반 백업 설치/운영 스크립트
