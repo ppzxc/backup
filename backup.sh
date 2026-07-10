@@ -122,7 +122,7 @@ parse_long_opts() {
         fi
         if [[ "${takes_value[$key]}" == 1 ]]; then
           if [[ $# -lt 2 ]]; then
-            printf '--%s 플래그는 값이 필요합니다\n' "$key"
+            printf -- '--%s 플래그는 값이 필요합니다\n' "$key"
             return 1
           fi
           printf '%s\t%s\n' "$key" "$2"
