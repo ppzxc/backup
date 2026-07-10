@@ -298,6 +298,39 @@ ${pubkey_content}
 EOF
 }
 
+render_backup_env_s3() {
+  local hostname_tag="$1" endpoint="$2" bucket="$3" access_key="$4" secret_key="$5" \
+        password="$6" targets="$7" excludes_csv="$8" \
+        keep_daily="$9" keep_weekly="${10}" keep_monthly="${11}"
+  cat <<EOF
+export RESTIC_REPOSITORY="s3:${endpoint}/${bucket}/${hostname_tag}"
+export AWS_ACCESS_KEY_ID="${access_key}"
+export AWS_SECRET_ACCESS_KEY="${secret_key}"
+export RESTIC_PASSWORD="${password}"
+export BACKUP_TARGETS="${targets}"
+export BACKUP_EXCLUDES="${excludes_csv}"
+export KEEP_DAILY="${keep_daily}"
+export KEEP_WEEKLY="${keep_weekly}"
+export KEEP_MONTHLY="${keep_monthly}"
+EOF
+}
+
+render_s3_bucket_policy() {
+  local bucket="$1"
+  cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket", "s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": ["arn:aws:s3:::${bucket}", "arn:aws:s3:::${bucket}/*"]
+    }
+  ]
+}
+EOF
+}
+
 cmd_setting() {
   require_root
   local parsed
@@ -413,8 +446,41 @@ cmd_setting() {
     return 0
   fi
 
-  # s3 분기는 Task 9에서 추가
-  die "backend 's3'는 아직 구현되지 않았습니다"
+  if [[ "$backend" == "s3" ]]; then
+    # Same `|| true` guard as the sftp branch: resolve_value returns 1 with no
+    # output when every source is empty, and under set -euo pipefail an
+    # unguarded assignment would abort here instead of reaching the emptiness
+    # check below.
+    endpoint=$(resolve_value "$endpoint" "$env_endpoint" "" "") || true
+    bucket=$(resolve_value "$bucket" "$env_bucket" "" "") || true
+    access_key=$(resolve_value "$access_key" "$env_access_key" "" "") || true
+    secret_key=$(resolve_value "$secret_key" "$env_secret_key" "" "") || true
+
+    if [[ -z "$endpoint" || -z "$bucket" ]]; then
+      die "$(render_setting_hint_s3 "$endpoint" "$bucket")"
+    fi
+    if [[ -z "$access_key" || -z "$secret_key" ]]; then
+      die "$(render_setting_hint_s3 "$endpoint" "$bucket")"
+    fi
+
+    if (( dry_run )); then
+      log_info "[dry-run] backup.env(s3) 생성 예정: ${BACKUP_ENV_FILE}"
+      return 0
+    fi
+
+    ensure_restic_dir
+
+    local content
+    content=$(render_backup_env_s3 "$(hostname)" "$endpoint" "$bucket" "$access_key" "$secret_key" "$password" "$targets" "$excludes_csv" "$keep_daily" "$keep_weekly" "$keep_monthly")
+    write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
+
+    log_info "최소권한 버킷 정책을 아래와 같이 적용하세요:"
+    render_s3_bucket_policy "$bucket"
+    log_info "setting(s3) 완료"
+    return 0
+  fi
+
+  die "지원하지 않는 backend입니다: ${backend}"
 }
 
 render_help() {
