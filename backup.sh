@@ -477,6 +477,71 @@ cmd_uninstall() {
   fi
 }
 
+cmd_wizard() {
+  require_root
+
+  if [[ ! -f "$BACKUP_SCRIPT_INSTALL_PATH" ]]; then
+    log_info "패키지를 설치합니다..."
+    cmd_install
+  fi
+
+  printf '백엔드를 선택하세요:\n'
+  printf '  [1] S3 호환 스토리지 - HTTPS 기반 오브젝트 스토리지(AWS S3, MinIO 등)\n'
+  printf '  [2] SFTP(NAS) - SSH로 접속하는 시놀로지 NAS 등\n'
+  printf '선택 (1/2): '
+  local choice
+  read -r choice
+
+  local backend
+  case "$choice" in
+    1) backend="s3" ;;
+    2) backend="sftp" ;;
+    *) die "1 또는 2를 입력하세요" ;;
+  esac
+
+  local -a setting_args=(--backend "$backend" --force)
+
+  if [[ "$backend" == "sftp" ]]; then
+    printf 'NAS_IP: 백업 데이터를 저장할 NAS의 IP 주소입니다.\nNAS IP 주소 입력: '
+    local host; read -r host
+    printf 'PORT: NAS의 SSH/SFTP 포트입니다. Enter로 기본값(%s) 사용.\n포트 입력: ' "$DEFAULT_SFTP_PORT"
+    local port; read -r port
+    port="${port:-$DEFAULT_SFTP_PORT}"
+    printf 'USER: NAS에 접속할 SFTP 계정입니다.\n사용자 입력: '
+    local user; read -r user
+    setting_args+=(--host "$host" --port "$port" --user "$user")
+  else
+    printf 'S3_ENDPOINT: 접속할 S3 호환 엔드포인트 URL입니다.\n엔드포인트 입력: '
+    local endpoint; read -r endpoint
+    printf 'BUCKET: 백업을 저장할 버킷 이름입니다.\n버킷 입력: '
+    local bucket; read -r bucket
+    printf 'ACCESS_KEY: 버킷 접근용 access key입니다.\naccess key 입력: '
+    local access_key; read -r access_key
+    printf 'SECRET_KEY: 버킷 접근용 secret key입니다.\nsecret key 입력: '
+    local secret_key; read -r secret_key
+    setting_args+=(--endpoint "$endpoint" --bucket "$bucket" --access-key "$access_key" --secret-key "$secret_key")
+  fi
+
+  printf '저장소 비밀번호: 분실 시 백업 데이터를 복구할 수 없습니다. 안전한 곳에 별도 보관하세요.\n비밀번호 입력: '
+  local password; read -r password
+  setting_args+=(--password "$password")
+
+  cmd_setting "${setting_args[@]}"
+
+  printf '위 안내(공개키 등록 또는 버킷 정책 적용)를 완료하셨으면 Enter를 누르세요: '
+  local _ack; read -r _ack
+
+  cmd_init
+
+  printf '지금 정기 백업 스케줄을 등록할까요? 기본값은 매일 새벽 2시입니다. [Y/n]: '
+  local schedule_choice; read -r schedule_choice
+  if [[ -z "$schedule_choice" || "$schedule_choice" =~ ^[Yy]$ ]]; then
+    cmd_schedule enable
+  fi
+
+  log_info "wizard 완료. 이후에는 backup.sh run / status / uninstall 을 사용하세요."
+}
+
 cmd_setting() {
   require_root
   local parsed
@@ -694,7 +759,9 @@ main() {
       return $?
       ;;
     wizard)
-      : # Task 15에서 연결
+      shift
+      cmd_wizard "$@"
+      return $?
       ;;
     *)
       render_help
