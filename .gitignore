@@ -6,3 +6,7 @@
 !/.gitignore
 !/tests/
 !/tests/**
+!/docs/
+/docs/*
+!/docs/adr/
+!/docs/adr/**

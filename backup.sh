@@ -5,13 +5,6 @@ RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
 BACKUP_SSH_KEY="${BACKUP_SSH_KEY:-${RESTIC_ETC_DIR}/backup_key}"
 BACKUP_SCRIPT_INSTALL_PATH="${BACKUP_SCRIPT_INSTALL_PATH:-/usr/local/sbin/backup.sh}"
-SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
-# resticprofile 마이그레이션(Task 20/22) 이후 아무 cmd_*도 참조하지 않지만, 죽은 코드로
-# 유지 중인 render_service_unit/render_timer_unit의 회귀 테스트 자산과 짝을 맞추기 위해 남긴다.
-# shellcheck disable=SC2034
-SYSTEMD_SERVICE_FILE="${SYSTEMD_UNIT_DIR}/restic-backup.service"
-# shellcheck disable=SC2034
-SYSTEMD_TIMER_FILE="${SYSTEMD_UNIT_DIR}/restic-backup.timer"
 RESTICPROFILE_INSTALL_PATH="${RESTICPROFILE_INSTALL_PATH:-/usr/local/bin/resticprofile}"
 RESTICPROFILE_VERSION="0.33.1"
 RESTICPROFILE_SHA256="${RESTICPROFILE_SHA256:-1d7027d15e3e2456e585a210f811d0f72ec40f6b3388f00425642ed579165d70}"
@@ -215,36 +208,6 @@ render_missing_settings_message() {
     backup.sh setting --backend s3 --endpoint <S3_ENDPOINT> --bucket <BUCKET_NAME> --access-key <ACCESS_KEY> --secret-key '<SECRET_KEY>' --password '<REPO_PASSWORD>'
 
 자세한 옵션은 'backup.sh --help'를 참고하세요.
-EOF
-}
-
-render_service_unit() {
-  cat <<EOF
-[Unit]
-Description=Restic System Backup Service (ISMS Compliance)
-After=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=${BACKUP_SCRIPT_INSTALL_PATH} run
-User=root
-Group=root
-Restart=no
-EOF
-}
-
-render_timer_unit() {
-  local on_calendar="$1"
-  cat <<EOF
-[Unit]
-Description=Run Restic Backup on schedule
-
-[Timer]
-OnCalendar=${on_calendar}
-Persistent=true
-
-[Install]
-WantedBy=timers.target
 EOF
 }
 
