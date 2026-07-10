@@ -224,6 +224,21 @@ ensure_restic_dir() {
   chmod 700 "$RESTIC_ETC_DIR"
 }
 
+write_secure_file() {
+  local path="$1" mode="$2" content="$3"
+  mkdir -p "$(dirname "$path")"
+  printf '%s\n' "$content" > "$path"
+  chmod "$mode" "$path"
+}
+
+generate_ssh_key_if_missing() {
+  if [[ ! -f "$BACKUP_SSH_KEY" ]]; then
+    ssh-keygen -t ed25519 -f "$BACKUP_SSH_KEY" -N ""
+  fi
+  chmod 600 "$BACKUP_SSH_KEY"
+  chmod 644 "${BACKUP_SSH_KEY}.pub"
+}
+
 cmd_install() {
   require_root
   local parsed
@@ -250,6 +265,153 @@ EOF
   self_install_copy "$0" "$force"
   ensure_restic_dir
   log_info "install 완료"
+}
+
+render_backup_env_sftp() {
+  local hostname_tag="$1" host="$2" port="$3" user="$4" ssh_key_path="$5" \
+        password="$6" targets="$7" excludes_csv="$8" \
+        keep_daily="$9" keep_weekly="${10}" keep_monthly="${11}"
+  cat <<EOF
+export RESTIC_REPOSITORY="rclone:syno_backup:/backup/${hostname_tag}"
+export RCLONE_CONFIG_SYNO_BACKUP_TYPE="sftp"
+export RCLONE_CONFIG_SYNO_BACKUP_HOST="${host}"
+export RCLONE_CONFIG_SYNO_BACKUP_USER="${user}"
+export RCLONE_CONFIG_SYNO_BACKUP_PORT="${port}"
+export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="${ssh_key_path}"
+export RESTIC_PASSWORD="${password}"
+export BACKUP_TARGETS="${targets}"
+export BACKUP_EXCLUDES="${excludes_csv}"
+export KEEP_DAILY="${keep_daily}"
+export KEEP_WEEKLY="${keep_weekly}"
+export KEEP_MONTHLY="${keep_monthly}"
+EOF
+}
+
+render_sftp_registration_notice() {
+  local pubkey_content="$1"
+  cat <<EOF
+아래 공개키를 NAS의 authorized_keys(또는 File Station)에 등록하세요:
+----------------------------------------------------------
+${pubkey_content}
+----------------------------------------------------------
+등록 후 'backup.sh init'을 실행하세요.
+EOF
+}
+
+cmd_setting() {
+  require_root
+  local parsed
+  parsed=$(parse_long_opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: force dry-run" -- "$@") || die "$parsed"
+
+  local backend="" targets="" password="" keep_daily="" keep_weekly="" keep_monthly=""
+  local endpoint="" bucket="" access_key="" secret_key="" host="" port="" user=""
+  local force=0 dry_run=0
+  local -a excludes=()
+
+  local key val
+  while IFS=$'\t' read -r key val; do
+    case "$key" in
+      backend) backend="$val" ;;
+      targets) targets="$val" ;;
+      exclude) excludes+=("$val") ;;
+      password) password="$val" ;;
+      keep-daily) keep_daily="$val" ;;
+      keep-weekly) keep_weekly="$val" ;;
+      keep-monthly) keep_monthly="$val" ;;
+      endpoint) endpoint="$val" ;;
+      bucket) bucket="$val" ;;
+      access-key) access_key="$val" ;;
+      secret-key) secret_key="$val" ;;
+      host) host="$val" ;;
+      port) port="$val" ;;
+      user) user="$val" ;;
+      force) force=1 ;;
+      dry-run) dry_run=1 ;;
+    esac
+  done <<< "$parsed"
+
+  # 실제 사용자가 export한 환경변수는 backup.env를 source하기 전에 미리 캡처해둔다.
+  # (source 이후에는 같은 변수명이 파일 값으로 덮어써지므로, 미리 캡처하지 않으면
+  #  "환경변수 값"과 "기존 backup.env 값"을 구분할 수 없다.)
+  local env_targets="${BACKUP_TARGETS:-}"
+  local env_keep_daily="${KEEP_DAILY:-}"
+  local env_keep_weekly="${KEEP_WEEKLY:-}"
+  local env_keep_monthly="${KEEP_MONTHLY:-}"
+  local env_password="${BACKUP_PASSWORD:-}"
+  local env_host="${BACKUP_HOST:-}"
+  local env_port="${BACKUP_PORT:-}"
+  local env_user="${BACKUP_USER:-}"
+  local env_endpoint="${BACKUP_ENDPOINT:-}"
+  local env_bucket="${BACKUP_BUCKET:-}"
+  local env_access_key="${BACKUP_ACCESS_KEY:-}"
+  local env_secret_key="${BACKUP_SECRET_KEY:-}"
+
+  if [[ -z "$backend" ]]; then
+    die "$(render_missing_settings_message)"
+  fi
+  local err
+  if ! err=$(validate_backend "$backend"); then die "$err"; fi
+
+  if [[ -f "$BACKUP_ENV_FILE" && "$force" != 1 ]]; then
+    die "이미 설정이 있습니다: ${BACKUP_ENV_FILE} (덮어쓰려면 setting --force)"
+  fi
+
+  local file_targets="" file_keep_daily="" file_keep_weekly="" file_keep_monthly=""
+  if [[ -f "$BACKUP_ENV_FILE" ]]; then
+    # shellcheck source=/dev/null
+    source "$BACKUP_ENV_FILE"
+    file_targets="${BACKUP_TARGETS:-}"
+    file_keep_daily="${KEEP_DAILY:-}"
+    file_keep_weekly="${KEEP_WEEKLY:-}"
+    file_keep_monthly="${KEEP_MONTHLY:-}"
+  fi
+
+  targets=$(resolve_value "$targets" "$env_targets" "$file_targets" "$DEFAULT_TARGETS")
+  keep_daily=$(resolve_value "$keep_daily" "$env_keep_daily" "$file_keep_daily" "$DEFAULT_KEEP_DAILY")
+  keep_weekly=$(resolve_value "$keep_weekly" "$env_keep_weekly" "$file_keep_weekly" "$DEFAULT_KEEP_WEEKLY")
+  keep_monthly=$(resolve_value "$keep_monthly" "$env_keep_monthly" "$file_keep_monthly" "$DEFAULT_KEEP_MONTHLY")
+  password=$(resolve_value "$password" "$env_password" "" "") || die "저장소 비밀번호(--password 또는 BACKUP_PASSWORD)가 필요합니다"
+
+  if ! err=$(validate_positive_int "$keep_daily" "keep-daily"); then die "$err"; fi
+  if ! err=$(validate_positive_int "$keep_weekly" "keep-weekly"); then die "$err"; fi
+  if ! err=$(validate_positive_int "$keep_monthly" "keep-monthly"); then die "$err"; fi
+
+  local excludes_csv
+  if [[ ${#excludes[@]} -eq 0 ]]; then
+    excludes_csv="$DEFAULT_EXCLUDES"
+  else
+    excludes_csv=$(IFS=,; printf '%s' "${excludes[*]}")
+  fi
+
+  if [[ "$backend" == "sftp" ]]; then
+    host=$(resolve_value "$host" "$env_host" "" "")
+    port=$(resolve_value "$port" "$env_port" "" "$DEFAULT_SFTP_PORT")
+    user=$(resolve_value "$user" "$env_user" "" "")
+
+    if [[ -z "$host" || -z "$user" ]]; then
+      die "$(render_setting_hint_sftp "$host" "$port" "$user")"
+    fi
+    if ! err=$(validate_port "$port"); then die "$err"; fi
+
+    if (( dry_run )); then
+      log_info "[dry-run] backup.env(sftp) 생성 예정: ${BACKUP_ENV_FILE}"
+      return 0
+    fi
+
+    ensure_restic_dir
+    generate_ssh_key_if_missing
+
+    local content
+    content=$(render_backup_env_sftp "$(hostname)" "$host" "$port" "$user" "$BACKUP_SSH_KEY" "$password" "$targets" "$excludes_csv" "$keep_daily" "$keep_weekly" "$keep_monthly")
+    write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
+
+    render_sftp_registration_notice "$(cat "${BACKUP_SSH_KEY}.pub")"
+    log_info "setting(sftp) 완료"
+    return 0
+  fi
+
+  # s3 분기는 Task 9에서 추가
+  die "backend 's3'는 아직 구현되지 않았습니다"
 }
 
 render_help() {
@@ -286,8 +448,13 @@ main() {
       cmd_install "$@"
       return $?
       ;;
-    setting|init|schedule|run|status|uninstall|wizard)
-      : # 다음 태스크에서 각 cmd_* 로 분기
+    setting)
+      shift
+      cmd_setting "$@"
+      return $?
+      ;;
+    init|schedule|run|status|uninstall|wizard)
+      : # 이후 태스크에서 각 cmd_* 로 분기
       ;;
     *)
       render_help
