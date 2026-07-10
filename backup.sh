@@ -353,6 +353,46 @@ cmd_init() {
   log_info "restic init 완료"
 }
 
+systemd_enable_timer() {
+  systemctl daemon-reload
+  systemctl enable --now restic-backup.timer
+}
+
+systemd_disable_timer() {
+  systemctl disable --now restic-backup.timer 2>/dev/null || true
+}
+
+cmd_schedule() {
+  require_root
+  local action="${1:-}"
+  shift || true
+
+  case "$action" in
+    enable)
+      local parsed
+      parsed=$(parse_long_opts "on-calendar:" -- "$@") || die "$parsed"
+      local on_calendar="$DEFAULT_ON_CALENDAR"
+      while IFS=$'\t' read -r key val; do
+        case "$key" in
+          on-calendar) on_calendar="$val" ;;
+        esac
+      done <<< "$parsed"
+
+      write_secure_file "$SYSTEMD_SERVICE_FILE" 644 "$(render_service_unit)"
+      write_secure_file "$SYSTEMD_TIMER_FILE" 644 "$(render_timer_unit "$on_calendar")"
+      systemd_enable_timer
+      log_info "schedule enable 완료 (${on_calendar})"
+      ;;
+    disable)
+      systemd_disable_timer
+      log_info "schedule disable 완료"
+      ;;
+    *)
+      die "schedule은 'enable' 또는 'disable'만 지원합니다 (입력값: '${action}')"
+      ;;
+  esac
+}
+
 cmd_setting() {
   require_root
   local parsed
@@ -549,7 +589,12 @@ main() {
       cmd_init "$@"
       return $?
       ;;
-    schedule|run|status|uninstall|wizard)
+    schedule)
+      shift
+      cmd_schedule "$@"
+      return $?
+      ;;
+    run|status|uninstall|wizard)
       : # 이후 태스크에서 각 cmd_* 로 분기
       ;;
     *)
