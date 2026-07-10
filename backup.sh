@@ -141,6 +141,41 @@ parse_long_opts() {
   return 0
 }
 
+render_placeholder_or_value() {
+  local value="$1" placeholder="$2"
+  if [[ -n "$value" ]]; then
+    printf '%s' "$value"
+  else
+    printf '<%s>' "$placeholder"
+  fi
+}
+
+render_setting_hint_sftp() {
+  local host="$1" port="$2" user="$3"
+  printf "backup.sh setting --backend sftp --host %s --port %s --user %s --password '<REPO_PASSWORD>'\\n" \
+    "$(render_placeholder_or_value "$host" "NAS_IP")" \
+    "$(render_placeholder_or_value "$port" "PORT")" \
+    "$(render_placeholder_or_value "$user" "NAS_USER")"
+}
+
+render_setting_hint_s3() {
+  local endpoint="$1" bucket="$2"
+  printf "backup.sh setting --backend s3 --endpoint %s --bucket %s --access-key <ACCESS_KEY> --secret-key '<SECRET_KEY>' --password '<REPO_PASSWORD>'\\n" \
+    "$(render_placeholder_or_value "$endpoint" "S3_ENDPOINT")" \
+    "$(render_placeholder_or_value "$bucket" "BUCKET_NAME")"
+}
+
+render_missing_settings_message() {
+  cat <<'EOF'
+[!] 설정이 없습니다. 먼저 아래 중 하나로 설정을 완료하세요:
+
+    backup.sh setting --backend sftp --host <NAS_IP> --port <PORT> --user <NAS_USER> --password '<REPO_PASSWORD>'
+    backup.sh setting --backend s3 --endpoint <S3_ENDPOINT> --bucket <BUCKET_NAME> --access-key <ACCESS_KEY> --secret-key '<SECRET_KEY>' --password '<REPO_PASSWORD>'
+
+자세한 옵션은 'backup.sh --help'를 참고하세요.
+EOF
+}
+
 render_help() {
   cat <<'EOF'
 backup.sh - restic 기반 백업 설치/운영 스크립트
