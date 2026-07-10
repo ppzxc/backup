@@ -427,6 +427,9 @@ cmd_run() {
     die "restic backup 실패"
   fi
 
+  # KEEP_DAILY/KEEP_WEEKLY/KEEP_MONTHLY are exported by sourcing backup.env above,
+  # not a typo of cmd_setting's lowercase keep_daily/keep_weekly/keep_monthly locals.
+  # shellcheck disable=SC2153
   restic forget --keep-daily "${KEEP_DAILY}" --keep-weekly "${KEEP_WEEKLY}" --keep-monthly "${KEEP_MONTHLY}" --prune
   log_info "만료 스냅샷 정리 완료"
 }
@@ -588,7 +591,7 @@ cmd_setting() {
   local parsed
   parsed=$(parse_long_opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: force dry-run" -- "$@") || die "$parsed"
 
-  local backend="" targets="" password="" keep_daily="" keep_weekly="" keep_monthly=""
+  local backend="" targets_csv="" password="" keep_daily="" keep_weekly="" keep_monthly=""
   local endpoint="" bucket="" access_key="" secret_key="" host="" port="" user=""
   local force=0 dry_run=0
   local -a excludes=()
@@ -597,7 +600,7 @@ cmd_setting() {
   while IFS=$'\t' read -r key val; do
     case "$key" in
       backend) backend="$val" ;;
-      targets) targets="$val" ;;
+      targets) targets_csv="$val" ;;
       exclude) excludes+=("$val") ;;
       password) password="$val" ;;
       keep-daily) keep_daily="$val" ;;
@@ -652,7 +655,7 @@ cmd_setting() {
     file_excludes="${BACKUP_EXCLUDES:-}"
   fi
 
-  targets=$(resolve_value "$targets" "$env_targets" "$file_targets" "$DEFAULT_TARGETS")
+  targets_csv=$(resolve_value "$targets_csv" "$env_targets" "$file_targets" "$DEFAULT_TARGETS")
   keep_daily=$(resolve_value "$keep_daily" "$env_keep_daily" "$file_keep_daily" "$DEFAULT_KEEP_DAILY")
   keep_weekly=$(resolve_value "$keep_weekly" "$env_keep_weekly" "$file_keep_weekly" "$DEFAULT_KEEP_WEEKLY")
   keep_monthly=$(resolve_value "$keep_monthly" "$env_keep_monthly" "$file_keep_monthly" "$DEFAULT_KEEP_MONTHLY")
@@ -690,7 +693,7 @@ cmd_setting() {
     generate_ssh_key_if_missing
 
     local content
-    content=$(render_backup_env_sftp "$(hostname)" "$host" "$port" "$user" "$BACKUP_SSH_KEY" "$password" "$targets" "$excludes_csv" "$keep_daily" "$keep_weekly" "$keep_monthly")
+    content=$(render_backup_env_sftp "$(hostname)" "$host" "$port" "$user" "$BACKUP_SSH_KEY" "$password" "$targets_csv" "$excludes_csv" "$keep_daily" "$keep_weekly" "$keep_monthly")
     write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
 
     render_sftp_registration_notice "$(cat "${BACKUP_SSH_KEY}.pub")"
@@ -723,7 +726,7 @@ cmd_setting() {
     ensure_restic_dir
 
     local content
-    content=$(render_backup_env_s3 "$(hostname)" "$endpoint" "$bucket" "$access_key" "$secret_key" "$password" "$targets" "$excludes_csv" "$keep_daily" "$keep_weekly" "$keep_monthly")
+    content=$(render_backup_env_s3 "$(hostname)" "$endpoint" "$bucket" "$access_key" "$secret_key" "$password" "$targets_csv" "$excludes_csv" "$keep_daily" "$keep_weekly" "$keep_monthly")
     write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
 
     log_info "최소권한 버킷 정책을 아래와 같이 적용하세요:"
