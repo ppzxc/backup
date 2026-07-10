@@ -25,7 +25,7 @@ setup() {
 }
 
 @test "parses repeated value flags into multiple lines" {
-  run parse_long_opts "exclude:" -- --exclude /tmp/* --exclude /var/tmp/*
+  run parse_long_opts "exclude:" -- --exclude '/tmp/*' --exclude '/var/tmp/*'
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = $'exclude\t/tmp/*' ]
   [ "${lines[1]}" = $'exclude\t/var/tmp/*' ]
