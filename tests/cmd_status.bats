@@ -31,3 +31,26 @@ ENV
   [[ "$output" == *"700"* ]]
   [[ "$output" == *"600"* ]]
 }
+
+@test "cmd_status reports 'inactive' correctly when systemctl is-active exits nonzero (realistic stub)" {
+  mkdir -p "$RESTIC_ETC_DIR"
+  chmod 700 "$RESTIC_ETC_DIR"
+  cat > "$BACKUP_ENV_FILE" <<'ENV'
+export RESTIC_REPOSITORY="rclone:syno_backup:/backup/host1"
+export RESTIC_PASSWORD="super-secret"
+export BACKUP_TARGETS="/var/log"
+ENV
+  chmod 600 "$BACKUP_ENV_FILE"
+  stub_command "restic" 'case "$1" in snapshots) echo "[]" ;; esac'
+  stub_command "systemctl" '
+    if [[ "$1" == "is-active" ]]; then
+      echo "inactive"
+      exit 3
+    fi
+  '
+
+  run cmd_status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"타이머 상태: inactive"* ]]
+  [[ "$output" != *$'\nunknown'* ]]
+}

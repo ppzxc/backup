@@ -445,7 +445,9 @@ cmd_status() {
   printf '최근 스냅샷:\n'
   restic snapshots --json 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
 
-  printf '타이머 상태: %s\n' "$(systemctl is-active restic-backup.timer 2>/dev/null || echo unknown)"
+  local timer_state
+  timer_state=$(systemctl is-active restic-backup.timer 2>/dev/null) || true
+  printf '타이머 상태: %s\n' "${timer_state:-unknown}"
 
   printf '%s 권한: %s\n' "$RESTIC_ETC_DIR" "$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '?')"
   printf '%s 권한: %s\n' "$BACKUP_ENV_FILE" "$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '?')"
