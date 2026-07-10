@@ -60,3 +60,30 @@ setup() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"--force"* ]]
 }
+
+@test "cmd_setting sftp missing --host prints the hint via real invocation (not masked by bats run)" {
+  # bats test bodies themselves run under set -e, so a naive
+  # `output=$(...)` here would abort this test the same way the original
+  # bug aborted backup.sh -- capture the real exit code with `|| exit_code=$?`
+  # instead of letting a nonzero status propagate.
+  local exit_code=0
+  output=$(REQUIRE_ROOT_CHECK=0 \
+    RESTIC_ETC_DIR="$RESTIC_ETC_DIR" \
+    BACKUP_ENV_FILE="$BACKUP_ENV_FILE" \
+    BACKUP_SSH_KEY="$BACKUP_SSH_KEY" \
+    BACKUP_SCRIPT_INSTALL_PATH="$BACKUP_SCRIPT_INSTALL_PATH" \
+    SYSTEMD_UNIT_DIR="$SYSTEMD_UNIT_DIR" \
+    PATH="${STUB_BIN}:${PATH}" \
+    bash "${BATS_TEST_DIRNAME}/../backup.sh" setting --backend sftp --port 22 --user backup_restic --password secret 2>&1) || exit_code=$?
+  [ "$exit_code" -eq 1 ]
+  [[ "$output" == *"--host <NAS_IP>"* ]]
+}
+
+@test "cmd_setting sftp reuses existing --exclude from backup.env on --force re-run" {
+  cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --exclude '/custom/exclude/*'
+  grep -q 'export BACKUP_EXCLUDES="/custom/exclude/\*"' "$BACKUP_ENV_FILE"
+
+  run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --force
+  [ "$status" -eq 0 ]
+  grep -q 'export BACKUP_EXCLUDES="/custom/exclude/\*"' "$BACKUP_ENV_FILE"
+}

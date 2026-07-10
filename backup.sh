@@ -356,7 +356,7 @@ cmd_setting() {
     die "이미 설정이 있습니다: ${BACKUP_ENV_FILE} (덮어쓰려면 setting --force)"
   fi
 
-  local file_targets="" file_keep_daily="" file_keep_weekly="" file_keep_monthly=""
+  local file_targets="" file_keep_daily="" file_keep_weekly="" file_keep_monthly="" file_excludes=""
   if [[ -f "$BACKUP_ENV_FILE" ]]; then
     # shellcheck source=/dev/null
     source "$BACKUP_ENV_FILE"
@@ -364,6 +364,7 @@ cmd_setting() {
     file_keep_daily="${KEEP_DAILY:-}"
     file_keep_weekly="${KEEP_WEEKLY:-}"
     file_keep_monthly="${KEEP_MONTHLY:-}"
+    file_excludes="${BACKUP_EXCLUDES:-}"
   fi
 
   targets=$(resolve_value "$targets" "$env_targets" "$file_targets" "$DEFAULT_TARGETS")
@@ -376,17 +377,19 @@ cmd_setting() {
   if ! err=$(validate_positive_int "$keep_weekly" "keep-weekly"); then die "$err"; fi
   if ! err=$(validate_positive_int "$keep_monthly" "keep-monthly"); then die "$err"; fi
 
+  # excludes는 반복 가능한 --exclude 플래그로만 CLI에서 받으므로 환경변수 계층은 없다.
+  # CLI에서 하나도 주지 않았으면 기존 backup.env 값을 재사용하고, 그것도 없으면 기본값.
   local excludes_csv
   if [[ ${#excludes[@]} -eq 0 ]]; then
-    excludes_csv="$DEFAULT_EXCLUDES"
+    excludes_csv=$(resolve_value "" "" "$file_excludes" "$DEFAULT_EXCLUDES")
   else
     excludes_csv=$(IFS=,; printf '%s' "${excludes[*]}")
   fi
 
   if [[ "$backend" == "sftp" ]]; then
-    host=$(resolve_value "$host" "$env_host" "" "")
-    port=$(resolve_value "$port" "$env_port" "" "$DEFAULT_SFTP_PORT")
-    user=$(resolve_value "$user" "$env_user" "" "")
+    host=$(resolve_value "$host" "$env_host" "" "") || true
+    port=$(resolve_value "$port" "$env_port" "" "$DEFAULT_SFTP_PORT") || true
+    user=$(resolve_value "$user" "$env_user" "" "") || true
 
     if [[ -z "$host" || -z "$user" ]]; then
       die "$(render_setting_hint_sftp "$host" "$port" "$user")"
