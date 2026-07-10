@@ -395,6 +395,42 @@ cmd_schedule() {
   esac
 }
 
+cmd_run() {
+  if [[ ! -f "$BACKUP_ENV_FILE" ]]; then
+    die "$(render_missing_settings_message)"
+  fi
+
+  # shellcheck source=/dev/null
+  source "$BACKUP_ENV_FILE"
+
+  restic unlock --stale >/dev/null 2>&1 || true
+
+  # IFS=',' prefixed directly on the `read` command scopes the field separator
+  # to that single command only (no global IFS mutation, no `local IFS`
+  # gymnastics needed). Populating via `read -ra` into an array, then iterating
+  # with a quoted "${arr[@]}", also avoids unquoted-expansion pathname
+  # (glob) expansion.
+  local -a exclude_flags=()
+  local -a excludes_arr=()
+  IFS=',' read -ra excludes_arr <<< "${BACKUP_EXCLUDES:-}"
+  local ex
+  for ex in "${excludes_arr[@]}"; do
+    exclude_flags+=("--exclude=${ex}")
+  done
+
+  local -a targets=()
+  IFS=',' read -ra targets <<< "${BACKUP_TARGETS:-}"
+
+  if restic backup "${targets[@]}" "${exclude_flags[@]}"; then
+    log_info "백업 성공"
+  else
+    die "restic backup 실패"
+  fi
+
+  restic forget --keep-daily "${KEEP_DAILY}" --keep-weekly "${KEEP_WEEKLY}" --keep-monthly "${KEEP_MONTHLY}" --prune
+  log_info "만료 스냅샷 정리 완료"
+}
+
 cmd_setting() {
   require_root
   local parsed
@@ -596,7 +632,12 @@ main() {
       cmd_schedule "$@"
       return $?
       ;;
-    run|status|uninstall|wizard)
+    run)
+      shift
+      cmd_run "$@"
+      return $?
+      ;;
+    status|uninstall|wizard)
       : # 이후 태스크에서 각 cmd_* 로 분기
       ;;
     *)
