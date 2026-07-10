@@ -431,6 +431,26 @@ cmd_run() {
   log_info "만료 스냅샷 정리 완료"
 }
 
+cmd_status() {
+  if [[ ! -f "$BACKUP_ENV_FILE" ]]; then
+    die "$(render_missing_settings_message)"
+  fi
+
+  # shellcheck source=/dev/null
+  source "$BACKUP_ENV_FILE"
+
+  printf '저장소 위치: %s\n' "${RESTIC_REPOSITORY:-알 수 없음}"
+  printf '백업 대상: %s\n' "${BACKUP_TARGETS:-알 수 없음}"
+
+  printf '최근 스냅샷:\n'
+  restic snapshots --json 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
+
+  printf '타이머 상태: %s\n' "$(systemctl is-active restic-backup.timer 2>/dev/null || echo unknown)"
+
+  printf '%s 권한: %s\n' "$RESTIC_ETC_DIR" "$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '?')"
+  printf '%s 권한: %s\n' "$BACKUP_ENV_FILE" "$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '?')"
+}
+
 cmd_setting() {
   require_root
   local parsed
@@ -637,7 +657,12 @@ main() {
       cmd_run "$@"
       return $?
       ;;
-    status|uninstall|wizard)
+    status)
+      shift
+      cmd_status "$@"
+      return $?
+      ;;
+    uninstall|wizard)
       : # 이후 태스크에서 각 cmd_* 로 분기
       ;;
     *)
