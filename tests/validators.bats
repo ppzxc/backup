@@ -51,6 +51,16 @@ setup() {
   [[ "$output" == *"abc"* ]]
 }
 
+@test "validate_port accepts leading-zero values as decimal" {
+  run validate_port "008"
+  [ "$status" -eq 0 ]
+}
+
+@test "validate_port treats leading-zero as decimal, not octal" {
+  run validate_port "017"
+  [ "$status" -eq 0 ]
+}
+
 @test "validate_positive_int accepts positive integer" {
   run validate_positive_int "7" "keep-daily"
   [ "$status" -eq 0 ]

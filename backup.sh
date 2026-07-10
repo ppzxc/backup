@@ -61,7 +61,7 @@ validate_port() {
     printf 'ERROR: port must be numeric, got: %s\n' "$value"
     return 1
   fi
-  if (( value < 1 || value > 65535 )); then
+  if (( 10#$value < 1 || 10#$value > 65535 )); then
     printf 'ERROR: port must be between 1 and 65535, got: %s\n' "$value"
     return 1
   fi
@@ -74,7 +74,7 @@ validate_positive_int() {
     printf 'ERROR: %s must be numeric, got: %s\n' "$label" "$value"
     return 1
   fi
-  if (( value < 1 )); then
+  if (( 10#$value < 1 )); then
     printf 'ERROR: %s must be positive, got: %s\n' "$label" "$value"
     return 1
   fi
