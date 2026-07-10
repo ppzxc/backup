@@ -4,32 +4,43 @@ load test_helper.bash
 
 setup() {
   setup_backup_sh_env
-  stub_command "systemctl" 'echo "systemctl $*" >> "'"${STUB_BIN}"'/systemctl.calls"'
+  mkdir -p "$RESTIC_ETC_DIR"
+  cat > "$BACKUP_ENV_FILE" <<'ENV'
+export RESTIC_REPOSITORY="rclone:syno_backup:/backup/web01"
+export RESTIC_PASSWORD="secret"
+export BACKUP_TARGETS="/var/log"
+export BACKUP_EXCLUDES="/tmp/*"
+export KEEP_DAILY="7"
+export KEEP_WEEKLY="4"
+export KEEP_MONTHLY="12"
+export BACKUP_PROFILE_NAME="web01"
+ENV
+  stub_command "resticprofile" 'echo "resticprofile $*" >> "'"${STUB_BIN}"'/resticprofile.calls"'
 }
 
-@test "cmd_schedule enable writes unit files with default schedule and enables the timer" {
+@test "cmd_schedule enable renders profiles.yaml and delegates to resticprofile schedule" {
   run cmd_schedule enable
   [ "$status" -eq 0 ]
-  [ -f "$SYSTEMD_SERVICE_FILE" ]
-  [ -f "$SYSTEMD_TIMER_FILE" ]
-  grep -q 'OnCalendar=\*-\*-\* 02:00:00' "$SYSTEMD_TIMER_FILE"
-  run cat "${STUB_BIN}/systemctl.calls"
-  [[ "$output" == *"daemon-reload"* ]]
-  [[ "$output" == *"enable --now restic-backup.timer"* ]]
+  [ -f "$RESTICPROFILE_CONFIG_FILE" ]
+  perm=$(stat -c '%a' "$RESTICPROFILE_CONFIG_FILE")
+  [ "$perm" = "600" ]
+  grep -q 'schedule: "\*-\*-\* 02:00:00"' "$RESTICPROFILE_CONFIG_FILE"
+  run cat "${STUB_BIN}/resticprofile.calls"
+  [[ "$output" == *"--config ${RESTICPROFILE_CONFIG_FILE} --name web01 schedule"* ]]
 }
 
 @test "cmd_schedule enable honors --on-calendar" {
   run cmd_schedule enable --on-calendar "*-*-* 03:15:00"
   [ "$status" -eq 0 ]
-  grep -q 'OnCalendar=\*-\*-\* 03:15:00' "$SYSTEMD_TIMER_FILE"
+  grep -q 'schedule: "\*-\*-\* 03:15:00"' "$RESTICPROFILE_CONFIG_FILE"
 }
 
-@test "cmd_schedule disable disables and removes the timer" {
+@test "cmd_schedule disable delegates to resticprofile unschedule" {
   cmd_schedule enable
   run cmd_schedule disable
   [ "$status" -eq 0 ]
-  run cat "${STUB_BIN}/systemctl.calls"
-  [[ "$output" == *"disable --now restic-backup.timer"* ]]
+  run cat "${STUB_BIN}/resticprofile.calls"
+  [[ "$output" == *"--config ${RESTICPROFILE_CONFIG_FILE} --name web01 unschedule"* ]]
 }
 
 @test "cmd_schedule rejects unknown action" {
@@ -37,23 +48,9 @@ setup() {
   [ "$status" -eq 1 ]
 }
 
-@test "cmd_schedule disable does not abort even if systemctl disable fails" {
-  stub_command "systemctl" '
-    if [[ "$1" == "disable" ]]; then
-      exit 1
-    fi
-    echo "systemctl $*" >> "'"${STUB_BIN}"'/systemctl.calls"
-  '
-  # Deliberately NOT using `run` here: bats' `run` does `set +eET` before
-  # invoking the command, which disables errexit for the duration of the
-  # call - so a missing `|| true` guard in systemd_disable_timer would
-  # never be observed via `run`'s captured $status (it would always be 0).
-  # backup.sh is sourced with `set -euo pipefail` still active in this test
-  # process (see the direct `cmd_schedule enable` call a few tests up), so
-  # calling cmd_schedule directly is what actually exercises errexit: if
-  # `systemctl disable` fails without the `|| true` guard, this call aborts
-  # and bats reports the test as failed before reaching the assertion below.
-  cmd_schedule disable
-  status=$?
-  [ "$status" -eq 0 ]
+@test "cmd_schedule fails with guidance when backup.env is missing" {
+  rm -f "$BACKUP_ENV_FILE"
+  run cmd_schedule enable
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"setting"* ]]
 }

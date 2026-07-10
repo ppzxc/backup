@@ -19,10 +19,11 @@ setup() {
 export RESTIC_REPOSITORY="rclone:syno_backup:/backup/host1"
 export RESTIC_PASSWORD="super-secret"
 export BACKUP_TARGETS="/var/log"
+export BACKUP_PROFILE_NAME="host1"
 ENV
   chmod 600 "$BACKUP_ENV_FILE"
   stub_command "restic" 'case "$1" in snapshots) echo "[]" ;; esac'
-  stub_command "systemctl" 'echo "inactive"'
+  stub_command "systemctl" 'echo "systemctl $*" >> "'"${STUB_BIN}"'/systemctl.calls"; echo "inactive"'
 
   run cmd_status
   [ "$status" -eq 0 ]
@@ -30,6 +31,8 @@ ENV
   [[ "$output" != *"super-secret"* ]]
   [[ "$output" == *"700"* ]]
   [[ "$output" == *"600"* ]]
+  run cat "${STUB_BIN}/systemctl.calls"
+  [[ "$output" == *"is-active resticprofile-backup@profile-host1.timer"* ]]
 }
 
 @test "cmd_status reports 'inactive' correctly when systemctl is-active exits nonzero (realistic stub)" {
@@ -39,6 +42,7 @@ ENV
 export RESTIC_REPOSITORY="rclone:syno_backup:/backup/host1"
 export RESTIC_PASSWORD="super-secret"
 export BACKUP_TARGETS="/var/log"
+export BACKUP_PROFILE_NAME="host1"
 ENV
   chmod 600 "$BACKUP_ENV_FILE"
   stub_command "restic" 'case "$1" in snapshots) echo "[]" ;; esac'

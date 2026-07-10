@@ -226,6 +226,102 @@ WantedBy=timers.target
 EOF
 }
 
+render_resticprofile_unit_template() {
+  # 의도적으로 `{{ range .Environment }}` 블록을 넣지 않는다: 넣으면 resticprofile이
+  # RESTIC_PASSWORD를 이 파일에 평문 `Environment=`로 주입한다(644, /etc/systemd/system/ -
+  # 2026-07-10 docker 컨테이너에서 실측 확인, 기본 템플릿에서도 재현됨). 유닛의 ExecStart는
+  # 실행 시점에 `--config <profiles.yaml>`을 그대로 다시 읽으므로(run-schedule), Environment
+  # 블록이 없어도 비밀값은 profiles.yaml의 env: 블록에서 정상 공급된다.
+  cat <<'EOF'
+[Unit]
+Description={{ .JobDescription }} (ISMS Compliance)
+{{ if .AfterNetworkOnline }}After=network-online.target
+{{ end }}
+[Service]
+Type=notify
+User=root
+Group=root
+WorkingDirectory={{ .WorkingDirectory }}
+ExecStart={{ .CommandLine }}
+{{ if .Nice }}Nice={{ .Nice }}
+{{ end -}}
+EOF
+}
+
+render_resticprofile_timer_template() {
+  cat <<'EOF'
+[Unit]
+Description={{ .TimerDescription }} (ISMS Compliance)
+
+[Timer]
+{{ range .OnCalendar -}}
+OnCalendar={{ . }}
+{{ end -}}
+Unit={{ .SystemdProfile }}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
+render_resticprofile_config() {
+  local profile_name="$1" on_calendar="$2" targets_csv="$3" excludes_csv="$4" \
+        keep_daily="$5" keep_weekly="$6" keep_monthly="$7"
+  local -a sources=() excludes=()
+  IFS=',' read -ra sources <<< "$targets_csv"
+  if [[ -n "$excludes_csv" ]]; then
+    IFS=',' read -ra excludes <<< "$excludes_csv"
+  fi
+
+  printf 'version: "1"\n\n'
+  printf 'global:\n'
+  printf '  restic-lock-retry-after: 1m\n'
+  printf '  restic-stale-lock-age: 2h\n'
+  printf '  systemd-unit-template: %s\n' "$RESTICPROFILE_UNIT_TEMPLATE"
+  printf '  systemd-timer-template: %s\n\n' "$RESTICPROFILE_TIMER_TEMPLATE"
+
+  printf '%s:\n' "$profile_name"
+  printf '  repository: "%s"\n' "${RESTIC_REPOSITORY:-}"
+  printf '  force-inactive-lock: true\n'
+  printf '  env:\n'
+  printf '    RESTIC_PASSWORD: "%s"\n' "${RESTIC_PASSWORD:-}"
+  if [[ -n "${AWS_ACCESS_KEY_ID:-}" ]]; then
+    printf '    AWS_ACCESS_KEY_ID: "%s"\n' "$AWS_ACCESS_KEY_ID"
+    printf '    AWS_SECRET_ACCESS_KEY: "%s"\n' "${AWS_SECRET_ACCESS_KEY:-}"
+  fi
+  if [[ -n "${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" ]]; then
+    printf '    RCLONE_CONFIG_SYNO_BACKUP_TYPE: "%s"\n' "$RCLONE_CONFIG_SYNO_BACKUP_TYPE"
+    printf '    RCLONE_CONFIG_SYNO_BACKUP_HOST: "%s"\n' "${RCLONE_CONFIG_SYNO_BACKUP_HOST:-}"
+    printf '    RCLONE_CONFIG_SYNO_BACKUP_USER: "%s"\n' "${RCLONE_CONFIG_SYNO_BACKUP_USER:-}"
+    printf '    RCLONE_CONFIG_SYNO_BACKUP_PORT: "%s"\n' "${RCLONE_CONFIG_SYNO_BACKUP_PORT:-}"
+    printf '    RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE: "%s"\n' "${RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE:-}"
+  fi
+
+  printf '  retention:\n'
+  printf '    after-backup: true\n'
+  printf '    prune: true\n'
+  printf '    keep-daily: %s\n' "$keep_daily"
+  printf '    keep-weekly: %s\n' "$keep_weekly"
+  printf '    keep-monthly: %s\n' "$keep_monthly"
+
+  printf '  backup:\n'
+  printf '    schedule: "%s"\n' "$on_calendar"
+  printf '    schedule-permission: system\n'
+  printf '    source:\n'
+  local s
+  for s in "${sources[@]}"; do
+    printf '      - "%s"\n' "$s"
+  done
+  if [[ ${#excludes[@]} -gt 0 ]]; then
+    printf '    exclude:\n'
+    local e
+    for e in "${excludes[@]}"; do
+      printf '      - "%s"\n' "$e"
+    done
+  fi
+}
+
 dnf_install_packages() {
   # epel-release must land in its own transaction first: dnf resolves a
   # single `install` command's package set before epel-release's post-install
@@ -420,6 +516,13 @@ cmd_schedule() {
   local action="${1:-}"
   shift || true
 
+  if [[ ! -f "$BACKUP_ENV_FILE" ]]; then
+    die "$(render_missing_settings_message)"
+  fi
+  # shellcheck source=/dev/null
+  source "$BACKUP_ENV_FILE"
+  local profile_name="${BACKUP_PROFILE_NAME:-$(hostname)}"
+
   case "$action" in
     enable)
       local parsed
@@ -432,13 +535,18 @@ cmd_schedule() {
         esac
       done <<< "$parsed"
 
-      write_secure_file "$SYSTEMD_SERVICE_FILE" 644 "$(render_service_unit)"
-      write_secure_file "$SYSTEMD_TIMER_FILE" 644 "$(render_timer_unit "$on_calendar")"
-      systemd_enable_timer
+      write_secure_file "$RESTICPROFILE_UNIT_TEMPLATE" 644 "$(render_resticprofile_unit_template)"
+      write_secure_file "$RESTICPROFILE_TIMER_TEMPLATE" 644 "$(render_resticprofile_timer_template)"
+      # KEEP_DAILY/KEEP_WEEKLY/KEEP_MONTHLY are exported by sourcing backup.env above,
+      # not assigned in this function - shellcheck can't see that.
+      # shellcheck disable=SC2153
+      write_secure_file "$RESTICPROFILE_CONFIG_FILE" 600 \
+        "$(render_resticprofile_config "$profile_name" "$on_calendar" "${BACKUP_TARGETS:-}" "${BACKUP_EXCLUDES:-}" "${KEEP_DAILY}" "${KEEP_WEEKLY}" "${KEEP_MONTHLY}")"
+      resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" schedule
       log_info "schedule enable 완료 (${on_calendar})"
       ;;
     disable)
-      systemd_disable_timer
+      resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" unschedule 2>/dev/null || true
       log_info "schedule disable 완료"
       ;;
     *)
@@ -500,8 +608,9 @@ cmd_status() {
   printf '최근 스냅샷:\n'
   restic snapshots --json 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
 
+  local profile_name="${BACKUP_PROFILE_NAME:-$(hostname)}"
   local timer_state
-  timer_state=$(systemctl is-active restic-backup.timer 2>/dev/null) || true
+  timer_state=$(systemctl is-active "resticprofile-backup@profile-${profile_name}.timer" 2>/dev/null) || true
   printf '타이머 상태: %s\n' "${timer_state:-unknown}"
 
   printf '%s 권한: %s\n' "$RESTIC_ETC_DIR" "$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '?')"

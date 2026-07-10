@@ -24,6 +24,7 @@ setup() {
   '
   stub_command "restic" 'case "$1" in snapshots) exit 1 ;; init) exit 0 ;; esac'
   stub_command "systemctl" 'true'
+  stub_command "resticprofile" 'true'
 }
 
 @test "wizard walks through sftp setup end to end and writes backup.env" {
