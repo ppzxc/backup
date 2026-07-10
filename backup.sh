@@ -47,6 +47,40 @@ resolve_value() {
   return 1
 }
 
+validate_backend() {
+  local value="$1"
+  case "$value" in
+    s3|sftp) return 0 ;;
+    *) printf 'ERROR: backend must be s3 or sftp, got: %s\n' "$value"; return 1 ;;
+  esac
+}
+
+validate_port() {
+  local value="$1"
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf 'ERROR: port must be numeric, got: %s\n' "$value"
+    return 1
+  fi
+  if (( value < 1 || value > 65535 )); then
+    printf 'ERROR: port must be between 1 and 65535, got: %s\n' "$value"
+    return 1
+  fi
+  return 0
+}
+
+validate_positive_int() {
+  local value="$1" label="$2"
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf 'ERROR: %s must be numeric, got: %s\n' "$label" "$value"
+    return 1
+  fi
+  if (( value < 1 )); then
+    printf 'ERROR: %s must be positive, got: %s\n' "$label" "$value"
+    return 1
+  fi
+  return 0
+}
+
 render_help() {
   cat <<'EOF'
 backup.sh - restic 기반 백업 설치/운영 스크립트
