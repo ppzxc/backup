@@ -38,6 +38,15 @@ require_root() {
   fi
 }
 
+resolve_value() {
+  local cli="$1" env="$2" file="$3" default="$4"
+  if [[ -n "$cli" ]]; then printf '%s' "$cli"; return 0; fi
+  if [[ -n "$env" ]]; then printf '%s' "$env"; return 0; fi
+  if [[ -n "$file" ]]; then printf '%s' "$file"; return 0; fi
+  if [[ -n "$default" ]]; then printf '%s' "$default"; return 0; fi
+  return 1
+}
+
 render_help() {
   cat <<'EOF'
 backup.sh - restic 기반 백업 설치/운영 스크립트
