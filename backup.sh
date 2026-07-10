@@ -81,6 +81,66 @@ validate_positive_int() {
   return 0
 }
 
+parse_long_opts() {
+  local spec="$1"
+  shift
+  if [[ "${1:-}" != "--" ]]; then
+    printf 'parse_long_opts: 내부 오류, "--" 구분자가 필요합니다\n'
+    return 1
+  fi
+  shift
+
+  local -A takes_value=()
+  local name
+  for name in $spec; do
+    if [[ "$name" == *: ]]; then
+      takes_value["${name%:}"]=1
+    else
+      takes_value["$name"]=0
+    fi
+  done
+
+  while [[ $# -gt 0 ]]; do
+    local arg="$1"
+    case "$arg" in
+      --*=*)
+        local key="${arg%%=*}"
+        key="${key#--}"
+        local val="${arg#*=}"
+        if [[ -z "${takes_value[$key]+x}" ]]; then
+          printf '알 수 없는 플래그: --%s\n' "$key"
+          return 1
+        fi
+        printf '%s\t%s\n' "$key" "$val"
+        shift
+        ;;
+      --*)
+        local key="${arg#--}"
+        if [[ -z "${takes_value[$key]+x}" ]]; then
+          printf '알 수 없는 플래그: --%s\n' "$key"
+          return 1
+        fi
+        if [[ "${takes_value[$key]}" == 1 ]]; then
+          if [[ $# -lt 2 ]]; then
+            printf '--%s 플래그는 값이 필요합니다\n' "$key"
+            return 1
+          fi
+          printf '%s\t%s\n' "$key" "$2"
+          shift 2
+        else
+          printf '%s\t1\n' "$key"
+          shift
+        fi
+        ;;
+      *)
+        printf '예상치 못한 인자: %s\n' "$arg"
+        return 1
+        ;;
+    esac
+  done
+  return 0
+}
+
 render_help() {
   cat <<'EOF'
 backup.sh - restic 기반 백업 설치/운영 스크립트
