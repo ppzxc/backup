@@ -23,7 +23,9 @@ setup() {
   run cmd_install --dry-run
   [ "$status" -eq 0 ]
   [ ! -f "${STUB_BIN}/dnf.calls" ]
+  [ ! -f "${STUB_BIN}/install.calls" ]
   [ ! -d "$RESTIC_ETC_DIR" ]
+  [ ! -e "$BACKUP_SCRIPT_INSTALL_PATH" ]
   [[ "$output" == *"dry-run"* ]]
 }
 
