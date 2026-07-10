@@ -12,7 +12,8 @@ setup() {
   run cmd_install
   [ "$status" -eq 0 ]
   run cat "${STUB_BIN}/dnf.calls"
-  [[ "$output" == *"install -y epel-release restic rclone"* ]]
+  [[ "$output" == *"install -y epel-release"* ]]
+  [[ "$output" == *"install -y restic rclone"* ]]
   [ -d "$RESTIC_ETC_DIR" ]
   perm=$(stat -c '%a' "$RESTIC_ETC_DIR")
   [ "$perm" = "700" ]

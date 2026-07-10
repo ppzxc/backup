@@ -207,7 +207,12 @@ EOF
 }
 
 dnf_install_packages() {
-  dnf install -y epel-release restic rclone
+  # epel-release must land in its own transaction first: dnf resolves a
+  # single `install` command's package set before epel-release's post-install
+  # repo registration takes effect, so restic/rclone (EPEL-only packages)
+  # are unresolvable if requested in the same command.
+  dnf install -y epel-release
+  dnf install -y restic rclone
 }
 
 self_install_copy() {
@@ -255,7 +260,8 @@ cmd_install() {
 
   if (( dry_run )); then
     cat <<EOF
-[dry-run] dnf install -y epel-release restic rclone
+[dry-run] dnf install -y epel-release
+[dry-run] dnf install -y restic rclone
 [dry-run] install -m 0755 "\$0" "${BACKUP_SCRIPT_INSTALL_PATH}"
 [dry-run] mkdir -p "${RESTIC_ETC_DIR}" && chmod 700 "${RESTIC_ETC_DIR}"
 EOF
