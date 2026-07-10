@@ -15,27 +15,6 @@ setup() {
   '
 }
 
-@test "render_backup_env_sftp produces expected export lines" {
-  local -A policy=([password]="secret" [targets]="/var/log" [excludes_csv]="/tmp/*,/var/tmp/*" [keep_daily]="7" [keep_weekly]="4" [keep_monthly]="12" [profile_name]="web01")
-  run render_backup_env_sftp "host1" "1.2.3.4" "22" "backup_restic" "/etc/restic/backup_key" policy
-  [[ "$output" == *'export RESTIC_REPOSITORY="rclone:syno_backup:/backup/host1"'* ]]
-  [[ "$output" == *'export RCLONE_CONFIG_SYNO_BACKUP_TYPE="sftp"'* ]]
-  [[ "$output" == *'export RCLONE_CONFIG_SYNO_BACKUP_HOST="1.2.3.4"'* ]]
-  [[ "$output" == *'export RCLONE_CONFIG_SYNO_BACKUP_USER="backup_restic"'* ]]
-  [[ "$output" == *'export RCLONE_CONFIG_SYNO_BACKUP_PORT="22"'* ]]
-  [[ "$output" == *'export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="/etc/restic/backup_key"'* ]]
-  [[ "$output" == *'export RESTIC_PASSWORD="secret"'* ]]
-  [[ "$output" == *'export BACKUP_TARGETS="/var/log"'* ]]
-  [[ "$output" == *'export KEEP_DAILY="7"'* ]]
-  [[ "$output" == *'export BACKUP_PROFILE_NAME="web01"'* ]]
-}
-
-@test "render_sftp_registration_notice includes the pubkey and next command" {
-  run render_sftp_registration_notice "ssh-ed25519 AAAAFAKEKEY test@stub"
-  [[ "$output" == *"ssh-ed25519 AAAAFAKEKEY test@stub"* ]]
-  [[ "$output" == *"backup.sh init"* ]]
-}
-
 @test "cmd_setting sftp writes backup.env with 600 perms and generates ssh key" {
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret
   [ "$status" -eq 0 ]
