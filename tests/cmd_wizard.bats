@@ -29,10 +29,21 @@ setup() {
 @test "wizard walks through sftp setup end to end and writes backup.env" {
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
-    printf "2\n1.2.3.4\n22\nbackup_restic\nrepo-pass\ny\n\nn\n" | cmd_wizard
+    printf "2\n1.2.3.4\n22\nbackup_restic\nrepo-pass\n\ny\n\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
   [ -f "$BACKUP_ENV_FILE" ]
   grep -q 'RCLONE_CONFIG_SYNO_BACKUP_HOST="1.2.3.4"' "$BACKUP_ENV_FILE"
   [[ "$output" == *"ssh-ed25519"* ]]
+  [[ "$output" == *"저장소 위치:"* ]]
+}
+
+@test "wizard answering no at the confirm step cancels without applying settings" {
+  run bash -c '
+    source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
+    printf "2\n1.2.3.4\n22\nbackup_restic\nrepo-pass\nn\n" | cmd_wizard
+  '
+  [ "$status" -eq 0 ]
+  [ ! -f "$BACKUP_ENV_FILE" ]
+  [[ "$output" == *"설정을 취소했습니다"* ]]
 }

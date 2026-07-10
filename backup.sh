@@ -522,9 +522,27 @@ cmd_wizard() {
     setting_args+=(--endpoint "$endpoint" --bucket "$bucket" --access-key "$access_key" --secret-key "$secret_key")
   fi
 
-  printf '저장소 비밀번호: 분실 시 백업 데이터를 복구할 수 없습니다. 안전한 곳에 별도 보관하세요.\n비밀번호 입력: '
-  local password; read -r password
+  printf '저장소 비밀번호: 분실 시 백업 데이터를 복구할 수 없습니다. 안전한 곳에 별도 보관하세요.\n비밀번호 입력(화면에 표시되지 않습니다): '
+  local password
+  read -rs password
+  printf '\n'
   setting_args+=(--password "$password")
+
+  printf '\n다음 설정으로 진행합니다:\n'
+  printf '  백엔드: %s\n' "$backend"
+  if [[ "$backend" == "sftp" ]]; then
+    printf '  NAS: %s:%s (사용자: %s)\n' "$host" "$port" "$user"
+  else
+    printf '  S3 엔드포인트: %s\n' "$endpoint"
+    printf '  버킷: %s\n' "$bucket"
+  fi
+  printf '이대로 진행할까요? [Y/n]: '
+  local confirm
+  read -r confirm
+  if [[ -n "$confirm" && ! "$confirm" =~ ^[Yy]$ ]]; then
+    log_info "설정을 취소했습니다."
+    return 0
+  fi
 
   cmd_setting "${setting_args[@]}"
 
@@ -535,11 +553,34 @@ cmd_wizard() {
 
   printf '지금 정기 백업 스케줄을 등록할까요? 기본값은 매일 새벽 2시입니다. [Y/n]: '
   local schedule_choice; read -r schedule_choice
+  local schedule_enabled=0
   if [[ -z "$schedule_choice" || "$schedule_choice" =~ ^[Yy]$ ]]; then
     cmd_schedule enable
+    schedule_enabled=1
   fi
 
-  log_info "wizard 완료. 이후에는 backup.sh run / status / uninstall 을 사용하세요."
+  # 요약 출력을 위해 backup.env에서 실제 저장소 위치를 읽어온다(하드코딩된 형식
+  # 문자열을 다시 조립하지 않고 render_backup_env_* 가 실제로 쓴 값을 그대로 사용).
+  local repo_location=""
+  if [[ -f "$BACKUP_ENV_FILE" ]]; then
+    # shellcheck source=/dev/null
+    source "$BACKUP_ENV_FILE"
+    repo_location="${RESTIC_REPOSITORY:-}"
+  fi
+
+  printf '\n=========================================\n'
+  printf ' 설정이 완료되었습니다\n'
+  printf '=========================================\n'
+  printf ' 백엔드: %s\n' "$backend"
+  printf ' 저장소 위치: %s\n' "${repo_location:-알 수 없음}"
+  if (( schedule_enabled )); then
+    printf ' 정기 백업: 등록됨 (%s)\n' "$DEFAULT_ON_CALENDAR"
+  else
+    printf ' 정기 백업: 등록하지 않음 (필요시 backup.sh schedule enable 실행)\n'
+  fi
+  printf ' 이후에는 backup.sh run / status / uninstall 을 사용하세요.\n'
+  printf '=========================================\n'
+  log_info "wizard 완료"
 }
 
 cmd_setting() {
