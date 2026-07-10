@@ -177,6 +177,27 @@ parse_long_opts() {
   return 0
 }
 
+# parse_long_opts의 tab구분 출력을 소비하는 반복문을 호출부마다 손으로 짜는 대신,
+# nameref 연관 배열 하나를 채워주는 얇은 래퍼. parse_long_opts 자체의 계약/테스트는
+# 그대로 두고, 그 결과를 쓰는 방식만 걷어낸다. 같은 플래그가 여러 번 오면(--exclude 등)
+# 값을 콤마로 이어붙인다 - 기존 cmd_setting도 --exclude 반복값을 콤마로 합쳐서 저장했다.
+parse_opts_into() {
+  local -n opts_ref="$1"
+  shift
+  local parsed
+  parsed=$(parse_long_opts "$@") || die "$parsed"
+
+  local key val
+  while IFS=$'\t' read -r key val; do
+    [[ -z "$key" ]] && continue
+    if [[ -n "${opts_ref[$key]:-}" ]]; then
+      opts_ref["$key"]="${opts_ref[$key]},${val}"
+    else
+      opts_ref["$key"]="$val"
+    fi
+  done <<< "$parsed"
+}
+
 render_placeholder_or_value() {
   local value="$1" placeholder="$2"
   if [[ -n "$value" ]]; then
@@ -400,17 +421,9 @@ generate_ssh_key_if_missing() {
 
 cmd_install() {
   require_root
-  local parsed
-  parsed=$(parse_long_opts "force dry-run" -- "$@") || die "$parsed"
-
-  local force=0 dry_run=0
-  local key val
-  while IFS=$'\t' read -r key val; do
-    case "$key" in
-      force) force=1 ;;
-      dry-run) dry_run=1 ;;
-    esac
-  done <<< "$parsed"
+  local -A opts=()
+  parse_opts_into opts "force dry-run" -- "$@"
+  local force="${opts[force]:-0}" dry_run="${opts[dry-run]:-0}"
 
   if (( dry_run )); then
     cat <<EOF
@@ -617,15 +630,9 @@ cmd_schedule() {
 
   case "$action" in
     enable)
-      local parsed
-      parsed=$(parse_long_opts "on-calendar:" -- "$@") || die "$parsed"
-      local on_calendar="$DEFAULT_ON_CALENDAR"
-      local key val
-      while IFS=$'\t' read -r key val; do
-        case "$key" in
-          on-calendar) on_calendar="$val" ;;
-        esac
-      done <<< "$parsed"
+      local -A opts=()
+      parse_opts_into opts "on-calendar:" -- "$@"
+      local on_calendar="${opts[on-calendar]:-$DEFAULT_ON_CALENDAR}"
 
       write_resticprofile_assets "$profile_name" "$on_calendar"
       resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" schedule
@@ -674,16 +681,9 @@ cmd_status() {
 
 cmd_uninstall() {
   require_root
-  local parsed
-  parsed=$(parse_long_opts "purge" -- "$@") || die "$parsed"
-
-  local purge=0
-  local key val
-  while IFS=$'\t' read -r key val; do
-    case "$key" in
-      purge) purge=1 ;;
-    esac
-  done <<< "$parsed"
+  local -A opts=()
+  parse_opts_into opts "purge" -- "$@"
+  local purge="${opts[purge]:-0}"
 
   if [[ -f "$BACKUP_ENV_FILE" ]]; then
     # shellcheck source=/dev/null
@@ -809,36 +809,21 @@ cmd_wizard() {
 
 cmd_setting() {
   require_root
-  local parsed
-  parsed=$(parse_long_opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: force dry-run" -- "$@") || die "$parsed"
+  local -A opts=()
+  parse_opts_into opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: force dry-run" -- "$@"
 
-  local backend="" targets_csv="" password="" keep_daily="" keep_weekly="" keep_monthly="" profile_name=""
-  local force=0 dry_run=0
-  local -a excludes=()
-  local -A cli=()
+  local backend="${opts[backend]:-}" targets_csv="${opts[targets]:-}" password="${opts[password]:-}"
+  local keep_daily="${opts[keep-daily]:-}" keep_weekly="${opts[keep-weekly]:-}" keep_monthly="${opts[keep-monthly]:-}"
+  local profile_name="${opts[profile-name]:-}"
+  local force="${opts[force]:-0}" dry_run="${opts[dry-run]:-0}"
 
-  local key val
-  while IFS=$'\t' read -r key val; do
-    case "$key" in
-      backend) backend="$val" ;;
-      targets) targets_csv="$val" ;;
-      exclude) excludes+=("$val") ;;
-      password) password="$val" ;;
-      keep-daily) keep_daily="$val" ;;
-      keep-weekly) keep_weekly="$val" ;;
-      keep-monthly) keep_monthly="$val" ;;
-      profile-name) profile_name="$val" ;;
-      force) force=1 ;;
-      dry-run) dry_run=1 ;;
-      endpoint) cli[endpoint]="$val" ;;
-      bucket) cli[bucket]="$val" ;;
-      access-key) cli[access_key]="$val" ;;
-      secret-key) cli[secret_key]="$val" ;;
-      host) cli[host]="$val" ;;
-      port) cli[port]="$val" ;;
-      user) cli[user]="$val" ;;
-    esac
-  done <<< "$parsed"
+  # backend 전용 필드만 adapter에 넘긴다 - opts는 파일 전체 플래그의 진실 공급원이고,
+  # cli는 그 부분집합 뷰.
+  local -A cli=(
+    [endpoint]="${opts[endpoint]:-}" [bucket]="${opts[bucket]:-}"
+    [access_key]="${opts[access-key]:-}" [secret_key]="${opts[secret-key]:-}"
+    [host]="${opts[host]:-}" [port]="${opts[port]:-}" [user]="${opts[user]:-}"
+  )
 
   if [[ -z "$backend" ]]; then
     die "$(render_missing_settings_message)"
@@ -897,13 +882,10 @@ cmd_setting() {
   if ! err=$(validate_profile_name "$profile_name"); then die "$err"; fi
 
   # excludes는 반복 가능한 --exclude 플래그로만 CLI에서 받으므로 환경변수 계층은 없다.
-  # CLI에서 하나도 주지 않았으면 기존 backup.env 값을 재사용하고, 그것도 없으면 기본값.
+  # parse_opts_into가 반복된 --exclude 값을 이미 콤마로 이어붙여뒀으므로, CLI에서
+  # 하나도 안 왔으면 기존 backup.env 값을, 그것도 없으면 기본값을 그대로 재사용한다.
   local excludes_csv
-  if [[ ${#excludes[@]} -eq 0 ]]; then
-    excludes_csv=$(resolve_value "" "" "$file_excludes" "$DEFAULT_EXCLUDES")
-  else
-    excludes_csv=$(IFS=,; printf '%s' "${excludes[*]}")
-  fi
+  excludes_csv=$(resolve_value "${opts[exclude]:-}" "" "$file_excludes" "$DEFAULT_EXCLUDES")
 
   # fields is populated via backend_*_resolve's nameref, not directly in this
   # scope - shellcheck can't see across that indirection.
