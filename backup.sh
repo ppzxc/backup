@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.2"
+BACKUP_SCRIPT_VERSION="0.0.3"
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -31,6 +31,21 @@ DEFAULT_KEEP_MONTHLY=12
 DEFAULT_ON_CALENDAR="*-*-* 02:00:00"
 DEFAULT_SFTP_PORT=22
 BACKUP_VERBOSE="${BACKUP_VERBOSE:-0}"
+C_RESET="" C_BOLD="" C_DIM="" C_RED="" C_GREEN="" C_YELLOW="" C_BLUE="" C_CYAN="" C_GRAY=""
+
+setup_colors() {
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    C_RESET="\033[0m"
+    C_BOLD="\033[1m"
+    C_DIM="\033[2m"
+    C_RED="\033[31m"
+    C_GREEN="\033[32m"
+    C_YELLOW="\033[33m"
+    C_BLUE="\033[34m"
+    C_CYAN="\033[36m"
+    C_GRAY="\033[90m"
+  fi
+}
 
 log_info() {
   printf '%s\n' "$1"
@@ -130,6 +145,30 @@ validate_not_empty() {
   local value="$1"
   if [[ -z "$value" ]]; then
     printf '값을 입력해야 합니다\n'
+    return 1
+  fi
+  return 0
+}
+
+resolve_and_validate_config() {
+  local -n _opts="$1"
+  local -n _resolved="$2"
+  local -n _errors="$3"
+
+  local cli_targets="${_opts[targets]:-}"
+  _resolved[targets]=$(resolve_value "$cli_targets" "${BACKUP_TARGETS:-}" "" "$DEFAULT_TARGETS")
+
+  local cli_password="${_opts[password]:-}"
+  _resolved[password]=$(resolve_value "$cli_password" "${BACKUP_PASSWORD:-}" "" "")
+
+  if [[ -z "${_resolved[targets]:-}" ]]; then
+    _errors+=("백업 대상 경로(--targets 또는 BACKUP_TARGETS)가 필요합니다.")
+  fi
+  if [[ -z "${_resolved[password]:-}" ]]; then
+    _errors+=("저장소 비밀번호(--password 또는 BACKUP_PASSWORD)가 필요합니다.")
+  fi
+
+  if [[ ${#_errors[@]} -gt 0 ]]; then
     return 1
   fi
   return 0
@@ -801,24 +840,49 @@ cmd_run() {
   fi
 }
 
+render_snapshots_pretty() {
+  python3 -c '
+import sys, json
+try:
+    content = sys.stdin.read().strip()
+    if not content or content == "[]":
+        print("  (스냅샷 없음)")
+        sys.exit(0)
+    data = json.loads(content)
+    if not isinstance(data, list) or not data:
+        print("  (스냅샷 없음)")
+        sys.exit(0)
+    print("  %-10s  %-19s  %-25s  %s" % ("ID", "일시", "호스트", "백업 경로 (용량)"))
+    print("  %s  %s  %s  %s" % ("-"*10, "-"*19, "-"*25, "-"*30))
+    for snap in data:
+        sid = snap.get("short_id", snap.get("id", "")[:8])
+        time_str = snap.get("time", "")[:19].replace("T", " ")
+        host = snap.get("hostname", "")
+        paths = ", ".join(snap.get("paths", []))
+        size_str = ""
+        summary = snap.get("summary")
+        if isinstance(summary, dict) and "total_bytes_processed" in summary:
+            b = summary["total_bytes_processed"]
+            if b >= 1073741824:
+                size_str = " (%.2f GB)" % (b / 1073741824.0)
+            elif b >= 1048576:
+                size_str = " (%.2f MB)" % (b / 1048576.0)
+            elif b >= 1024:
+                size_str = " (%.2f KB)" % (b / 1024.0)
+            else:
+                size_str = " (%d B)" % b
+        print("  %-10s  %-19s  %-25s  %s%s" % (sid, time_str, host, paths, size_str))
+except Exception as e:
+    print("  (스냅샷 정보 해석 실패: %s)" % e)
+'
+}
+
 cmd_status() {
   require_backup_env
 
   local profile_name; profile_name=$(resolve_profile_name)
 
-  # Color settings
-  local C_RESET="" C_BOLD="" C_DIM="" C_RED="" C_GREEN="" C_YELLOW="" C_BLUE="" C_CYAN="" C_GRAY=""
-  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-    C_RESET="\033[0m"
-    C_BOLD="\033[1m"
-    C_DIM="\033[2m"
-    C_RED="\033[31m"
-    C_GREEN="\033[32m"
-    C_YELLOW="\033[33m"
-    C_BLUE="\033[34m"
-    C_CYAN="\033[36m"
-    C_GRAY="\033[90m"
-  fi
+  setup_colors
 
   local styled_repo="${C_BOLD}${RESTIC_REPOSITORY:-알 수 없음}${C_RESET}"
   local styled_targets="${C_BOLD}${BACKUP_TARGETS:-알 수 없음}${C_RESET}"
@@ -859,7 +923,7 @@ cmd_status() {
   printf '%b└──%b %s 권한: %b\n' "$C_GRAY" "$C_RESET" "$BACKUP_ENV_FILE" "$styled_env_perm"
   printf '\n'
   printf '%b%b⚙  최근 스냅샷 (Recent Snapshots)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
-  restic snapshots --json 2>/dev/null | sed 's/^/  /' || printf '  (조회 실패 또는 미초기화)\n'
+  restic snapshots --json 2>/dev/null | render_snapshots_pretty || printf '  (조회 실패 또는 미초기화)\n'
 }
 
 # ISMS 감사 대응용 통합 리포트. cmd_status는 빠른 운영 확인용이고, 이쪽은
@@ -877,15 +941,7 @@ render_audit_report() {
 
   if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
     # Beautiful ANSI styled output for interactive TTY
-    local C_RESET="\033[0m"
-    local C_BOLD="\033[1m"
-    local C_DIM="\033[2m"
-    local C_RED="\033[31m"
-    local C_GREEN="\033[32m"
-    local C_YELLOW="\033[33m"
-    local C_BLUE="\033[34m"
-    local C_CYAN="\033[36m"
-    local C_GRAY="\033[90m"
+    setup_colors
 
     # Style backend value
     local styled_backend="${C_BOLD}${C_BLUE}${backend}${C_RESET}"
@@ -1109,9 +1165,7 @@ cmd_audit() {
     "$etc_perm" "$env_perm"
 
   if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-    local C_RESET="\033[0m"
-    local C_BOLD="\033[1m"
-    local C_CYAN="\033[36m"
+    setup_colors
     printf '\n%b⚙  백업 이력(restic snapshots)%b\n' "${C_CYAN}${C_BOLD}" "${C_RESET}"
     restic snapshots 2>/dev/null | sed 's/^/  /' || printf '  (조회 실패 또는 미초기화)\n'
   else
@@ -1177,6 +1231,52 @@ cmd_uninstall() {
   else
     log_info "uninstall 완료 (${RESTIC_ETC_DIR}는 유지됨)"
   fi
+}
+
+build_dest_config() {
+  local dest_backend="$1"
+  local src_backend="$2"
+  local profile_name="$3"
+  local new_password="$4"
+  shift 4
+
+  local host="" port="" user="" key_file="" endpoint="" bucket="" access_key="" secret_key=""
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      host=*) host="${arg#host=}" ;;
+      port=*) port="${arg#port=}" ;;
+      user=*) user="${arg#user=}" ;;
+      key_file=*) key_file="${arg#key_file=}" ;;
+      endpoint=*) endpoint="${arg#endpoint=}" ;;
+      bucket=*) bucket="${arg#bucket=}" ;;
+      access_key=*) access_key="${arg#access_key=}" ;;
+      secret_key=*) secret_key="${arg#secret_key=}" ;;
+    esac
+  done
+
+  if [[ "$dest_backend" == "sftp" ]]; then
+    printf 'rclone:syno_backup_dst:/backup/%s\n' "$profile_name"
+    printf 'RCLONE_CONFIG_SYNO_BACKUP_DST_TYPE=sftp\n'
+    printf 'RCLONE_CONFIG_SYNO_BACKUP_DST_HOST=%s\n' "$host"
+    printf 'RCLONE_CONFIG_SYNO_BACKUP_DST_PORT=%s\n' "$port"
+    printf 'RCLONE_CONFIG_SYNO_BACKUP_DST_USER=%s\n' "$user"
+    printf 'RCLONE_CONFIG_SYNO_BACKUP_DST_KEY_FILE=%s\n' "${key_file:-$BACKUP_SSH_KEY}"
+  else
+    if [[ "$src_backend" == "sftp" ]]; then
+      printf 's3:%s/%s/%s\n' "$endpoint" "$bucket" "$profile_name"
+      printf 'AWS_ACCESS_KEY_ID=%s\n' "$access_key"
+      printf 'AWS_SECRET_ACCESS_KEY=%s\n' "$secret_key"
+    else
+      printf 'rclone:syno_backup_dst:%s/%s\n' "$bucket" "$profile_name"
+      printf 'RCLONE_CONFIG_SYNO_BACKUP_DST_TYPE=s3\n'
+      printf 'RCLONE_CONFIG_SYNO_BACKUP_DST_PROVIDER=other\n'
+      printf 'RCLONE_CONFIG_SYNO_BACKUP_DST_ENDPOINT=%s\n' "$endpoint"
+      printf 'RCLONE_CONFIG_SYNO_BACKUP_DST_ACCESS_KEY_ID=%s\n' "$access_key"
+      printf 'RCLONE_CONFIG_SYNO_BACKUP_DST_SECRET_ACCESS_KEY=%s\n' "$secret_key"
+    fi
+  fi
+  printf 'RESTIC_PASSWORD=%s\n' "$new_password"
 }
 
 cmd_migrate() {
@@ -1264,16 +1364,8 @@ cmd_migrate() {
   fi
 
   # 3. Pre-flight Destination Connectivity Check (for SFTP)
-  local -A sftp_resolved=()
   if [[ "$backend" == "sftp" ]]; then
-    # Prepare keys
-    local -a sftp_opts=(--host "$host" --port "$port" --user "$user")
-    if (( force )); then
-      sftp_opts+=(--force)
-    fi
-    backend_sftp_resolve sftp_resolved "${sftp_opts[@]}"
-    backend_sftp_prepare sftp_resolved
-
+    generate_ssh_key_if_missing
     # SFTP 연결 테스트를 위해 서브셸 안에서 임시로 환경 변수를 수정하여 통신을 점검합니다.
     # shellcheck disable=SC2030
     (
@@ -1281,7 +1373,7 @@ cmd_migrate() {
       export RCLONE_CONFIG_SYNO_BACKUP_HOST="$host"
       export RCLONE_CONFIG_SYNO_BACKUP_PORT="$port"
       export RCLONE_CONFIG_SYNO_BACKUP_USER="$user"
-      export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="${sftp_resolved[key-file]}"
+      export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="$BACKUP_SSH_KEY"
       if ! rclone_check_connectivity "syno_backup" "${BACKUP_VERBOSE:-0}"; then
         die "$(render_sftp_connectivity_failure_message "$host" "$port" "$user")"
       fi
@@ -1290,38 +1382,33 @@ cmd_migrate() {
 
   # 4. Constructing destination environment variables for copy
   local profile_name; profile_name=$(resolve_profile_name)
-  local -a dest_env=("RESTIC_PASSWORD=$new_password")
-  local dest_repo_copy
-
-  if [[ "$backend" == "sftp" ]]; then
-    dest_repo_copy="rclone:syno_backup_dst:/backup/${profile_name}"
-    dest_env+=(
-      "RCLONE_CONFIG_SYNO_BACKUP_DST_TYPE=sftp"
-      "RCLONE_CONFIG_SYNO_BACKUP_DST_HOST=$host"
-      "RCLONE_CONFIG_SYNO_BACKUP_DST_PORT=$port"
-      "RCLONE_CONFIG_SYNO_BACKUP_DST_USER=$user"
-      "RCLONE_CONFIG_SYNO_BACKUP_DST_KEY_FILE=${sftp_resolved[key-file]:-$BACKUP_SSH_KEY}"
-    )
-  else
-    # 앞선 서브셸 안에서의 임시 수정이 아닌, 본 셸에 로드된 원본 백엔드 타입 정보를 안전하게 분기 판단합니다.
-    # shellcheck disable=SC2031
-    if [[ "${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" == "sftp" ]]; then
-      dest_repo_copy="s3:${endpoint}/${bucket}/${profile_name}"
-      dest_env+=(
-        "AWS_ACCESS_KEY_ID=$access_key"
-        "AWS_SECRET_ACCESS_KEY=$secret_key"
-      )
-    else
-      dest_repo_copy="rclone:syno_backup_dst:${bucket}/${profile_name}"
-      dest_env+=(
-        "RCLONE_CONFIG_SYNO_BACKUP_DST_TYPE=s3"
-        "RCLONE_CONFIG_SYNO_BACKUP_DST_PROVIDER=other"
-        "RCLONE_CONFIG_SYNO_BACKUP_DST_ENDPOINT=$endpoint"
-        "RCLONE_CONFIG_SYNO_BACKUP_DST_ACCESS_KEY_ID=$access_key"
-        "RCLONE_CONFIG_SYNO_BACKUP_DST_SECRET_ACCESS_KEY=$secret_key"
-      )
-    fi
+  local src_backend="s3"
+  # 서브셸에서의 임시 변수 수정은 연결 확인용이며, 여기서는 원천 설정을 읽으므로 경고를 우회한다.
+  # shellcheck disable=SC2031
+  if [[ -n "${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" ]]; then
+    src_backend="sftp"
   fi
+
+  local -a dest_opts=()
+  if [[ "$backend" == "sftp" ]]; then
+    dest_opts+=(host="$host" port="$port" user="$user" key_file="$BACKUP_SSH_KEY")
+  else
+    dest_opts+=(endpoint="$endpoint" bucket="$bucket" access_key="$access_key" secret_key="$secret_key")
+  fi
+
+  local dest_config_output
+  dest_config_output=$(build_dest_config "$backend" "$src_backend" "$profile_name" "$new_password" "${dest_opts[@]}")
+
+  local dest_repo_copy=""
+  local -a dest_env=()
+  local line
+  while IFS= read -r line; do
+    if [[ -z "$dest_repo_copy" ]]; then
+      dest_repo_copy="$line"
+    else
+      dest_env+=("$line")
+    fi
+  done <<< "$dest_config_output"
 
   run_restic_dest() {
     env "${dest_env[@]}" restic "$@"

@@ -149,3 +149,16 @@ setup() {
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
+
+@test "resolve_and_validate_config resolves global options and collects errors on failure" {
+  local -A opts=()
+  opts[targets]=""
+  opts[password]=""
+  local -A resolved=()
+  local -a errors=()
+  local res=0
+  resolve_and_validate_config opts resolved errors || res=$?
+  [ "$res" -eq 1 ]
+  [ ${#errors[@]} -gt 0 ]
+}
+
