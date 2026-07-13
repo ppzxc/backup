@@ -40,3 +40,11 @@ setup() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"install"* ]]
 }
+
+@test "main strips --verbose/-v from argv before dispatch, from any position" {
+  run main --verbose -h
+  [ "$status" -eq 0 ]
+
+  run main -h -v
+  [ "$status" -eq 0 ]
+}

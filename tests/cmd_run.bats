@@ -53,3 +53,14 @@ ENV
   run cmd_run
   [ "$status" -eq 1 ]
 }
+
+@test "cmd_run passes -v to resticprofile when BACKUP_VERBOSE=1" {
+  stub_command "resticprofile" '
+    echo "resticprofile $*" >> "'"${STUB_BIN}"'/resticprofile.calls"
+    exit 0
+  '
+  BACKUP_VERBOSE=1 run cmd_run
+  [ "$status" -eq 0 ]
+  run cat "${STUB_BIN}/resticprofile.calls"
+  [[ "$output" == *"--config ${RESTICPROFILE_CONFIG_FILE} --name web01 backup -v"* ]]
+}

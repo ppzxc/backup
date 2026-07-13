@@ -20,6 +20,7 @@ DEFAULT_KEEP_WEEKLY=4
 DEFAULT_KEEP_MONTHLY=12
 DEFAULT_ON_CALENDAR="*-*-* 02:00:00"
 DEFAULT_SFTP_PORT=22
+BACKUP_VERBOSE="${BACKUP_VERBOSE:-0}"
 
 log_info() {
   printf '%s\n' "$1"
@@ -394,10 +395,24 @@ generate_ssh_key_if_missing() {
 # restic init 전에 SFTP 로그인이 가능한지 미리 확인한다. 이게 없으면 rclone이
 # NewFs 단계에서 실패했을 때 restic이 원인(인증 실패/포트 막힘/키 미등록 등)을
 # 구분하지 않고 전부 "error talking HTTP to rclone: exit status 1"로 뭉뚱그린다.
-ssh_check_connectivity() {
-  local host="$1" port="$2" user="$3" key_file="$4"
-  ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
-    -p "$port" -i "$key_file" "${user}@${host}" true >/dev/null 2>&1
+# 반드시 rclone 자체(restic이 실제로 spawn하는 것과 동일한 바이너리/설정)로
+# 점검해야 한다. 시스템 ssh/sftp 클라이언트로 점검하면 두 가지 문제가 있다:
+#   1) 별도 openssh-clients 의존성이 생긴다.
+#   2) 일반 exec/쉘 세션(`ssh ... true`)은 NAS 계정이 SFTP 전용(쉘 로그인
+#      권한 없음)으로 제한된 경우 공개키 인증에 성공하고도 거부되어, 실제로는
+#      문제 없는 설정을 오탐으로 막아버린다.
+# 대상 경로("$remote:/backup/host")가 아니라 remote 루트("$remote:")를 봐야
+# 한다 — 최초 init 시점엔 백업 대상 하위 경로가 아직 없는 게 정상이라, 그
+# 경로를 직접 보면 인증에 성공했어도 "directory not found"로 실패한다.
+# verbose=1일 때만 rclone 자체의 진단 메시지(왜 실패했는지)를 그대로 보여주고,
+# 기본값(0)에서는 원래대로 조용히 성공/실패 여부만 반환한다.
+rclone_check_connectivity() {
+  local remote="$1" verbose="${2:-0}"
+  if [[ "$verbose" == "1" ]]; then
+    rclone lsd "${remote}:" >/dev/null
+  else
+    rclone lsd "${remote}:" >/dev/null 2>&1
+  fi
 }
 
 render_sftp_connectivity_failure_message() {
@@ -606,8 +621,7 @@ cmd_init() {
   require_backup_env
 
   if [[ -n "${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" ]]; then
-    if ! ssh_check_connectivity "$RCLONE_CONFIG_SYNO_BACKUP_HOST" "$RCLONE_CONFIG_SYNO_BACKUP_PORT" \
-      "$RCLONE_CONFIG_SYNO_BACKUP_USER" "$RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE"; then
+    if ! rclone_check_connectivity "syno_backup" "${BACKUP_VERBOSE:-0}"; then
       die "$(render_sftp_connectivity_failure_message "$RCLONE_CONFIG_SYNO_BACKUP_HOST" \
         "$RCLONE_CONFIG_SYNO_BACKUP_PORT" "$RCLONE_CONFIG_SYNO_BACKUP_USER")"
     fi
@@ -618,7 +632,11 @@ cmd_init() {
     return 0
   fi
 
-  restic init
+  local -a restic_init_args=(init)
+  if [[ "${BACKUP_VERBOSE:-0}" == "1" ]]; then
+    restic_init_args+=(--verbose)
+  fi
+  restic "${restic_init_args[@]}"
   log_info "restic init 완료"
 }
 
@@ -665,7 +683,12 @@ cmd_run() {
 
   write_resticprofile_assets "$profile_name" "$DEFAULT_ON_CALENDAR"
 
-  if resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" backup; then
+  local -a resticprofile_args=(--config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" backup)
+  if [[ "${BACKUP_VERBOSE:-0}" == "1" ]]; then
+    resticprofile_args+=(-v)
+  fi
+
+  if resticprofile "${resticprofile_args[@]}"; then
     log_info "백업 성공"
   else
     die "resticprofile backup 실패"
@@ -996,10 +1019,24 @@ backup.sh - restic 기반 백업 설치/운영 스크립트
   backup.sh uninstall [--purge]
   backup.sh wizard
   backup.sh -h | --help
+
+  모든 하위 명령에 -v/--verbose를 추가하면(위치 무관) SFTP 연결 점검 실패 시
+  ssh 자체의 진단 메시지를, init/run 실행 시 restic/resticprofile의 상세 로그를
+  함께 보여줍니다.
 EOF
 }
 
 main() {
+  local -a args=()
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      -v|--verbose) BACKUP_VERBOSE=1 ;;
+      *) args+=("$arg") ;;
+    esac
+  done
+  set -- "${args[@]}"
+
   if [[ $# -eq 0 ]]; then
     render_help
     return 0
