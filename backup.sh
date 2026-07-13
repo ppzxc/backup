@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+BACKUP_SCRIPT_VERSION="1.0.0"
+
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
 BACKUP_SSH_KEY="${BACKUP_SSH_KEY:-${RESTIC_ETC_DIR}/backup_key}"
@@ -1417,6 +1419,7 @@ cmd_setting() {
 }
 
 render_help() {
+  printf 'Restic Backup Script v%s\n\n' "$BACKUP_SCRIPT_VERSION"
   cat <<'EOF'
 backup.sh - restic 기반 백업 설치/운영 스크립트
 
@@ -1432,6 +1435,7 @@ backup.sh - restic 기반 백업 설치/운영 스크립트
   backup.sh uninstall [--purge]
   backup.sh wizard
   backup.sh -h | --help
+  backup.sh -V | --version
 
   모든 하위 명령에 -v/--verbose를 추가하면(위치 무관) SFTP 연결 점검 실패 시
   rclone 자체의 진단 메시지를, init/run 실행 시 restic/resticprofile의 상세
@@ -1458,6 +1462,10 @@ main() {
   case "$1" in
     -h|--help)
       render_help
+      return 0
+      ;;
+    -V|--version)
+      printf '%s\n' "$BACKUP_SCRIPT_VERSION"
       return 0
       ;;
     install)

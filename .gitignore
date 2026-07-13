@@ -13,3 +13,5 @@
 !/docs/adr/**
 !/docs/reference/
 !/docs/reference/**
+!/.github/
+!/.github/**
