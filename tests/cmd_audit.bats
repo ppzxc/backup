@@ -110,3 +110,25 @@ ENV
   [[ "$output" == *"${RESTIC_ETC_DIR} 권한: 700"* ]]
   [[ "$output" == *"${BACKUP_ENV_FILE} 권한: 600"* ]]
 }
+
+@test "cmd_audit --report-file writes txt and json files concurrently" {
+  local r_file="${TEST_ROOT}/var/log/audit_report.txt"
+  local j_file="${TEST_ROOT}/var/log/audit_report.json"
+
+  run cmd_audit --report-file "$r_file"
+  [ "$status" -eq 0 ]
+  [ -f "$r_file" ]
+  [ -f "$j_file" ]
+
+  # Check text report content (Plain Text format, not TTY formatted)
+  run cat "$r_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"백엔드: sftp"* ]]
+  [[ "$output" == *"일간 보관: 7개"* ]]
+
+  # Check JSON report content
+  run cat "$j_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"backend\": \"sftp\""* ]]
+  [[ "$output" == *"\"keep_daily\": 7"* ]]
+}
