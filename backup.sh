@@ -717,7 +717,7 @@ cmd_wizard() {
     setting_args+=(--endpoint "$endpoint" --bucket "$bucket" --access-key "$access_key" --secret-key "$secret_key")
   fi
 
-  printf '저장소 비밀번호: 분실 시 백업 데이터를 복구할 수 없습니다. 안전한 곳에 별도 보관하세요.\n비밀번호 입력(화면에 표시되지 않습니다): '
+  printf '저장소 비밀번호: 백업 데이터를 AES-256 기반으로 암호화하는 데 쓰이는 필수 입력값입니다. 이 비밀번호가 없으면 NAS/S3 등 원격 저장소 쪽에서도 백업 내용을 열어볼 수 없습니다. 분실 시에는 백업 데이터를 복구할 방법이 없으니 반드시 별도의 안전한 곳에 보관하세요.\n비밀번호 입력(화면에 표시되지 않습니다): '
   local password
   read -rs password
   printf '\n'
