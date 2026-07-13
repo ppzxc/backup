@@ -110,6 +110,15 @@ validate_profile_name() {
   return 0
 }
 
+validate_not_empty() {
+  local value="$1"
+  if [[ -z "$value" ]]; then
+    printf '값을 입력해야 합니다\n'
+    return 1
+  fi
+  return 0
+}
+
 parse_long_opts() {
   local spec="$1"
   shift
@@ -382,6 +391,29 @@ generate_ssh_key_if_missing() {
   chmod 644 "${BACKUP_SSH_KEY}.pub"
 }
 
+# restic init 전에 SFTP 로그인이 가능한지 미리 확인한다. 이게 없으면 rclone이
+# NewFs 단계에서 실패했을 때 restic이 원인(인증 실패/포트 막힘/키 미등록 등)을
+# 구분하지 않고 전부 "error talking HTTP to rclone: exit status 1"로 뭉뚱그린다.
+ssh_check_connectivity() {
+  local host="$1" port="$2" user="$3" key_file="$4"
+  ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
+    -p "$port" -i "$key_file" "${user}@${host}" true >/dev/null 2>&1
+}
+
+render_sftp_connectivity_failure_message() {
+  local host="$1" port="$2" user="$3"
+  cat <<EOF
+[!] SFTP(${user}@${host}:${port}) 연결에 실패해 restic init을 진행할 수 없습니다.
+
+다음을 확인하세요:
+  1) NAS의 authorized_keys(또는 File Station)에 공개키가 정확히 등록되었는지
+  2) 포트 ${port}가 방화벽/공유기에서 열려 있고 NAS로 포워딩되는지
+  3) 사용자 계정 '${user}'이 NAS에 존재하고 SFTP 접속 권한이 있는지
+
+확인 후 'backup.sh init'을 다시 실행하세요.
+EOF
+}
+
 cmd_install() {
   require_root
   local -A opts=()
@@ -573,6 +605,14 @@ cmd_init() {
   require_root
   require_backup_env
 
+  if [[ -n "${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" ]]; then
+    if ! ssh_check_connectivity "$RCLONE_CONFIG_SYNO_BACKUP_HOST" "$RCLONE_CONFIG_SYNO_BACKUP_PORT" \
+      "$RCLONE_CONFIG_SYNO_BACKUP_USER" "$RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE"; then
+      die "$(render_sftp_connectivity_failure_message "$RCLONE_CONFIG_SYNO_BACKUP_HOST" \
+        "$RCLONE_CONFIG_SYNO_BACKUP_PORT" "$RCLONE_CONFIG_SYNO_BACKUP_USER")"
+    fi
+  fi
+
   if restic_is_initialized; then
     log_info "이미 초기화된 저장소입니다. 스킵합니다."
     return 0
@@ -672,6 +712,63 @@ cmd_uninstall() {
   fi
 }
 
+# cmd_wizard 전용 대화형 입력 헬퍼. 프롬프트는 stderr로 내보내고 답변만
+# stdout으로 반환하므로 $(...)로 값을 캡처해도 프롬프트 문구가 섞이지 않는다.
+
+# validate_fn이 통과할 때까지 같은 질문을 다시 묻는다. default가 주어지면
+# "[default]"로 보여주고 빈 입력 시 그 값을 사용한다.
+prompt_validated() {
+  local message="$1" default="$2" validate_fn="$3"
+  local value err
+  while true; do
+    if [[ -n "$default" ]]; then
+      printf '%s [%s]: ' "$message" "$default" >&2
+    else
+      printf '%s: ' "$message" >&2
+    fi
+    read -r value
+    value="${value:-$default}"
+    if err=$("$validate_fn" "$value"); then
+      printf '%s' "$value"
+      return 0
+    fi
+    printf '%s 다시 입력하세요.\n' "$err" >&2
+  done
+}
+
+# 화면에 표시되지 않는 비밀번호 입력을 받고, 빈 값이면 다시 묻는다.
+prompt_secret_required() {
+  local message="$1"
+  local value
+  while true; do
+    printf '%s' "$message" >&2
+    read -rs value
+    printf '\n' >&2
+    if [[ -n "$value" ]]; then
+      printf '%s' "$value"
+      return 0
+    fi
+    printf '값을 입력해야 합니다. 다시 입력하세요.\n' >&2
+  done
+}
+
+# 1(S3)/2(SFTP) 중 하나를 고를 때까지 다시 묻고, 선택된 backend 이름을 반환한다.
+prompt_backend_choice() {
+  local choice
+  while true; do
+    printf '백엔드를 선택하세요:\n' >&2
+    printf '  [1] S3 호환 스토리지 - HTTPS 기반 오브젝트 스토리지(AWS S3, MinIO 등)\n' >&2
+    printf '  [2] SFTP(NAS) - SSH로 접속하는 시놀로지 NAS 등\n' >&2
+    printf '선택 (1/2): ' >&2
+    read -r choice
+    case "$choice" in
+      1) printf 's3'; return 0 ;;
+      2) printf 'sftp'; return 0 ;;
+      *) printf '1 또는 2를 입력하세요. 다시 입력하세요.\n' >&2 ;;
+    esac
+  done
+}
+
 cmd_wizard() {
   require_root
 
@@ -680,47 +777,27 @@ cmd_wizard() {
     cmd_install
   fi
 
-  printf '백엔드를 선택하세요:\n'
-  printf '  [1] S3 호환 스토리지 - HTTPS 기반 오브젝트 스토리지(AWS S3, MinIO 등)\n'
-  printf '  [2] SFTP(NAS) - SSH로 접속하는 시놀로지 NAS 등\n'
-  printf '선택 (1/2): '
-  local choice
-  read -r choice
-
   local backend
-  case "$choice" in
-    1) backend="s3" ;;
-    2) backend="sftp" ;;
-    *) die "1 또는 2를 입력하세요" ;;
-  esac
+  backend=$(prompt_backend_choice)
 
   local -a setting_args=(--backend "$backend" --force)
 
   if [[ "$backend" == "sftp" ]]; then
-    printf 'NAS_IP: 백업 데이터를 저장할 NAS의 IP 주소입니다.\nNAS IP 주소 입력: '
-    local host; read -r host
-    printf 'PORT: NAS의 SSH/SFTP 포트입니다. Enter로 기본값(%s) 사용.\n포트 입력: ' "$DEFAULT_SFTP_PORT"
-    local port; read -r port
-    port="${port:-$DEFAULT_SFTP_PORT}"
-    printf 'USER: NAS에 접속할 SFTP 계정입니다.\n사용자 입력: '
-    local user; read -r user
+    local host; host=$(prompt_validated "백업 데이터를 저장할 NAS의 IP 주소를 입력하세요" "" validate_not_empty)
+    local port; port=$(prompt_validated "NAS의 SSH/SFTP 접속 포트를 입력하세요" "$DEFAULT_SFTP_PORT" validate_port)
+    local user; user=$(prompt_validated "NAS에 접속할 SFTP 계정명을 입력하세요" "" validate_not_empty)
     setting_args+=(--host "$host" --port "$port" --user "$user")
   else
-    printf 'S3_ENDPOINT: 접속할 S3 호환 엔드포인트 URL입니다.\n엔드포인트 입력: '
-    local endpoint; read -r endpoint
-    printf 'BUCKET: 백업을 저장할 버킷 이름입니다.\n버킷 입력: '
-    local bucket; read -r bucket
-    printf 'ACCESS_KEY: 버킷 접근용 access key입니다.\naccess key 입력: '
-    local access_key; read -r access_key
-    printf 'SECRET_KEY: 버킷 접근용 secret key입니다.\nsecret key 입력: '
-    local secret_key; read -r secret_key
+    local endpoint; endpoint=$(prompt_validated "접속할 S3 호환 엔드포인트 URL을 입력하세요" "" validate_not_empty)
+    local bucket; bucket=$(prompt_validated "백업을 저장할 버킷 이름을 입력하세요" "" validate_not_empty)
+    local access_key; access_key=$(prompt_validated "버킷 접근용 access key를 입력하세요" "" validate_not_empty)
+    local secret_key; secret_key=$(prompt_validated "버킷 접근용 secret key를 입력하세요" "" validate_not_empty)
     setting_args+=(--endpoint "$endpoint" --bucket "$bucket" --access-key "$access_key" --secret-key "$secret_key")
   fi
 
-  printf '저장소 비밀번호: 백업 데이터를 AES-256 기반으로 암호화하는 데 쓰이는 필수 입력값입니다. 이 비밀번호가 없으면 NAS/S3 등 원격 저장소 쪽에서도 백업 내용을 열어볼 수 없습니다. 분실 시에는 백업 데이터를 복구할 방법이 없으니 반드시 별도의 안전한 곳에 보관하세요.\n비밀번호 입력(화면에 표시되지 않습니다): '
   local password
-  read -rs password
-  printf '\n'
+  password=$(prompt_secret_required '저장소 비밀번호: 백업 데이터를 AES-256 기반으로 암호화하는 데 쓰이는 필수 입력값입니다. 이 비밀번호가 없으면 NAS/S3 등 원격 저장소 쪽에서도 백업 내용을 열어볼 수 없습니다. 분실 시에는 백업 데이터를 복구할 방법이 없으니 반드시 별도의 안전한 곳에 보관하세요.
+비밀번호 입력(화면에 표시되지 않습니다): ')
   setting_args+=(--password "$password")
 
   printf '\n다음 설정으로 진행합니다:\n'

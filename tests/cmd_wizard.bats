@@ -23,6 +23,7 @@ setup() {
     echo "ssh-ed25519 AAAAFAKEKEY test@stub" > "${keyfile}.pub"
   '
   stub_command "restic" 'case "$1" in snapshots) exit 1 ;; init) exit 0 ;; esac'
+  stub_command "ssh" 'exit 0'
   stub_command "systemctl" 'true'
   stub_command "resticprofile" 'true'
 }
@@ -67,4 +68,55 @@ setup() {
   [ "$status" -eq 0 ]
   [ ! -f "$BACKUP_ENV_FILE" ]
   [[ "$output" == *"설정을 취소했습니다"* ]]
+}
+
+@test "wizard re-prompts instead of dying on an invalid backend choice" {
+  run bash -c '
+    source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
+    printf "9\n2\n1.2.3.4\n22\nbackup_restic\nrepo-pass\n\ny\n\n" | cmd_wizard
+  '
+  [ "$status" -eq 0 ]
+  [ -f "$BACKUP_ENV_FILE" ]
+  [[ "$output" == *"1 또는 2를 입력하세요"* ]]
+}
+
+@test "wizard re-prompts on an empty required field instead of accepting it" {
+  run bash -c '
+    source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
+    printf "2\n\n1.2.3.4\n22\nbackup_restic\nrepo-pass\n\ny\n\n" | cmd_wizard
+  '
+  [ "$status" -eq 0 ]
+  grep -q 'RCLONE_CONFIG_SYNO_BACKUP_HOST="1.2.3.4"' "$BACKUP_ENV_FILE"
+  [[ "$output" == *"값을 입력해야 합니다"* ]]
+}
+
+@test "wizard re-prompts on an invalid port and accepts the default on retry" {
+  run bash -c '
+    source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
+    printf "2\n1.2.3.4\nabc\n\nbackup_restic\nrepo-pass\n\ny\n\n" | cmd_wizard
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"port must be numeric"* ]]
+  grep -q 'RCLONE_CONFIG_SYNO_BACKUP_PORT="22"' "$BACKUP_ENV_FILE"
+}
+
+@test "wizard shows the port default inline instead of a separate sentence" {
+  run bash -c '
+    source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
+    printf "2\n1.2.3.4\n22\nbackup_restic\nrepo-pass\n\ny\n\n" | cmd_wizard
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[22]"* ]]
+}
+
+@test "wizard prompts don't leak raw internal field names" {
+  local body
+  body=$(declare -f cmd_wizard)
+  [[ "$body" != *"NAS_IP:"* ]]
+  [[ "$body" != *"PORT:"* ]]
+  [[ "$body" != *"USER:"* ]]
+  [[ "$body" != *"S3_ENDPOINT:"* ]]
+  [[ "$body" != *"BUCKET:"* ]]
+  [[ "$body" != *"ACCESS_KEY:"* ]]
+  [[ "$body" != *"SECRET_KEY:"* ]]
 }
