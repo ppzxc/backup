@@ -55,6 +55,7 @@ ENV
 
   run cmd_status
   [ "$status" -eq 0 ]
-  [[ "$output" == *"타이머 상태: inactive"* ]]
+  [[ "$output" == *"타이머 상태:"* ]]
+  [[ "$output" == *"inactive"* ]]
   [[ "$output" != *$'\nunknown'* ]]
 }

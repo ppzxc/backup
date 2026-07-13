@@ -88,11 +88,60 @@ $ sudo ./backup.sh run
 | **`status`** | 최근 백업 스냅샷 이력 및 설정 권한 정보를 간결하게 검증 | `backup.sh status` |
 | **`audit`** | 컴플라이언스 규정에 부합하는 상세 리포트를 화면에 출력하고 보고서 파일 동시 저장 지원 | `backup.sh audit --report` |
 | **`uninstall`**| 생성된 스케줄을 취소하고, `--purge` 추가 시 관련 환경 설정 및 캐시 영구 삭제 | `backup.sh uninstall --purge` |
+| **`migrate`**  | 기존 백업 데이터를 신규 백엔드로 이전하고, 호스트 서버 설정 및 스케줄러를 완전 전환 | `backup.sh migrate` |
 | **`wizard`** | 초보자를 위해 백업 전 과정을 단계별 대화형으로 세팅해 주는 마법사 | `backup.sh wizard` |
 
 ### 📑 `audit` 상세 옵션
 * `--report`: 기본 표준 디렉터리(`/var/log/restic-backup/`) 하위에 인간 가독용 텍스트 보고서(`audit_report.txt`)와 기계 가독용 JSON 보고서(`audit_report.json`)를 동시 저장합니다.
 * `--report-file <경로>`: 지정된 파일명으로 텍스트 보고서를 저장하며, 동등한 위치에 확장자만 `.json`으로 변환된 JSON 보고서를 함께 자동 생성합니다.
+
+---
+
+## 🔄 백엔드 마이그레이션 (`migrate`)
+
+기존에 가동 중이던 백업 저장소(SFTP 또는 S3)의 모든 백업 데이터(전체 스냅샷 이력)를 새로운 목적지 저장소로 안전하게 복사하고, 현재 `backup.sh`가 돌아가고 있는 호스트 서버(클라이언트)의 백업 설정(`backup.env`), 프로필 및 `systemd` 스케줄러를 새 저장소 정보로 **완전히 전환**해 주는 고성능 마이그레이션 도구입니다.
+
+### 🛡️ 주요 특징 및 안정성 장치
+1. **사전 정합성 점검 (Pre-flight check)**: 마이그레이션 실행 전에 기존 설정의 유효성 검사 및 소스 저장소에 대한 인증/연결성 확인(`snapshots` 호출)을 선제적으로 진행합니다. 소스 접속 오류가 있으면 이관을 중단하고 기존 환경을 유지하여 안전하게 보호합니다.
+2. **중복제거율(Deduplication) 100% 보존**: 신규 목적지 저장소가 아직 비어 있는 경우, 단순 신규 생성 대신 소스 저장소의 청커 파라미터를 그대로 복제하여 목적지를 초기화합니다 (`--copy-chunker-params` 계승).
+3. **충돌 방지 이관 구조**: SFTP ➡️ SFTP, S3 ➡️ S3와 같이 동일한 프로토콜 간 마이그레이션 시 발생하는 환경변수/인증 정보의 충돌을 방지하기 위해 가상의 임시 rclone 환경변수(`RCLONE_CONFIG_SYNO_BACKUP_DST_*`)를 구성하여 안전하게 데이터 복사(`restic copy`)를 수행합니다.
+4. **자동 무결성 검증**: 마이그레이션이 완료되는 즉시 대상 저장소에 대해 데이터 무결성 검증(`restic check`)을 수행하여 복사 중 발생한 손상이 없는지 진단합니다.
+5. **호스트 스케줄러 자동 갱신**: 기존에 백업 스케줄(`systemd timer`)이 활성화되어 돌아가고 있던 서버의 경우, 설정 이관이 완료되면 새 목적지 정보를 반영하여 systemd 유닛들을 자동으로 재생성 및 활성화(Reload & Enable)해 줍니다.
+6. **안전성 (원본 데이터 보존)**: 마이그레이션 성공 후에도 기존 저장소 내부의 옛날 백업 데이터들은 오작동 방지 및 혹시 모를 안전을 위해 자동으로 삭제하지 않으며, 이관이 완전히 끝난 후 수동 삭제할 수 있도록 가이드를 안내합니다.
+
+### 💻 사용 방법 (CLI / Interactive)
+
+#### A. S3 호환 저장소로 마이그레이션
+```bash
+$ sudo ./backup.sh migrate \
+    --backend s3 \
+    --endpoint https://new-s3.example.com \
+    --bucket new-backup-bucket \
+    --access-key NEW_ACCESS_KEY \
+    --secret-key NEW_SECRET_KEY \
+    [--new-password 새저장소암호] \
+    [--skip-check]
+```
+
+#### B. SFTP 저장소로 마이그레이션
+```bash
+$ sudo ./backup.sh migrate \
+    --backend sftp \
+    --host 192.168.1.200 \
+    --user new_backup_user \
+    [--port 22] \
+    [--new-password 새저장소암호] \
+    [--skip-check]
+```
+
+#### C. 대화형 설정 마법사 (Interactive Wizard)
+목적지 백엔드 옵션 플래그가 주어지지 않은 상태에서 터미널(TTY) 모드로 실행하면 대화형 프롬프트를 통해 마이그레이션할 대상 저장소 설정을 차례로 질문합니다.
+```bash
+$ sudo ./backup.sh migrate
+```
+
+* `--new-password`: 새로운 저장소에 지정할 비밀번호를 입력합니다. (생략 시 기존 저장소의 비밀번호를 기본 사용)
+* `--skip-check`: 마이그레이션 완료 후 무결성 검사(`restic check`) 단계를 스킵합니다. (대량 데이터 전송 시 시간 단축용)
 
 ---
 
