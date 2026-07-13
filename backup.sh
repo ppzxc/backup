@@ -780,34 +780,214 @@ render_audit_report() {
     encrypted_note="${encrypted_note} - 경고: 비밀번호 미설정"
   fi
 
-  printf '=== 백업 정책 ===\n'
-  printf '백엔드: %s\n' "$backend"
-  printf '저장소 위치: %s\n' "${RESTIC_REPOSITORY:-알 수 없음}"
-  printf '암호화: %s\n' "$encrypted_note"
-  printf '백업 대상: %s\n' "${BACKUP_TARGETS:-알 수 없음}"
-  printf '제외 패턴: %s\n' "${BACKUP_EXCLUDES:-(없음)}"
-  printf '\n'
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    # Beautiful ANSI styled output for interactive TTY
+    local C_RESET="\033[0m"
+    local C_BOLD="\033[1m"
+    local C_DIM="\033[2m"
+    local C_RED="\033[31m"
+    local C_GREEN="\033[32m"
+    local C_YELLOW="\033[33m"
+    local C_BLUE="\033[34m"
+    local C_CYAN="\033[36m"
+    local C_GRAY="\033[90m"
 
-  printf '=== 보존 정책 ===\n'
-  printf '일간 보관: %s개\n' "${KEEP_DAILY:-?}"
-  printf '주간 보관: %s개\n' "${KEEP_WEEKLY:-?}"
-  printf '월간 보관: %s개\n' "${KEEP_MONTHLY:-?}"
-  printf '\n'
+    # Style backend value
+    local styled_backend="${C_BOLD}${C_BLUE}${backend}${C_RESET}"
+    
+    # Style repo
+    local styled_repo="${C_BOLD}${RESTIC_REPOSITORY:-알 수 없음}${C_RESET}"
 
-  printf '=== 스케줄 ===\n'
-  printf '반복 주기(OnCalendar): %s\n' "$on_calendar"
-  printf '타이머 등록 상태: %s\n' "$timer_enabled"
-  printf '타이머 실행 상태: %s\n' "$timer_active"
-  printf '다음 실행 예정: %s\n' "$next_run"
-  printf '\n'
+    # Style encryption note
+    local styled_crypto
+    if [[ -z "${RESTIC_PASSWORD:-}" ]]; then
+      styled_crypto="${C_RED}${encrypted_note}${C_RESET}"
+    else
+      styled_crypto="${C_GREEN}${encrypted_note}${C_RESET}"
+    fi
 
-  printf '=== 접근 통제 ===\n'
-  printf '%s 권한: %s\n' "$RESTIC_ETC_DIR" "$etc_perm"
-  printf '%s 권한: %s\n' "$BACKUP_ENV_FILE" "$env_perm"
+    # Style targets/excludes
+    local styled_targets="${C_BOLD}${BACKUP_TARGETS:-알 수 없음}${C_RESET}"
+    local styled_excludes="${C_DIM}${BACKUP_EXCLUDES:-(없음)}${C_RESET}"
+
+    # Style retention
+    local styled_daily="${C_BOLD}${KEEP_DAILY:-?}${C_RESET}"
+    local styled_weekly="${C_BOLD}${KEEP_WEEKLY:-?}${C_RESET}"
+    local styled_monthly="${C_BOLD}${KEEP_MONTHLY:-?}${C_RESET}"
+
+    # Style schedule
+    local styled_on_calendar="${C_BOLD}${on_calendar}${C_RESET}"
+    
+    local styled_timer_enabled
+    if [[ "$timer_enabled" == "enabled" ]]; then
+      styled_timer_enabled="${C_GREEN}${timer_enabled}${C_RESET}"
+    elif [[ "$timer_enabled" == "disabled" ]]; then
+      styled_timer_enabled="${C_RED}${timer_enabled}${C_RESET}"
+    else
+      styled_timer_enabled="${C_GRAY}${timer_enabled}${C_RESET}"
+    fi
+
+    local styled_timer_active
+    if [[ "$timer_active" == "active" ]]; then
+      styled_timer_active="${C_GREEN}${timer_active}${C_RESET}"
+    elif [[ "$timer_active" == "inactive" ]]; then
+      styled_timer_active="${C_GRAY}${timer_active}${C_RESET}"
+    else
+      styled_timer_active="${C_RED}${timer_active}${C_RESET}"
+    fi
+
+    local styled_next_run="${C_BOLD}${next_run}${C_RESET}"
+
+    # Style permissions
+    local styled_etc_perm
+    if [[ "$etc_perm" == "700" ]]; then
+      styled_etc_perm="${C_GREEN}${etc_perm}${C_RESET} ${C_GRAY}(안전)${C_RESET}"
+    else
+      styled_etc_perm="${C_RED}${etc_perm}${C_RESET} ${C_YELLOW}(경고: 700 권장)${C_RESET}"
+    fi
+
+    local styled_env_perm
+    if [[ "$env_perm" == "600" ]]; then
+      styled_env_perm="${C_GREEN}${env_perm}${C_RESET} ${C_GRAY}(안전)${C_RESET}"
+    else
+      styled_env_perm="${C_RED}${env_perm}${C_RESET} ${C_YELLOW}(경고: 600 권장)${C_RESET}"
+    fi
+
+    printf '%b%b⚙  백업 정책 (Backup Policy)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+    printf '%b├──%b 백엔드:    %b\n' "$C_GRAY" "$C_RESET" "$styled_backend"
+    printf '%b├──%b 저장소 위치: %b\n' "$C_GRAY" "$C_RESET" "$styled_repo"
+    printf '%b├──%b 암호화:    %b\n' "$C_GRAY" "$C_RESET" "$styled_crypto"
+    printf '%b├──%b 백업 대상: %b\n' "$C_GRAY" "$C_RESET" "$styled_targets"
+    printf '%b└──%b 제외 패턴: %b\n' "$C_GRAY" "$C_RESET" "$styled_excludes"
+    printf '\n'
+
+    printf '%b%b⚙  보존 정책 (Retention Policy)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+    printf '%b├──%b 일간 보관: %b개\n' "$C_GRAY" "$C_RESET" "$styled_daily"
+    printf '%b├──%b 주간 보관: %b개\n' "$C_GRAY" "$C_RESET" "$styled_weekly"
+    printf '%b└──%b 월간 보관: %b개\n' "$C_GRAY" "$C_RESET" "$styled_monthly"
+    printf '\n'
+
+    printf '%b%b⚙  스케줄 (Schedule)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+    printf '%b├──%b 반복 주기(OnCalendar): %b\n' "$C_GRAY" "$C_RESET" "$styled_on_calendar"
+    printf '%b├──%b 타이머 등록 상태:      %b\n' "$C_GRAY" "$C_RESET" "$styled_timer_enabled"
+    printf '%b├──%b 타이머 실행 상태:      %b\n' "$C_GRAY" "$C_RESET" "$styled_timer_active"
+    printf '%b└──%b 다음 실행 예정:        %b\n' "$C_GRAY" "$C_RESET" "$styled_next_run"
+    printf '\n'
+
+    printf '%b%b⚙  접근 통제 (Access Control)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+    printf '%b├──%b %s 권한: %b\n' "$C_GRAY" "$C_RESET" "$RESTIC_ETC_DIR" "$styled_etc_perm"
+    printf '%b└──%b %s 권한: %b\n' "$C_GRAY" "$C_RESET" "$BACKUP_ENV_FILE" "$styled_env_perm"
+  else
+    # Simple plain-text fallback (matches original structure exactly for backward compatibility & tests)
+    printf '=== 백업 정책 ===\n'
+    printf '백엔드: %s\n' "$backend"
+    printf '저장소 위치: %s\n' "${RESTIC_REPOSITORY:-알 수 없음}"
+    printf '암호화: %s\n' "$encrypted_note"
+    printf '백업 대상: %s\n' "${BACKUP_TARGETS:-알 수 없음}"
+    printf '제외 패턴: %s\n' "${BACKUP_EXCLUDES:-(없음)}"
+    printf '\n'
+
+    printf '=== 보존 정책 ===\n'
+    printf '일간 보관: %s개\n' "${KEEP_DAILY:-?}"
+    printf '주간 보관: %s개\n' "${KEEP_WEEKLY:-?}"
+    printf '월간 보관: %s개\n' "${KEEP_MONTHLY:-?}"
+    printf '\n'
+
+    printf '=== 스케줄 ===\n'
+    printf '반복 주기(OnCalendar): %s\n' "$on_calendar"
+    printf '타이머 등록 상태: %s\n' "$timer_enabled"
+    printf '타이머 실행 상태: %s\n' "$timer_active"
+    printf '다음 실행 예정: %s\n' "$next_run"
+    printf '\n'
+
+    printf '=== 접근 통제 ===\n'
+    printf '%s 권한: %s\n' "$RESTIC_ETC_DIR" "$etc_perm"
+    printf '%s 권한: %s\n' "$BACKUP_ENV_FILE" "$env_perm"
+  fi
+}
+
+render_audit_report_json() {
+  local backend="$1" on_calendar="$2" timer_enabled="$3" timer_active="$4" next_run="$5" etc_perm="$6" env_perm="$7"
+
+  local hostname; hostname=$(hostname 2>/dev/null || echo "unknown")
+  local timestamp; timestamp=$(date --iso-8601=seconds 2>/dev/null || date -Iseconds 2>/dev/null || date "+%Y-%m-%dT%H:%M:%S%z")
+
+  local repo="${RESTIC_REPOSITORY:-}"
+  local targets="${BACKUP_TARGETS:-}"
+  local excludes_val="${BACKUP_EXCLUDES:-}"
+
+  local keep_daily="${KEEP_DAILY:-null}"
+  local keep_weekly="${KEEP_WEEKLY:-null}"
+  local keep_monthly="${KEEP_MONTHLY:-null}"
+
+  local has_password_warning="false"
+  if [[ -z "${RESTIC_PASSWORD:-}" ]]; then
+    has_password_warning="true"
+  fi
+
+  local etc_safe="false"
+  if [[ "$etc_perm" == "700" ]]; then
+    etc_safe="true"
+  fi
+
+  local env_safe="false"
+  if [[ "$env_perm" == "600" ]]; then
+    env_safe="true"
+  fi
+
+  local snapshots_json
+  snapshots_json=$(restic snapshots --json 2>/dev/null || echo "[]")
+  if [[ -z "$snapshots_json" || "$snapshots_json" == "null" ]]; then
+    snapshots_json="[]"
+  fi
+
+  cat <<EOF
+{
+  "hostname": "${hostname//\"/\\\"}",
+  "timestamp": "${timestamp}",
+  "backup_policy": {
+    "backend": "${backend//\"/\\\"}",
+    "repository": "${repo//\"/\\\"}",
+    "encryption": "AES-256 (restic 저장소 자체 암호화)",
+    "encryption_warning": ${has_password_warning},
+    "targets": "${targets//\"/\\\"}",
+    "excludes": "${excludes_val//\"/\\\"}"
+  },
+  "retention_policy": {
+    "keep_daily": ${keep_daily},
+    "keep_weekly": ${keep_weekly},
+    "keep_monthly": ${keep_monthly}
+  },
+  "schedule": {
+    "on_calendar": "${on_calendar//\"/\\\"}",
+    "timer_enabled": "${timer_enabled//\"/\\\"}",
+    "timer_active": "${timer_active//\"/\\\"}",
+    "next_run": "${next_run//\"/\\\"}"
+  },
+  "access_control": {
+    "etc_restic_dir": "${RESTIC_ETC_DIR}",
+    "etc_restic_dir_permission": "${etc_perm}",
+    "etc_restic_dir_safe": ${etc_safe},
+    "backup_env_file": "${BACKUP_ENV_FILE}",
+    "backup_env_file_permission": "${env_perm}",
+    "backup_env_file_safe": ${env_safe}
+  },
+  "snapshots": ${snapshots_json}
+}
+EOF
 }
 
 cmd_audit() {
   require_backup_env
+
+  local -A opts=()
+  parse_opts_into opts "report-file: report" -- "$@"
+  local report_file="${opts[report-file]:-}"
+  local report="${opts[report]:-0}"
+
+  if (( report )) && [[ -z "$report_file" ]]; then
+    report_file="/var/log/restic-backup/audit_report.txt"
+  fi
 
   local profile_name; profile_name=$(resolve_profile_name)
   local timer_unit; timer_unit=$(resticprofile_timer_unit_name "$profile_name")
@@ -825,13 +1005,57 @@ cmd_audit() {
     backend="sftp"
   fi
 
+  local etc_perm; etc_perm="$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '?')"
+  local env_perm; env_perm="$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '?')"
+
+  # Always print to screen
   render_audit_report "$backend" "${on_calendar:-알 수 없음}" "${timer_enabled:-unknown}" \
     "${timer_active:-unknown}" "${next_run:-알 수 없음}" \
-    "$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '?')" \
-    "$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '?')"
+    "$etc_perm" "$env_perm"
 
-  printf '\n=== 백업 이력(restic snapshots) ===\n'
-  restic snapshots 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    local C_RESET="\033[0m"
+    local C_BOLD="\033[1m"
+    local C_CYAN="\033[36m"
+    printf '\n%b⚙  백업 이력(restic snapshots)%b\n' "${C_CYAN}${C_BOLD}" "${C_RESET}"
+    restic snapshots 2>/dev/null | sed 's/^/  /' || printf '  (조회 실패 또는 미초기화)\n'
+  else
+    printf '\n=== 백업 이력(restic snapshots) ===\n'
+    restic snapshots 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
+  fi
+
+  # If report_file is requested, save both plain text and JSON versions
+  if [[ -n "$report_file" ]]; then
+    mkdir -p "$(dirname "$report_file")"
+    chmod 700 "$(dirname "$report_file")" 2>/dev/null || true
+
+    # Save plain text report
+    (
+      render_audit_report "$backend" "${on_calendar:-알 수 없음}" "${timer_enabled:-unknown}" \
+        "${timer_active:-unknown}" "${next_run:-알 수 없음}" \
+        "$etc_perm" "$env_perm"
+      printf '\n=== 백업 이력(restic snapshots) ===\n'
+      restic snapshots 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
+    ) > "$report_file"
+    chmod 600 "$report_file"
+
+    # Save JSON report
+    local json_report_file
+    if [[ "$report_file" =~ \.(txt|md)$ ]]; then
+      json_report_file="${report_file%.*}.json"
+    else
+      json_report_file="${report_file}.json"
+    fi
+
+    render_audit_report_json "$backend" "${on_calendar:-알 수 없음}" "${timer_enabled:-unknown}" \
+      "${timer_active:-unknown}" "${next_run:-알 수 없음}" \
+      "$etc_perm" "$env_perm" > "$json_report_file"
+    chmod 600 "$json_report_file"
+
+    log_info "감사 보고서가 동시 저장되었습니다:"
+    log_info "  - 텍스트 보고서: $report_file"
+    log_info "  - JSON 보고서: $json_report_file"
+  fi
 }
 
 cmd_uninstall() {
@@ -1144,7 +1368,7 @@ backup.sh - restic 기반 백업 설치/운영 스크립트
   backup.sh schedule disable
   backup.sh run
   backup.sh status
-  backup.sh audit
+  backup.sh audit [--report] [--report-file <경로>]
   backup.sh uninstall [--purge]
   backup.sh wizard
   backup.sh -h | --help
@@ -1228,6 +1452,6 @@ main() {
   esac
 }
 
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" ]]; then
   main "$@"
 fi
