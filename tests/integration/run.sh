@@ -109,4 +109,24 @@ docker compose exec -T app bash -c '
   bash backup.sh schedule disable || true
 '
 
+echo "=== SFTP to S3 마이그레이션 시나리오 ==="
+# Create migration destination bucket
+docker compose exec -T minio mc mb -p local/restic-test-migrate || true
+
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh migrate --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test-migrate \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --new-password migrated-repo-password --force
+'
+
+echo "=== 마이그레이션된 S3 스냅샷 확인 ==="
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  source /etc/restic/backup.env
+  restic snapshots --json | grep -q "\"hostname\""
+'
+
 echo "=== 모든 통합 테스트 통과 ==="
+
