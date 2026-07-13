@@ -569,77 +569,84 @@ render_resticprofile_config() {
   fi
 }
 
+install_binary() {
+  local name="$1" version="$2" url="$3" expected_sha="$4" target_path="$5" format="$6" archive_path="${7:-}"
+
+  if [[ -x "$target_path" ]]; then
+    return 0
+  fi
+
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  local download_file="${tmp_dir}/${name}_download"
+
+  log_info "${name} v${version} 다운로드 중..."
+  if ! curl -fsSL -o "$download_file" "$url"; then
+    rm -rf "$tmp_dir"
+    die "[!] ${name} 다운로드 실패: ${url}"
+  fi
+
+  local actual_sha256
+  actual_sha256=$(sha256sum "$download_file" | awk '{print $1}')
+  if [[ "$actual_sha256" != "$expected_sha" ]]; then
+    rm -rf "$tmp_dir"
+    die "[!] ${name} 체크섬 불일치 (예상: ${expected_sha}, 실제: ${actual_sha256}) - 설치를 중단합니다"
+  fi
+
+  log_info "${name} 압축 해제 및 설치 중..."
+  case "$format" in
+    bz2)
+      if ! python3 -c "import bz2, shutil, sys; shutil.copyfileobj(bz2.open(sys.argv[1], 'rb'), open(sys.argv[2], 'wb'))" \
+        "$download_file" "${tmp_dir}/${name}" >/dev/null 2>&1; then
+        rm -rf "$tmp_dir"
+        die "[!] ${name} bz2 압축 해제 실패"
+      fi
+      ;;
+    zip)
+      local extract_dir="${tmp_dir}/extracted"
+      if ! python3 -m zipfile -e "$download_file" "$extract_dir" >/dev/null 2>&1; then
+        rm -rf "$tmp_dir"
+        die "[!] ${name} zip 압축 해제 실패"
+      fi
+      mv "${extract_dir}/${archive_path}" "${tmp_dir}/${name}"
+      ;;
+    tar.gz)
+      if ! tar -xzf "$download_file" -C "$tmp_dir" "$archive_path" >/dev/null 2>&1; then
+        rm -rf "$tmp_dir"
+        die "[!] ${name} tar.gz 압축 해제 실패"
+      fi
+      if [[ "$archive_path" != "$name" ]]; then
+        mv "${tmp_dir}/${archive_path}" "${tmp_dir}/${name}"
+      fi
+      ;;
+    *)
+      rm -rf "$tmp_dir"
+      die "[!] 지원하지 않는 압축 형식: ${format}"
+      ;;
+  esac
+
+  mkdir -p "$(dirname "$target_path")"
+  if ! install -m 0755 "${tmp_dir}/${name}" "$target_path"; then
+    rm -rf "$tmp_dir"
+    die "[!] ${name} 바이너리 설치(install) 실패"
+  fi
+
+  rm -rf "$tmp_dir"
+}
+
 install_resticprofile() {
-  if [[ -x "$RESTICPROFILE_INSTALL_PATH" ]]; then
-    return 0
-  fi
-
-  local tmp_dir
-  tmp_dir=$(mktemp -d)
-  curl -fsSL -o "${tmp_dir}/resticprofile.tar.gz" "$RESTICPROFILE_URL"
-
-  local actual_sha256
-  actual_sha256=$(sha256sum "${tmp_dir}/resticprofile.tar.gz" | awk '{print $1}')
-  if [[ "$actual_sha256" != "$RESTICPROFILE_SHA256" ]]; then
-    rm -rf "$tmp_dir"
-    die "resticprofile 체크섬 불일치 (예상: ${RESTICPROFILE_SHA256}, 실제: ${actual_sha256}) - 설치를 중단합니다"
-  fi
-
-  tar -xzf "${tmp_dir}/resticprofile.tar.gz" -C "$tmp_dir" resticprofile
-  mkdir -p "$(dirname "$RESTICPROFILE_INSTALL_PATH")"
-  install -m 0755 "${tmp_dir}/resticprofile" "$RESTICPROFILE_INSTALL_PATH"
-  rm -rf "$tmp_dir"
+  install_binary "resticprofile" "$RESTICPROFILE_VERSION" "$RESTICPROFILE_URL" \
+    "$RESTICPROFILE_SHA256" "$RESTICPROFILE_INSTALL_PATH" "tar.gz" "resticprofile"
 }
 
-# restic 릴리스 에셋은 tar가 아니라 순수 bzip2 압축 바이너리 한 개뿐이라
-# python3의 bz2 모듈로 직접 풀어낸다(unzip/bunzip2는 최소 설치 이미지에
-# 없을 수 있지만, dnf 자체가 python3에 의존하므로 RHEL 계열이면 항상 있다).
 install_restic() {
-  if [[ -x "$RESTIC_INSTALL_PATH" ]]; then
-    return 0
-  fi
-
-  local tmp_dir
-  tmp_dir=$(mktemp -d)
-  curl -fsSL -o "${tmp_dir}/restic.bz2" "$RESTIC_URL"
-
-  local actual_sha256
-  actual_sha256=$(sha256sum "${tmp_dir}/restic.bz2" | awk '{print $1}')
-  if [[ "$actual_sha256" != "$RESTIC_SHA256" ]]; then
-    rm -rf "$tmp_dir"
-    die "restic 체크섬 불일치 (예상: ${RESTIC_SHA256}, 실제: ${actual_sha256}) - 설치를 중단합니다"
-  fi
-
-  python3 -c "import bz2, shutil, sys; shutil.copyfileobj(bz2.open(sys.argv[1], 'rb'), open(sys.argv[2], 'wb'))" \
-    "${tmp_dir}/restic.bz2" "${tmp_dir}/restic"
-  mkdir -p "$(dirname "$RESTIC_INSTALL_PATH")"
-  install -m 0755 "${tmp_dir}/restic" "$RESTIC_INSTALL_PATH"
-  rm -rf "$tmp_dir"
+  install_binary "restic" "$RESTIC_VERSION" "$RESTIC_URL" \
+    "$RESTIC_SHA256" "$RESTIC_INSTALL_PATH" "bz2"
 }
 
-# rclone 릴리스 에셋은 zip이라 python3의 zipfile 모듈로 풀어낸다. 압축 안의
-# 최상위 디렉토리명이 버전 문자열을 포함해 고정된 형태("rclone-vX.Y.Z-linux-amd64")로
-# 나오므로 별도 탐색 없이 바로 경로를 구성할 수 있다.
 install_rclone() {
-  if [[ -x "$RCLONE_INSTALL_PATH" ]]; then
-    return 0
-  fi
-
-  local tmp_dir
-  tmp_dir=$(mktemp -d)
-  curl -fsSL -o "${tmp_dir}/rclone.zip" "$RCLONE_URL"
-
-  local actual_sha256
-  actual_sha256=$(sha256sum "${tmp_dir}/rclone.zip" | awk '{print $1}')
-  if [[ "$actual_sha256" != "$RCLONE_SHA256" ]]; then
-    rm -rf "$tmp_dir"
-    die "rclone 체크섬 불일치 (예상: ${RCLONE_SHA256}, 실제: ${actual_sha256}) - 설치를 중단합니다"
-  fi
-
-  python3 -m zipfile -e "${tmp_dir}/rclone.zip" "${tmp_dir}/extracted"
-  mkdir -p "$(dirname "$RCLONE_INSTALL_PATH")"
-  install -m 0755 "${tmp_dir}/extracted/rclone-v${RCLONE_VERSION}-linux-amd64/rclone" "$RCLONE_INSTALL_PATH"
-  rm -rf "$tmp_dir"
+  install_binary "rclone" "$RCLONE_VERSION" "$RCLONE_URL" \
+    "$RCLONE_SHA256" "$RCLONE_INSTALL_PATH" "zip" "rclone-v${RCLONE_VERSION}-linux-amd64/rclone"
 }
 
 self_install_copy() {

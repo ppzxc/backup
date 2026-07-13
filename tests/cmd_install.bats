@@ -223,3 +223,17 @@ setup() {
   run "$RCLONE_INSTALL_PATH"
   [[ "$output" == "already-here" ]]
 }
+
+@test "install_binary fails with checksum mismatch" {
+  run install_binary "testtool" "1.0.0" "http://fixture.invalid/restic.bz2" "INCORRECTSHA" "${TEST_ROOT}/bin/testtool" "bz2"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"체크섬 불일치"* ]]
+}
+
+@test "install_binary fails when curl download fails" {
+  stub_command "curl" 'echo "curl failed" >&2; exit 22'
+  run install_binary "testtool" "1.0.0" "http://fixture.invalid/failed" "EXPECTEDSHA" "${TEST_ROOT}/bin/testtool" "bz2"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"다운로드 실패"* ]]
+}
+
