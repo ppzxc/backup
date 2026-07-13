@@ -11,6 +11,14 @@ setup() {
   # asserts on the setting/init/schedule orchestration), so we pre-create the
   # install path the same way Task 10 pre-created $RESTIC_ETC_DIR locally.
   : > "$BACKUP_SCRIPT_INSTALL_PATH"
+  # cmd_wizard's install-check now looks at whether restic/rclone/resticprofile
+  # actually exist, not just this marker file (see backup.sh cmd_wizard) — so
+  # resticprofile's own install path must look "already installed" too,
+  # otherwise install_resticprofile would try a real curl download here.
+  export RESTICPROFILE_INSTALL_PATH="${TEST_ROOT}/usr/local/bin/resticprofile"
+  mkdir -p "$(dirname "$RESTICPROFILE_INSTALL_PATH")"
+  printf '#!/usr/bin/env bash\ntrue\n' > "$RESTICPROFILE_INSTALL_PATH"
+  chmod +x "$RESTICPROFILE_INSTALL_PATH"
   stub_command "dnf" 'true'
   stub_command "install" 'cp "${@: -2:1}" "${@: -1}"'
   stub_command "ssh-keygen" '
@@ -119,4 +127,32 @@ setup() {
   [[ "$body" != *"BUCKET:"* ]]
   [[ "$body" != *"ACCESS_KEY:"* ]]
   [[ "$body" != *"SECRET_KEY:"* ]]
+}
+
+@test "wizard re-installs packages when restic/rclone are missing, even though the script copy marker already exists" {
+  # 실사용에서 발견된 버그: 이전 실행이 스크립트만 복사해두고 실제
+  # restic/rclone 설치는 안 됐거나 이후 지워진 경우, $BACKUP_SCRIPT_INSTALL_PATH
+  # 마커만 보고 넘어가면 cmd_install이 다시 실행되지 않는다.
+  rm -f "${STUB_BIN}/restic" "${STUB_BIN}/rclone"
+  stub_command "dnf" 'echo "dnf $*" >> "'"${STUB_BIN}"'/dnf.calls"'
+
+  run bash -c '
+    source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
+    printf "2\n1.2.3.4\n22\nbackup_restic\nrepo-pass\n\ny\n\n" | cmd_wizard
+  '
+  [[ "$output" == *"패키지를 설치합니다"* ]]
+  run cat "${STUB_BIN}/dnf.calls"
+  [[ "$output" == *"restic rclone"* ]]
+}
+
+@test "wizard skips the install step when restic/rclone/resticprofile are all already present" {
+  stub_command "dnf" 'echo "dnf should not run" >> "'"${STUB_BIN}"'/dnf.calls"'
+
+  run bash -c '
+    source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
+    printf "2\n1.2.3.4\n22\nbackup_restic\nrepo-pass\n\ny\n\n" | cmd_wizard
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"패키지를 설치합니다"* ]]
+  [ ! -f "${STUB_BIN}/dnf.calls" ]
 }
