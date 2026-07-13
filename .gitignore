@@ -4,6 +4,7 @@
 !/CLAUDE.md
 !/README.md
 !/.gitignore
+!/.gitattributes
 !/tests/
 !/tests/**
 !/docs/
