@@ -162,3 +162,43 @@ setup() {
   [ ${#errors[@]} -gt 0 ]
 }
 
+@test "resolve_and_validate_config validates profile-name and retention periods" {
+  local -A opts=()
+  opts[targets]="/etc"
+  opts[password]="mypassword"
+  opts[keep-daily]="notanumber"
+  opts[profile-name]="invalid name"
+
+  local -A resolved=()
+  local -a errors=()
+  local res=0
+  resolve_and_validate_config opts resolved errors || res=$?
+  [ "$res" -eq 1 ]
+  # We expect at least two errors: one for keep-daily and one for profile-name
+  [ ${#errors[@]} -ge 2 ]
+}
+
+@test "resolve_and_validate_config succeeds with valid global parameters" {
+  local -A opts=()
+  opts[targets]="/etc"
+  opts[password]="mypassword"
+  opts[keep-daily]="7"
+  opts[keep-weekly]="4"
+  opts[keep-monthly]="12"
+  opts[profile-name]="valid-name"
+
+  local -A resolved=()
+  local -a errors=()
+  local res=0
+  resolve_and_validate_config opts resolved errors || res=$?
+  [ "$res" -eq 0 ]
+  [ ${#errors[@]} -eq 0 ]
+  [ "${resolved[targets]}" = "/etc" ]
+  [ "${resolved[password]}" = "mypassword" ]
+  [ "${resolved[keep_daily]}" = "7" ]
+  [ "${resolved[keep_weekly]}" = "4" ]
+  [ "${resolved[keep_monthly]}" = "12" ]
+  [ "${resolved[profile_name]}" = "valid-name" ]
+}
+
+

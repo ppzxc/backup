@@ -155,17 +155,91 @@ resolve_and_validate_config() {
   local -n _resolved="$2"
   local -n _errors="$3"
 
+  # Sourcing current configuration from file
+  local file_targets="" file_keep_daily="" file_keep_weekly="" file_keep_monthly="" file_excludes="" file_profile_name="" file_password=""
+  if [[ -f "${BACKUP_ENV_FILE:-}" ]]; then
+    # Sourcing in a subshell to isolate variables
+    local env_data
+    env_data=$(
+      # shellcheck source=/dev/null
+      source "$BACKUP_ENV_FILE" >/dev/null 2>&1 || true
+      printf '%s\n' "targets=${BACKUP_TARGETS:-}"
+      printf '%s\n' "keep_daily=${KEEP_DAILY:-}"
+      printf '%s\n' "keep_weekly=${KEEP_WEEKLY:-}"
+      printf '%s\n' "keep_monthly=${KEEP_MONTHLY:-}"
+      printf '%s\n' "excludes=${BACKUP_EXCLUDES:-}"
+      printf '%s\n' "profile_name=${BACKUP_PROFILE_NAME:-}"
+      printf '%s\n' "password=${RESTIC_PASSWORD:-}"
+    )
+    local line key val
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      key="${line%%=*}"
+      val="${line#*=}"
+      case "$key" in
+        targets) file_targets="$val" ;;
+        keep_daily) file_keep_daily="$val" ;;
+        keep_weekly) file_keep_weekly="$val" ;;
+        keep_monthly) file_keep_monthly="$val" ;;
+        excludes) file_excludes="$val" ;;
+        profile_name) file_profile_name="$val" ;;
+        password) file_password="$val" ;;
+      esac
+    done <<< "$env_data"
+  fi
+
+  # Read Environment Variables
+  local env_targets="${BACKUP_TARGETS:-}"
+  local env_keep_daily="${KEEP_DAILY:-}"
+  local env_keep_weekly="${KEEP_WEEKLY:-}"
+  local env_keep_monthly="${KEEP_MONTHLY:-}"
+  local env_password="${BACKUP_PASSWORD:-}"
+  local env_profile_name="${BACKUP_PROFILE_NAME:-}"
+
+  # Resolve values with priority: CLI option > Env variable > Config file > Default value
   local cli_targets="${_opts[targets]:-}"
-  _resolved[targets]=$(resolve_value "$cli_targets" "${BACKUP_TARGETS:-}" "" "$DEFAULT_TARGETS")
+  _resolved[targets]=$(resolve_value "$cli_targets" "$env_targets" "$file_targets" "${DEFAULT_TARGETS:-}")
+
+  local cli_keep_daily="${_opts[keep-daily]:-}"
+  _resolved[keep_daily]=$(resolve_value "$cli_keep_daily" "$env_keep_daily" "$file_keep_daily" "${DEFAULT_KEEP_DAILY:-}")
+
+  local cli_keep_weekly="${_opts[keep-weekly]:-}"
+  _resolved[keep_weekly]=$(resolve_value "$cli_keep_weekly" "$env_keep_weekly" "$file_keep_weekly" "${DEFAULT_KEEP_WEEKLY:-}")
+
+  local cli_keep_monthly="${_opts[keep-monthly]:-}"
+  _resolved[keep_monthly]=$(resolve_value "$cli_keep_monthly" "$env_keep_monthly" "$file_keep_monthly" "${DEFAULT_KEEP_MONTHLY:-}")
 
   local cli_password="${_opts[password]:-}"
-  _resolved[password]=$(resolve_value "$cli_password" "${BACKUP_PASSWORD:-}" "" "")
+  _resolved[password]=$(resolve_value "$cli_password" "$env_password" "$file_password" "")
 
+  local cli_profile_name="${_opts[profile-name]:-}"
+  _resolved[profile_name]=$(resolve_value "$cli_profile_name" "$env_profile_name" "$file_profile_name" "$(hostname)")
+
+  # Resolve Exclude
+  local cli_exclude="${_opts[exclude]:-}"
+  _resolved[excludes_csv]=$(resolve_value "$cli_exclude" "" "$file_excludes" "${DEFAULT_EXCLUDES:-}")
+
+  # Global Validation
   if [[ -z "${_resolved[targets]:-}" ]]; then
     _errors+=("백업 대상 경로(--targets 또는 BACKUP_TARGETS)가 필요합니다.")
   fi
+
   if [[ -z "${_resolved[password]:-}" ]]; then
     _errors+=("저장소 비밀번호(--password 또는 BACKUP_PASSWORD)가 필요합니다.")
+  fi
+
+  local err
+  if ! err=$(validate_positive_int "${_resolved[keep_daily]}" "keep-daily"); then
+    _errors+=("$err")
+  fi
+  if ! err=$(validate_positive_int "${_resolved[keep_weekly]}" "keep-weekly"); then
+    _errors+=("$err")
+  fi
+  if ! err=$(validate_positive_int "${_resolved[keep_monthly]}" "keep-monthly"); then
+    _errors+=("$err")
+  fi
+  if ! err=$(validate_profile_name "${_resolved[profile_name]}"); then
+    _errors+=("$err")
   fi
 
   if [[ ${#_errors[@]} -gt 0 ]]; then
