@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.5"
+BACKUP_SCRIPT_VERSION="0.0.6"
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -1749,30 +1749,66 @@ cmd_migrate() {
     dest_initialized=1
   fi
 
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    setup_colors
+    printf '%b%b⚙  저장소 마이그레이션 (Repository Migration)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+    printf '%b├──%b 기존 저장소: %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$RESTIC_REPOSITORY" "$C_RESET"
+    printf '%b├──%b 대상 저장소: %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$dest_repo_copy" "$C_RESET"
+    printf '%b├──%b %b[✓] 기존 저장소 상태 점검 완료%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "$C_RESET"
+  else
+    log_info "기존 저장소(Source) 상태 점검 중..."
+  fi
+
   # 6. Initialize destination if not yet initialized
   if [[ "$dest_initialized" -eq 0 ]]; then
-    log_info "대상 저장소(Destination)가 존재하지 않아 초기화합니다 (Chunker 파라미터 복사)..."
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '%b├──%b %b[✓] 대상 저장소 초기화 완료 (Chunker 파라미터 복사)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "$C_RESET"
+    else
+      log_info "대상 저장소(Destination)가 존재하지 않아 초기화합니다 (Chunker 파라미터 복사)..."
+    fi
     run_restic_dest -r "$dest_repo_copy" init \
       --from-repo "$RESTIC_REPOSITORY" \
       --from-password-file "$temp_src_pass" \
       --copy-chunker-params || die "대상 저장소 초기화 실패"
+  else
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '%b├──%b %b[✓] 대상 저장소 준비 완료 (이미 존재함)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "$C_RESET"
+    fi
   fi
 
   # 7. Copy Snapshots
-  log_info "기존 저장소에서 대상 저장소로 백업 데이터(스냅샷) 복사 중..."
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    printf '%b├──%b %b[ ] 백업 데이터 복사 중...%b' "$C_GRAY" "$C_RESET" "$C_YELLOW" "$C_RESET"
+  else
+    log_info "기존 저장소에서 대상 저장소로 백업 데이터(스냅샷) 복사 중..."
+  fi
   run_restic_dest -r "$RESTIC_REPOSITORY" copy \
     --password-file "$temp_src_pass" \
     --repo2 "$dest_repo_copy" \
     --password-file2 "$temp_dst_pass" || die "백업 데이터 복사(restic copy) 실패"
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    printf '\r%b├──%b %b[✓] 백업 데이터 복사 완료 (restic copy)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "$C_RESET"
+  fi
 
   # 8. Verify Consistency
   if (( ! skip_check )); then
-    log_info "대상 저장소 정합성 검증(restic check) 수행 중..."
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '%b├──%b %b[ ] 대상 저장소 정합성 검증 중...%b' "$C_GRAY" "$C_RESET" "$C_YELLOW" "$C_RESET"
+    else
+      log_info "대상 저장소 정합성 검증(restic check) 수행 중..."
+    fi
     run_restic_dest -r "$dest_repo_copy" check || die "대상 저장소 정합성 검증 실패"
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '\r%b├──%b %b[✓] 대상 저장소 정합성 검증 완료 (restic check)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "$C_RESET"
+    fi
   fi
 
   # 9. Write new settings to backup.env and update systemd timer if active
-  log_info "로컬 백업 환경 설정 파일(backup.env) 업데이트 중..."
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    printf '%b├──%b %b[✓] 로컬 백업 환경 설정 파일(backup.env) 업데이트 완료%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "$C_RESET"
+  else
+    log_info "로컬 백업 환경 설정 파일(backup.env) 업데이트 중..."
+  fi
   local -a setting_opts=(--backend "$backend" --password "$new_password" --profile-name "$profile_name" --force)
   if [[ "$backend" == "s3" ]]; then
     setting_opts+=(--endpoint "${resolved[endpoint]}" --bucket "${resolved[bucket]}" --access-key "${resolved[access_key]}" --secret-key "${resolved[secret_key]}")
@@ -1792,13 +1828,29 @@ cmd_migrate() {
 
   # 10. Update systemd schedule if it was active
   if [[ "$schedule_active" -eq 1 ]]; then
-    log_info "백업 스케줄이 활성화 상태였으므로 새 저장소 정보로 스케줄러를 재갱신합니다..."
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '%b├──%b %b[✓] 백업 스케줄러 재갱신 완료%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "$C_RESET"
+    else
+      log_info "백업 스케줄이 활성화 상태였으므로 새 저장소 정보로 스케줄러를 재갱신합니다..."
+    fi
     cmd_schedule enable
   fi
 
-  log_info "마이그레이션이 완료되었습니다! 클라이언트 호스트 환경이 새 저장소로 완전히 이관되었습니다."
-  log_info "기존 원격 저장소에 저장되어 있는 옛날 백업 데이터들은 안전을 위해 자동 삭제되지 않았습니다."
-  log_info "기존 데이터를 완전히 삭제하고 싶으신 경우 원격에서 직접 정리하시길 바랍니다."
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    printf '\n%b%b=========================================%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+    printf ' %b%b⚙  마이그레이션 완료 (Migration Completed)%b\n' "$C_GREEN" "$C_BOLD" "$C_RESET"
+    printf '%b=========================================%b\n' "$C_CYAN" "$C_RESET"
+    printf ' %b├──%b 저장소 이관: %b완료%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "$C_RESET"
+    printf ' %b├──%b 주의:        %b기존 원격 저장소의 옛날 백업 데이터들은%b\n' "$C_GRAY" "$C_RESET" "$C_YELLOW" "$C_RESET"
+    printf ' %b│                 %b안전을 위해 자동 삭제되지 않았습니다.%b\n' "$C_GRAY" "$C_YELLOW" "$C_RESET"
+    printf ' %b└──%b 안내:      %b기존 데이터를 삭제하고 싶으신 경우%b\n' "$C_GRAY" "$C_RESET" "$C_DIM" "$C_RESET"
+    printf ' %b                 %b원격에서 직접 정리하시길 바랍니다.%b\n' "$C_GRAY" "$C_DIM" "$C_RESET"
+    printf '%b=========================================%b\n' "$C_CYAN" "$C_RESET"
+  else
+    log_info "마이그레이션이 완료되었습니다! 클라이언트 호스트 환경이 새 저장소로 완전히 이관되었습니다."
+    log_info "기존 원격 저장소에 저장되어 있는 옛날 백업 데이터들은 안전을 위해 자동 삭제되지 않았습니다."
+    log_info "기존 데이터를 완전히 삭제하고 싶으신 경우 원격에서 직접 정리하시길 바랍니다."
+  fi
 }
 
 # cmd_wizard 전용 대화형 입력 헬퍼. 프롬프트는 stderr로 내보내고 답변만
@@ -1810,10 +1862,19 @@ prompt_validated() {
   local message="$1" default="$2" validate_fn="$3"
   local value err
   while true; do
-    if [[ -n "$default" ]]; then
-      printf '%s [%s]: ' "$message" "$default" >&2
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      setup_colors
+      if [[ -n "$default" ]]; then
+        printf '%b%s%b [%b%s%b]: ' "$C_CYAN" "$message" "$C_RESET" "$C_BOLD" "$default" "$C_RESET" >&2
+      else
+        printf '%b%s%b: ' "$C_CYAN" "$message" "$C_RESET" >&2
+      fi
     else
-      printf '%s: ' "$message" >&2
+      if [[ -n "$default" ]]; then
+        printf '%s [%s]: ' "$message" "$default" >&2
+      else
+        printf '%s: ' "$message" >&2
+      fi
     fi
     read -r value
     value="${value:-$default}"
@@ -1821,7 +1882,11 @@ prompt_validated() {
       printf '%s' "$value"
       return 0
     fi
-    printf '%s 다시 입력하세요.\n' "$err" >&2
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '%b%s 다시 입력하세요.%b\n' "$C_RED" "$err" "$C_RESET" >&2
+    else
+      printf '%s 다시 입력하세요.\n' "$err" >&2
+    fi
   done
 }
 
@@ -1830,14 +1895,23 @@ prompt_secret_required() {
   local message="$1"
   local value
   while true; do
-    printf '%s' "$message" >&2
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      setup_colors
+      printf '%b%s%b' "$C_YELLOW" "$message" "$C_RESET" >&2
+    else
+      printf '%s' "$message" >&2
+    fi
     read -rs value
     printf '\n' >&2
     if [[ -n "$value" ]]; then
       printf '%s' "$value"
       return 0
     fi
-    printf '값을 입력해야 합니다. 다시 입력하세요.\n' >&2
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '%b값을 입력해야 합니다. 다시 입력하세요.%b\n' "$C_RED" "$C_RESET" >&2
+    else
+      printf '값을 입력해야 합니다. 다시 입력하세요.\n' >&2
+    fi
   done
 }
 
@@ -1845,15 +1919,29 @@ prompt_secret_required() {
 prompt_backend_choice() {
   local choice
   while true; do
-    printf '백엔드를 선택하세요:\n' >&2
-    printf '  [1] S3 호환 스토리지 - HTTPS 기반 오브젝트 스토리지(AWS S3, MinIO 등)\n' >&2
-    printf '  [2] SFTP(NAS) - SSH로 접속하는 시놀로지 NAS 등\n' >&2
-    printf '선택 (1/2): ' >&2
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      setup_colors
+      printf '%b%b⚙  백엔드 선택 (Choose Backend)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET" >&2
+      printf '  [%b1%b] S3 호환 스토리지 - %bHTTPS 기반 오브젝트 스토리지(AWS S3, MinIO 등)%b\n' "$C_GREEN" "$C_RESET" "$C_DIM" "$C_RESET" >&2
+      printf '  [%b2%b] SFTP(NAS) - %bSSH로 접속하는 시놀로지 NAS 등%b\n' "$C_GREEN" "$C_RESET" "$C_DIM" "$C_RESET" >&2
+      printf '선택 (1/2): ' >&2
+    else
+      printf '백엔드를 선택하세요:\n' >&2
+      printf '  [1] S3 호환 스토리지 - HTTPS 기반 오브젝트 스토리지(AWS S3, MinIO 등)\n' >&2
+      printf '  [2] SFTP(NAS) - SSH로 접속하는 시놀로지 NAS 등\n' >&2
+      printf '선택 (1/2): ' >&2
+    fi
     read -r choice
     case "$choice" in
       1) printf 's3'; return 0 ;;
       2) printf 'sftp'; return 0 ;;
-      *) printf '1 또는 2를 입력하세요. 다시 입력하세요.\n' >&2 ;;
+      *)
+        if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+          printf '%b1 또는 2를 입력하세요. 다시 입력하세요.%b\n' "$C_RED" "$C_RESET" >&2
+        else
+          printf '1 또는 2를 입력하세요. 다시 입력하세요.\n' >&2
+        fi
+        ;;
     esac
   done
 }
@@ -1861,15 +1949,14 @@ prompt_backend_choice() {
 cmd_wizard() {
   require_root
 
-  # $BACKUP_SCRIPT_INSTALL_PATH의 존재 여부는 "이 스크립트가 예전에 한 번
-  # 복사됐는지"만 알려줄 뿐, restic/rclone/resticprofile이 실제로 설치돼
-  # 있는지와는 무관하다 — 이전 실행이 설치 중간에 중단됐거나 패키지가 이후
-  # 지워진 경우, 이 마커만 보고 넘어가면 cmd_install이 다시 실행되지 않아
-  # 실제 의존성이 없는 채로 wizard가 계속 진행된다. 그래서 필요한 바이너리
-  # 자체의 존재를 직접 확인한다.
   if ! command -v restic >/dev/null 2>&1 || ! command -v rclone >/dev/null 2>&1 \
     || [[ ! -x "$RESTICPROFILE_INSTALL_PATH" ]]; then
-    log_info "패키지를 설치합니다..."
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      setup_colors
+      printf '%b🔄 필수 의존성 패키지를 설치합니다...%b\n' "$C_YELLOW" "$C_RESET"
+    else
+      log_info "패키지를 설치합니다..."
+    fi
     cmd_install
   fi
 
@@ -1897,22 +1984,34 @@ cmd_wizard() {
   setting_args+=(--password "$password")
 
   # 1. Ask about targets
-  printf '\n--- 백업 대상 경로 설정 ---\n'
-  printf '보안 컴플라이언스(ISMS/ISO 27001) 기준에 부합하기 위해, 중요 설정 파일(/etc) 및 감사 추적 로그(/var/log)가 기본 백업 경로로 지정되어 있습니다.\n'
-  printf '  * /etc: 사용자 계정, 권한 설정 및 네트워크 구성을 보존하여 설정의 무결성을 입증합니다.\n'
-  printf '  * /var/log: 시스템 로그인 및 보안 감사 로그를 보존하여 침해사고 예방 및 사후 조사를 지원합니다.\n\n'
-  
-  printf '기본 경로(/var/log, /etc)를 백업 대상에 포함하시겠습니까? [Y/n]: '
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    setup_colors
+    printf '\n%b%b⚙  백업 대상 경로 설정 (Backup Target Paths)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+    printf '%b보안 컴플라이언스(ISMS/ISO 27001) 기준에 부합하기 위해, 중요 설정 파일(/etc) 및 감사 추적 로그(/var/log)가 기본 백업 경로로 지정되어 있습니다.%b\n' "$C_DIM" "$C_RESET"
+    printf '  * %b/etc%b: 사용자 계정, 권한 설정 및 네트워크 구성을 보존하여 설정의 무결성을 입증합니다.\n' "$C_BOLD" "$C_RESET"
+    printf '  * %b/var/log%b: 시스템 로그인 및 보안 감사 로그를 보존하여 침해사고 예방 및 사후 조사를 지원합니다.\n\n' "$C_BOLD" "$C_RESET"
+    printf '%b기본 경로(/var/log, /etc)를 백업 대상에 포함하시겠습니까? [%bY%b/n]: %b' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_RESET"
+  else
+    printf '\n--- 백업 대상 경로 설정 ---\n'
+    printf '보안 컴플라이언스(ISMS/ISO 27001) 기준에 부합하기 위해, 중요 설정 파일(/etc) 및 감사 추적 로그(/var/log)가 기본 백업 경로로 지정되어 있습니다.\n'
+    printf '  * /etc: 사용자 계정, 권한 설정 및 네트워크 구성을 보존하여 설정의 무결성을 입증합니다.\n'
+    printf '  * /var/log: 시스템 로그인 및 보안 감사 로그를 보존하여 침해사고 예방 및 사후 조사를 지원합니다.\n\n'
+    printf '기본 경로(/var/log, /etc)를 백업 대상에 포함하시겠습니까? [Y/n]: '
+  fi
   local use_default_targets; read -r use_default_targets
-  
+
   local final_targets=""
   if [[ -z "$use_default_targets" || "$use_default_targets" =~ ^[Yy]$ ]]; then
     final_targets="/var/log,/etc"
   fi
-  
-  printf '추가로 백업할 디렉터리 경로가 있습니까? (쉼표로 구분하여 입력, 없으면 Enter): '
+
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    printf '%b추가로 백업할 디렉터리 경로가 있습니까? (쉼표로 구분하여 입력, 없으면 Enter): %b' "$C_CYAN" "$C_RESET"
+  else
+    printf '추가로 백업할 디렉터리 경로가 있습니까? (쉼표로 구분하여 입력, 없으면 Enter): '
+  fi
   local additional_targets; read -r additional_targets
-  
+
   if [[ -n "$additional_targets" ]]; then
     if [[ -n "$final_targets" ]]; then
       final_targets="${final_targets},${additional_targets}"
@@ -1922,23 +2021,41 @@ cmd_wizard() {
   fi
 
   while [[ -z "$final_targets" ]]; do
-    printf '경고: 백업 대상 경로가 비어 있습니다. 최소 한 개 이상의 경로를 지정해야 합니다.\n'
-    printf '백업할 디렉터리 경로를 입력하세요 (예: /var/log): '
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '%b경고: 백업 대상 경로가 비어 있습니다. 최소 한 개 이상의 경로를 지정해야 합니다.%b\n' "$C_RED" "$C_RESET"
+      printf '%b백업할 디렉터리 경로를 입력하세요 (예: /var/log): %b' "$C_CYAN" "$C_RESET"
+    else
+      printf '경고: 백업 대상 경로가 비어 있습니다. 최소 한 개 이상의 경로를 지정해야 합니다.\n'
+      printf '백업할 디렉터리 경로를 입력하세요 (예: /var/log): '
+    fi
     read -r final_targets
   done
 
   setting_args+=(--targets "$final_targets")
 
-  printf '\n다음 설정으로 진행합니다:\n'
-  printf '  백엔드: %s\n' "$backend"
-  if [[ "$backend" == "sftp" ]]; then
-    printf '  NAS: %s:%s (사용자: %s)\n' "$host" "$port" "$user"
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    printf '\n%b%b⚙  다음 설정으로 진행합니다 (Confirm Settings)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+    printf '%b├──%b 백엔드:    %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$backend" "$C_RESET"
+    if [[ "$backend" == "sftp" ]]; then
+      printf '%b├──%b NAS:       %b%s:%s%b (계정: %b%s%b)\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$host" "$port" "$C_RESET" "$C_BOLD" "$user" "$C_RESET"
+    else
+      printf '%b├──%b S3 엔드포인트: %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$endpoint" "$C_RESET"
+      printf '%b├──%b 버킷:      %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$bucket" "$C_RESET"
+    fi
+    printf '%b├──%b 백업 대상:  %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$final_targets" "$C_RESET"
+    printf '%b└──%b 이대로 진행할까요? [%bY%b/n]: %b' "$C_GRAY" "$C_RESET" "${C_CYAN}${C_BOLD}" "$C_RESET" "$C_RESET"
   else
-    printf '  S3 엔드포인트: %s\n' "$endpoint"
-    printf '  버킷: %s\n' "$bucket"
+    printf '\n다음 설정으로 진행합니다:\n'
+    printf '  백엔드: %s\n' "$backend"
+    if [[ "$backend" == "sftp" ]]; then
+      printf '  NAS: %s:%s (사용자: %s)\n' "$host" "$port" "$user"
+    else
+      printf '  S3 엔드포인트: %s\n' "$endpoint"
+      printf '  버킷: %s\n' "$bucket"
+    fi
+    printf '  백업 대상: %s\n' "$final_targets"
+    printf '이대로 진행할까요? [Y/n]: '
   fi
-  printf '  백업 대상: %s\n' "$final_targets"
-  printf '이대로 진행할까요? [Y/n]: '
   local confirm
   read -r confirm
   if [[ -n "$confirm" && ! "$confirm" =~ ^[Yy]$ ]]; then
@@ -1948,12 +2065,20 @@ cmd_wizard() {
 
   cmd_setting "${setting_args[@]}"
 
-  printf '위 안내(공개키 등록 또는 버킷 정책 적용)를 완료하셨으면 Enter를 누르세요: '
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    printf '%b위 안내(공개키 등록 또는 버킷 정책 적용)를 완료하셨으면 %bEnter%b를 누르세요: %b' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_RESET"
+  else
+    printf '위 안내(공개키 등록 또는 버킷 정책 적용)를 완료하셨으면 Enter를 누르세요: '
+  fi
   local _ack; read -r _ack
 
   cmd_init
 
-  printf '지금 정기 백업 스케줄을 등록할까요? 기본값은 매일 새벽 2시입니다. [Y/n]: '
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    printf '%b지금 정기 백업 스케줄을 등록할까요? 기본값은 매일 새벽 2시입니다. [%bY%b/n]: %b' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_RESET"
+  else
+    printf '지금 정기 백업 스케줄을 등록할까요? 기본값은 매일 새벽 2시입니다. [Y/n]: '
+  fi
   local schedule_choice; read -r schedule_choice
   local schedule_enabled=0
   if [[ -z "$schedule_choice" || "$schedule_choice" =~ ^[Yy]$ ]]; then
@@ -1970,18 +2095,33 @@ cmd_wizard() {
     repo_location="${RESTIC_REPOSITORY:-}"
   fi
 
-  printf '\n=========================================\n'
-  printf ' 설정이 완료되었습니다\n'
-  printf '=========================================\n'
-  printf ' 백엔드: %s\n' "$backend"
-  printf ' 저장소 위치: %s\n' "${repo_location:-알 수 없음}"
-  if (( schedule_enabled )); then
-    printf ' 정기 백업: 등록됨 (%s)\n' "$DEFAULT_ON_CALENDAR"
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    printf '\n%b%b=========================================%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+    printf ' %b%b⚙  설정이 완료되었습니다 (Configuration Completed)%b\n' "$C_GREEN" "$C_BOLD" "$C_RESET"
+    printf '%b=========================================%b\n' "$C_CYAN" "$C_RESET"
+    printf ' %b├──%b 백엔드:    %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$backend" "$C_RESET"
+    printf ' %b├──%b 저장소 위치: %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "${repo_location:-알 수 없음}" "$C_RESET"
+    if (( schedule_enabled )); then
+      printf ' %b├──%b 정기 백업:  %b등록됨 (%s)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "$DEFAULT_ON_CALENDAR" "$C_RESET"
+    else
+      printf ' %b├──%b 정기 백업:  %b등록하지 않음 (필요시 backup.sh schedule enable 실행)%b\n' "$C_GRAY" "$C_RESET" "$C_GRAY" "$C_RESET"
+    fi
+    printf ' %b└──%b 안내:      %b이후에는 backup.sh run / status / uninstall 을 사용하세요.%b\n' "$C_GRAY" "$C_RESET" "$C_DIM" "$C_RESET"
+    printf '%b=========================================%b\n' "$C_CYAN" "$C_RESET"
   else
-    printf ' 정기 백업: 등록하지 않음 (필요시 backup.sh schedule enable 실행)\n'
+    printf '\n=========================================\n'
+    printf ' 설정이 완료되었습니다\n'
+    printf '=========================================\n'
+    printf ' 백엔드: %s\n' "$backend"
+    printf ' 저장소 위치: %s\n' "${repo_location:-알 수 없음}"
+    if (( schedule_enabled )); then
+      printf ' 정기 백업: 등록됨 (%s)\n' "$DEFAULT_ON_CALENDAR"
+    else
+      printf ' 정기 백업: 등록하지 않음 (필요시 backup.sh schedule enable 실행)\n'
+    fi
+    printf ' 이후에는 backup.sh run / status / uninstall 을 사용하세요.\n'
+    printf '=========================================\n'
   fi
-  printf ' 이후에는 backup.sh run / status / uninstall 을 사용하세요.\n'
-  printf '=========================================\n'
   log_info "wizard 완료"
 }
 
