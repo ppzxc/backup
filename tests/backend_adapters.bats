@@ -154,3 +154,62 @@ setup() {
   [[ "$output" == *'"arn:aws:s3:::my-bucket"'* ]]
   [[ "$output" == *"ListBucket"* ]]
 }
+
+@test "backend_sftp_configure renders env and notice using resolved config" {
+  mkdir -p "$RESTIC_ETC_DIR"
+  local -A resolved=()
+  resolved[host]="10.0.0.1"
+  resolved[port]="22"
+  resolved[user]="backup"
+  resolved[password]="pass"
+  resolved[targets]="/etc"
+  resolved[excludes_csv]=""
+  resolved[keep_daily]="7"
+  resolved[keep_weekly]="4"
+  resolved[keep_monthly]="12"
+  resolved[profile_name]="myhost"
+  local output_env="" output_notice=""
+  backend_sftp_configure resolved output_env output_notice
+  [[ "$output_env" == *"RCLONE_CONFIG_SYNO_BACKUP_HOST=\"10.0.0.1\""* ]]
+  [[ "$output_notice" == *"authorized_keys"* ]]
+}
+
+@test "backend_s3_configure renders env and notice using resolved config" {
+  local -A resolved=()
+  resolved[endpoint]="https://s3.example.com"
+  resolved[bucket]="mybucket"
+  resolved[access_key]="AK"
+  resolved[secret_key]="SK"
+  resolved[password]="pass"
+  resolved[targets]="/etc"
+  resolved[excludes_csv]=""
+  resolved[keep_daily]="7"
+  resolved[keep_weekly]="4"
+  resolved[keep_monthly]="12"
+  resolved[profile_name]="myhost"
+  local output_env="" output_notice=""
+  backend_s3_configure resolved output_env output_notice
+  [[ "$output_env" == *"AWS_ACCESS_KEY_ID=\"AK\""* ]]
+  [[ "$output_notice" == *"s3:::mybucket"* ]]
+}
+
+@test "backend_sftp_test_connectivity runs rclone lsd check" {
+  mkdir -p "$RESTIC_ETC_DIR"
+  stub_command "rclone" 'echo "rclone $*" >> "${STUB_BIN}/rclone.calls"'
+  local -A resolved=()
+  resolved[host]="10.0.0.1"
+  resolved[port]="22"
+  resolved[user]="backup"
+  resolved[password]="pass"
+  run backend_sftp_test_connectivity resolved
+  [ "$status" -eq 0 ]
+  [ -f "${STUB_BIN}/rclone.calls" ]
+  grep -q "lsd" "${STUB_BIN}/rclone.calls"
+}
+
+@test "backend_s3_test_connectivity returns 0" {
+  local -A resolved=()
+  run backend_s3_test_connectivity resolved
+  [ "$status" -eq 0 ]
+}
+

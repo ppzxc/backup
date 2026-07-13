@@ -899,6 +899,97 @@ backend_s3_render_notice() {
   render_s3_bucket_policy "${fields_ref[bucket]}"
 }
 
+backend_sftp_configure() {
+  local -n _resolved="$1"
+  local -n _out_env="$2"
+  local -n _out_notice="$3"
+
+  # Prepare keys
+  generate_ssh_key_if_missing
+  local pubkey; pubkey="$(cat "${BACKUP_SSH_KEY}.pub")"
+
+  # Render Env
+  _out_env=$(cat <<EOF
+export RESTIC_REPOSITORY="rclone:syno_backup:/backup/\$(hostname)"
+export RCLONE_CONFIG_SYNO_BACKUP_TYPE="sftp"
+export RCLONE_CONFIG_SYNO_BACKUP_HOST="${_resolved[host]}"
+export RCLONE_CONFIG_SYNO_BACKUP_USER="${_resolved[user]}"
+export RCLONE_CONFIG_SYNO_BACKUP_PORT="${_resolved[port]}"
+export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="${BACKUP_SSH_KEY}"
+export RESTIC_PASSWORD="${_resolved[password]}"
+export BACKUP_TARGETS="${_resolved[targets]}"
+export BACKUP_EXCLUDES="${_resolved[excludes_csv]:-}"
+export KEEP_DAILY="${_resolved[keep_daily]}"
+export KEEP_WEEKLY="${_resolved[keep_weekly]}"
+export KEEP_MONTHLY="${_resolved[keep_monthly]}"
+export BACKUP_PROFILE_NAME="${_resolved[profile_name]}"
+EOF
+)
+
+  # Render Notice
+  _out_notice=$(cat <<EOF
+아래 공개키를 NAS의 authorized_keys(또는 File Station)에 등록하세요:
+----------------------------------------------------------
+\${pubkey}
+----------------------------------------------------------
+등록 후 'backup.sh init'을 실행하세요.
+EOF
+)
+  # Evaluate any variables in notice like pubkey
+  _out_notice=$(eval "cat <<EOF
+${_out_notice}
+EOF" 2>/dev/null || echo "$_out_notice")
+}
+
+backend_sftp_test_connectivity() {
+  local -n _resolved="$1"
+  generate_ssh_key_if_missing
+  (
+    export RCLONE_CONFIG_SYNO_BACKUP_TYPE="sftp"
+    export RCLONE_CONFIG_SYNO_BACKUP_HOST="${_resolved[host]}"
+    export RCLONE_CONFIG_SYNO_BACKUP_PORT="${_resolved[port]}"
+    export RCLONE_CONFIG_SYNO_BACKUP_USER="${_resolved[user]}"
+    export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="${BACKUP_SSH_KEY}"
+    rclone_check_connectivity "syno_backup" "${BACKUP_VERBOSE:-0}"
+  )
+}
+
+backend_s3_configure() {
+  local -n _resolved="$1"
+  local -n _out_env="$2"
+  local -n _out_notice="$3"
+
+  # Render Env
+  _out_env=$(cat <<EOF
+export RESTIC_REPOSITORY="s3:${_resolved[endpoint]}/${_resolved[bucket]}/\$(hostname)"
+export AWS_ACCESS_KEY_ID="${_resolved[access_key]}"
+export AWS_SECRET_ACCESS_KEY="${_resolved[secret_key]}"
+export RESTIC_PASSWORD="${_resolved[password]}"
+export BACKUP_TARGETS="${_resolved[targets]}"
+export BACKUP_EXCLUDES="${_resolved[excludes_csv]:-}"
+export KEEP_DAILY="${_resolved[keep_daily]}"
+export KEEP_WEEKLY="${_resolved[keep_weekly]}"
+export KEEP_MONTHLY="${_resolved[keep_monthly]}"
+export BACKUP_PROFILE_NAME="${_resolved[profile_name]}"
+EOF
+)
+
+  # Render Notice
+  _out_notice=$(cat <<EOF
+최소권한 버킷 정책을 아래와 같이 적용하세요:
+\$(render_s3_bucket_policy "${_resolved[bucket]}")
+EOF
+)
+  # Evaluate helper function render_s3_bucket_policy in notice
+  _out_notice=$(eval "cat <<EOF
+${_out_notice}
+EOF" 2>/dev/null || echo "$_out_notice")
+}
+
+backend_s3_test_connectivity() {
+  return 0
+}
+
 restic_is_initialized() {
   restic snapshots >/dev/null 2>&1
 }
