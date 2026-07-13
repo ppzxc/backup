@@ -109,3 +109,16 @@ setup() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"profile-name"* ]]
 }
+
+@test "die does not double the ERROR prefix for a validate_* failure message" {
+  local err
+  err=$(validate_profile_name "bad name") || true
+  run die "$err"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"ERROR: ERROR:"* ]]
+}
+
+@test "validate_profile_name accepts a dotted FQDN hostname" {
+  run validate_profile_name "funa1.nanoit.kr"
+  [ "$status" -eq 0 ]
+}

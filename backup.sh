@@ -67,18 +67,18 @@ validate_backend() {
   local value="$1"
   case "$value" in
     s3|sftp) return 0 ;;
-    *) printf 'ERROR: backend must be s3 or sftp, got: %s\n' "$value"; return 1 ;;
+    *) printf 'backend must be s3 or sftp, got: %s\n' "$value"; return 1 ;;
   esac
 }
 
 validate_port() {
   local value="$1"
   if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-    printf 'ERROR: port must be numeric, got: %s\n' "$value"
+    printf 'port must be numeric, got: %s\n' "$value"
     return 1
   fi
   if (( 10#$value < 1 || 10#$value > 65535 )); then
-    printf 'ERROR: port must be between 1 and 65535, got: %s\n' "$value"
+    printf 'port must be between 1 and 65535, got: %s\n' "$value"
     return 1
   fi
   return 0
@@ -87,11 +87,11 @@ validate_port() {
 validate_positive_int() {
   local value="$1" label="$2"
   if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-    printf 'ERROR: %s must be numeric, got: %s\n' "$label" "$value"
+    printf '%s must be numeric, got: %s\n' "$label" "$value"
     return 1
   fi
   if (( 10#$value < 1 )); then
-    printf 'ERROR: %s must be positive, got: %s\n' "$label" "$value"
+    printf '%s must be positive, got: %s\n' "$label" "$value"
     return 1
   fi
   return 0
@@ -100,11 +100,11 @@ validate_positive_int() {
 validate_profile_name() {
   local value="$1"
   if [[ -z "$value" ]]; then
-    printf 'ERROR: profile-name must not be empty\n'
+    printf 'profile-name must not be empty\n'
     return 1
   fi
-  if ! [[ "$value" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-    printf 'ERROR: profile-name must contain only letters, digits, _ or -, got: %s\n' "$value"
+  if ! [[ "$value" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+    printf 'profile-name must contain only letters, digits, _, - or ., got: %s\n' "$value"
     return 1
   fi
   return 0
@@ -717,7 +717,7 @@ cmd_wizard() {
     setting_args+=(--endpoint "$endpoint" --bucket "$bucket" --access-key "$access_key" --secret-key "$secret_key")
   fi
 
-  printf '저장소 비밀번호: 분실 시 백업 데이터를 복구할 수 없습니다. 안전한 곳에 별도 보관하세요.\n비밀번호 입력(화면에 표시되지 않습니다): '
+  printf '저장소 비밀번호: 백업 데이터를 AES-256 기반으로 암호화하는 데 쓰이는 필수 입력값입니다. 이 비밀번호가 없으면 NAS/S3 등 원격 저장소 쪽에서도 백업 내용을 열어볼 수 없습니다. 분실 시에는 백업 데이터를 복구할 방법이 없으니 반드시 별도의 안전한 곳에 보관하세요.\n비밀번호 입력(화면에 표시되지 않습니다): '
   local password
   read -rs password
   printf '\n'
