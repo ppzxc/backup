@@ -270,10 +270,19 @@ resolve_and_validate_config() {
       backend_file_raw=$(
         # shellcheck source=/dev/null
         source "$BACKUP_ENV_FILE" >/dev/null 2>&1 || true
-        while IFS=$'\t' read -r field_key var_name; do
-          [[ -z "$field_key" ]] && continue
-          printf '%s=%s\n' "$field_key" "${!var_name:-}"
-        done <<< "$env_vars_mapping"
+        printf '%s\n' "RCLONE_CONFIG_SYNO_BACKUP_HOST=${RCLONE_CONFIG_SYNO_BACKUP_HOST:-}"
+        printf '%s\n' "RCLONE_CONFIG_SYNO_BACKUP_PORT=${RCLONE_CONFIG_SYNO_BACKUP_PORT:-}"
+        printf '%s\n' "RCLONE_CONFIG_SYNO_BACKUP_USER=${RCLONE_CONFIG_SYNO_BACKUP_USER:-}"
+        printf '%s\n' "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}"
+        printf '%s\n' "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}"
+        printf '%s\n' "RESTIC_REPOSITORY=${RESTIC_REPOSITORY:-}"
+        printf '%s\n' "BACKUP_HOST=${BACKUP_HOST:-}"
+        printf '%s\n' "BACKUP_PORT=${BACKUP_PORT:-}"
+        printf '%s\n' "BACKUP_USER=${BACKUP_USER:-}"
+        printf '%s\n' "BACKUP_ENDPOINT=${BACKUP_ENDPOINT:-}"
+        printf '%s\n' "BACKUP_BUCKET=${BACKUP_BUCKET:-}"
+        printf '%s\n' "BACKUP_ACCESS_KEY=${BACKUP_ACCESS_KEY:-}"
+        printf '%s\n' "BACKUP_SECRET_KEY=${BACKUP_SECRET_KEY:-}"
       )
       local fl k v
       while IFS= read -r fl; do
@@ -758,9 +767,17 @@ render_setting_hint_sftp() {
 
 backend_sftp_resolve() {
   local -n cli_ref="$1" env_ref="$2" file_ref="$3" fields_ref="$4"
-  fields_ref[host]=$(resolve_value "${cli_ref[host]:-}" "${env_ref[host]:-}" "${file_ref[host]:-}" "") || true
-  fields_ref[port]=$(resolve_value "${cli_ref[port]:-}" "${env_ref[port]:-}" "${file_ref[port]:-}" "$DEFAULT_SFTP_PORT") || true
-  fields_ref[user]=$(resolve_value "${cli_ref[user]:-}" "${env_ref[user]:-}" "${file_ref[user]:-}" "") || true
+  local env_host="${env_ref[host]:-${BACKUP_HOST:-${RCLONE_CONFIG_SYNO_BACKUP_HOST:-}}}"
+  local file_host="${file_ref[host]:-${file_ref[RCLONE_CONFIG_SYNO_BACKUP_HOST]:-}}"
+  fields_ref[host]=$(resolve_value "${cli_ref[host]:-}" "$env_host" "$file_host" "") || true
+
+  local env_port="${env_ref[port]:-${BACKUP_PORT:-${RCLONE_CONFIG_SYNO_BACKUP_PORT:-}}}"
+  local file_port="${file_ref[port]:-${file_ref[RCLONE_CONFIG_SYNO_BACKUP_PORT]:-}}"
+  fields_ref[port]=$(resolve_value "${cli_ref[port]:-}" "$env_port" "$file_port" "$DEFAULT_SFTP_PORT") || true
+
+  local env_user="${env_ref[user]:-${BACKUP_USER:-${RCLONE_CONFIG_SYNO_BACKUP_USER:-}}}"
+  local file_user="${file_ref[user]:-${file_ref[RCLONE_CONFIG_SYNO_BACKUP_USER]:-}}"
+  fields_ref[user]=$(resolve_value "${cli_ref[user]:-}" "$env_user" "$file_user" "") || true
 }
 
 backend_sftp_validate() {
@@ -835,10 +852,36 @@ backend_s3_resolve() {
   # 같은 이유의 nameref 오탐.
   # shellcheck disable=SC2178
   local -n cli_ref="$1" env_ref="$2" file_ref="$3" fields_ref="$4"
-  fields_ref[endpoint]=$(resolve_value "${cli_ref[endpoint]:-}" "${env_ref[endpoint]:-}" "${file_ref[endpoint]:-}" "") || true
-  fields_ref[bucket]=$(resolve_value "${cli_ref[bucket]:-}" "${env_ref[bucket]:-}" "${file_ref[bucket]:-}" "") || true
-  fields_ref[access_key]=$(resolve_value "${cli_ref[access_key]:-}" "${env_ref[access_key]:-}" "${file_ref[access_key]:-}" "") || true
-  fields_ref[secret_key]=$(resolve_value "${cli_ref[secret_key]:-}" "${env_ref[secret_key]:-}" "${file_ref[secret_key]:-}" "") || true
+
+  # S3 env fallbacks
+  local env_access_key="${env_ref[access_key]:-${BACKUP_ACCESS_KEY:-${AWS_ACCESS_KEY_ID:-}}}"
+  local file_access_key="${file_ref[access_key]:-${file_ref[AWS_ACCESS_KEY_ID]:-}}"
+  local env_secret_key="${env_ref[secret_key]:-${BACKUP_SECRET_KEY:-${AWS_SECRET_ACCESS_KEY:-}}}"
+  local file_secret_key="${file_ref[secret_key]:-${file_ref[AWS_SECRET_ACCESS_KEY]:-}}"
+
+  # repo extraction for endpoint and bucket
+  local env_repo="${RESTIC_REPOSITORY:-}"
+  local file_repo="${file_ref[RESTIC_REPOSITORY]:-}"
+  local parsed_endpoint="" parsed_bucket=""
+
+  if [[ "$env_repo" =~ ^s3:(.*)/([^/]+)/[^/]+$ ]]; then
+    parsed_endpoint="${BASH_REMATCH[1]}"
+    parsed_bucket="${BASH_REMATCH[2]}"
+  elif [[ "$file_repo" =~ ^s3:(.*)/([^/]+)/[^/]+$ ]]; then
+    parsed_endpoint="${BASH_REMATCH[1]}"
+    parsed_bucket="${BASH_REMATCH[2]}"
+  fi
+
+  local env_endpoint="${env_ref[endpoint]:-${BACKUP_ENDPOINT:-$parsed_endpoint}}"
+  local file_endpoint="${file_ref[endpoint]:-$parsed_endpoint}"
+  fields_ref[endpoint]=$(resolve_value "${cli_ref[endpoint]:-}" "$env_endpoint" "$file_endpoint" "") || true
+
+  local env_bucket="${env_ref[bucket]:-${BACKUP_BUCKET:-$parsed_bucket}}"
+  local file_bucket="${file_ref[bucket]:-$parsed_bucket}"
+  fields_ref[bucket]=$(resolve_value "${cli_ref[bucket]:-}" "$env_bucket" "$file_bucket" "") || true
+
+  fields_ref[access_key]=$(resolve_value "${cli_ref[access_key]:-}" "$env_access_key" "$file_access_key" "") || true
+  fields_ref[secret_key]=$(resolve_value "${cli_ref[secret_key]:-}" "$env_secret_key" "$file_secret_key" "") || true
 }
 
 backend_s3_validate() {
@@ -910,7 +953,7 @@ backend_sftp_configure() {
 
   # Render Env
   _out_env=$(cat <<EOF
-export RESTIC_REPOSITORY="rclone:syno_backup:/backup/\$(hostname)"
+export RESTIC_REPOSITORY="rclone:syno_backup:/backup/$(hostname)"
 export RCLONE_CONFIG_SYNO_BACKUP_TYPE="sftp"
 export RCLONE_CONFIG_SYNO_BACKUP_HOST="${_resolved[host]}"
 export RCLONE_CONFIG_SYNO_BACKUP_USER="${_resolved[user]}"
@@ -961,7 +1004,7 @@ backend_s3_configure() {
 
   # Render Env
   _out_env=$(cat <<EOF
-export RESTIC_REPOSITORY="s3:${_resolved[endpoint]}/${_resolved[bucket]}/\$(hostname)"
+export RESTIC_REPOSITORY="s3:${_resolved[endpoint]}/${_resolved[bucket]}/$(hostname)"
 export AWS_ACCESS_KEY_ID="${_resolved[access_key]}"
 export AWS_SECRET_ACCESS_KEY="${_resolved[secret_key]}"
 export RESTIC_PASSWORD="${_resolved[password]}"
@@ -998,13 +1041,37 @@ cmd_init() {
   require_root
   require_backup_env
 
+  # Sourcing to read current configs into environment (standard for cmd_init)
+  # shellcheck source=/dev/null
+  source "$BACKUP_ENV_FILE"
+
+  local backend="s3"
   if [[ -n "${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" ]]; then
+    backend="sftp"
+  fi
+
+  # Resolve from current environment
+  local -A opts=()
+  local -A resolved=()
+  local -a errors=()
+  opts[backend]="$backend"
+  
+  # Run config resolution to capture resolved fields into nameref
+  resolve_and_validate_config opts resolved errors
+
+  if [[ "$backend" == "sftp" ]]; then
     if ! command -v rclone >/dev/null 2>&1; then
       die "[!] rclone이 설치되어 있지 않습니다. 'backup.sh install'을 다시 실행해 restic/rclone을 설치한 뒤 'backup.sh init'을 재시도하세요."
     fi
-    if ! rclone_check_connectivity "syno_backup" "${BACKUP_VERBOSE:-0}"; then
-      die "$(render_sftp_connectivity_failure_message "$RCLONE_CONFIG_SYNO_BACKUP_HOST" \
-        "$RCLONE_CONFIG_SYNO_BACKUP_PORT" "$RCLONE_CONFIG_SYNO_BACKUP_USER")"
+  fi
+
+  # Run connection test
+  if ! backend_${backend}_test_connectivity resolved; then
+    if [[ "$backend" == "sftp" ]]; then
+      die "$(render_sftp_connectivity_failure_message "${resolved[host]}" \
+        "${resolved[port]}" "${resolved[user]}")"
+    else
+      die "저장소 연결 실패"
     fi
   fi
 
@@ -1546,52 +1613,56 @@ cmd_migrate() {
   fi
   validate_backend "$backend"
 
-  local endpoint="${opts[endpoint]:-}"
-  local bucket="${opts[bucket]:-}"
-  local access_key="${opts[access-key]:-}"
-  local secret_key="${opts[secret-key]:-}"
-
-  local host="${opts[host]:-}"
-  local port="${opts[port]:-}"
-  local user="${opts[user]:-}"
-
+  # Prompt interactive values if terminal is active and values are empty
   if [[ "$backend" == "s3" ]]; then
-    if [[ -z "$endpoint" && -t 1 ]]; then
-      endpoint=$(prompt_validated "접속할 S3 호환 엔드포인트 URL을 입력하세요" "" validate_not_empty)
+    if [[ -z "${opts[endpoint]:-}" && -t 1 ]]; then
+      opts[endpoint]=$(prompt_validated "접속할 S3 호환 엔드포인트 URL을 입력하세요" "" validate_not_empty)
     fi
-    if [[ -z "$bucket" && -t 1 ]]; then
-      bucket=$(prompt_validated "백업을 저장할 버킷 이름을 입력하세요" "" validate_not_empty)
+    if [[ -z "${opts[bucket]:-}" && -t 1 ]]; then
+      opts[bucket]=$(prompt_validated "백업을 저장할 버킷 이름을 입력하세요" "" validate_not_empty)
     fi
-    if [[ -z "$access_key" && -t 1 ]]; then
-      access_key=$(prompt_validated "버킷 접근용 access key를 입력하세요" "" validate_not_empty)
+    if [[ -z "${opts[access-key]:-}" && -t 1 ]]; then
+      opts[access-key]=$(prompt_validated "버킷 접근용 access key를 입력하세요" "" validate_not_empty)
     fi
-    if [[ -z "$secret_key" && -t 1 ]]; then
-      secret_key=$(prompt_validated "버킷 접근용 secret key를 입력하세요" "" validate_not_empty)
-    fi
-
-    if [[ -z "$endpoint" || -z "$bucket" || -z "$access_key" || -z "$secret_key" ]]; then
-      die "S3 목적지 설정 정보가 부족합니다 (--endpoint, --bucket, --access-key, --secret-key 필요)."
+    if [[ -z "${opts[secret-key]:-}" && -t 1 ]]; then
+      opts[secret-key]=$(prompt_validated "버킷 접근용 secret key를 입력하세요" "" validate_not_empty)
     fi
   else
     # SFTP
-    if [[ -z "$host" && -t 1 ]]; then
-      host=$(prompt_validated "백업 데이터를 저장할 NAS의 IP 주소를 입력하세요" "" validate_not_empty)
+    if [[ -z "${opts[host]:-}" && -t 1 ]]; then
+      opts[host]=$(prompt_validated "백업 데이터를 저장할 NAS의 IP 주소를 입력하세요" "" validate_not_empty)
     fi
-    if [[ -z "$port" ]]; then
+    if [[ -z "${opts[port]:-}" ]]; then
       if [[ -t 1 ]]; then
-        port=$(prompt_validated "NAS의 SSH/SFTP 접속 포트를 입력하세요" "$DEFAULT_SFTP_PORT" validate_port)
+        opts[port]=$(prompt_validated "NAS의 SSH/SFTP 접속 포트를 입력하세요" "$DEFAULT_SFTP_PORT" validate_port)
       else
-        port="$DEFAULT_SFTP_PORT"
+        opts[port]="$DEFAULT_SFTP_PORT"
       fi
     fi
-    validate_port "$port"
-    if [[ -z "$user" && -t 1 ]]; then
-      user=$(prompt_validated "NAS에 접속할 SFTP 계정명을 입력하세요" "" validate_not_empty)
+    validate_port "${opts[port]:-}"
+    if [[ -z "${opts[user]:-}" && -t 1 ]]; then
+      opts[user]=$(prompt_validated "NAS에 접속할 SFTP 계정명을 입력하세요" "" validate_not_empty)
     fi
+  fi
 
-    if [[ -z "$host" || -z "$user" ]]; then
-      die "SFTP 목적지 설정 정보가 부족합니다 (--host, --user 필요)."
-    fi
+  # Call resolve_and_validate_config to validate the destination options
+  # Since resolve_and_validate_config needs targets and password, we feed mock ones
+  local -A dest_opts=()
+  local key
+  for key in "${!opts[@]}"; do
+    dest_opts["$key"]="${opts[$key]}"
+  done
+  dest_opts[targets]="/etc" # mock targets for validation
+  dest_opts[password]="${opts[new-password]:-$RESTIC_PASSWORD}" # mock or actual new password
+
+  local -A resolved=()
+  local -a errors=()
+  if ! resolve_and_validate_config dest_opts resolved errors; then
+    local e
+    for e in "${errors[@]}"; do
+      log_error "$e"
+    done
+    die "마이그레이션 목적지 설정 유효성 검증 실패"
   fi
 
   local new_password="${opts[new-password]:-}"
@@ -1599,21 +1670,13 @@ cmd_migrate() {
     new_password="$RESTIC_PASSWORD"
   fi
 
-  # 3. Pre-flight Destination Connectivity Check (for SFTP)
-  if [[ "$backend" == "sftp" ]]; then
-    generate_ssh_key_if_missing
-    # SFTP 연결 테스트를 위해 서브셸 안에서 임시로 환경 변수를 수정하여 통신을 점검합니다.
-    # shellcheck disable=SC2030
-    (
-      export RCLONE_CONFIG_SYNO_BACKUP_TYPE="sftp"
-      export RCLONE_CONFIG_SYNO_BACKUP_HOST="$host"
-      export RCLONE_CONFIG_SYNO_BACKUP_PORT="$port"
-      export RCLONE_CONFIG_SYNO_BACKUP_USER="$user"
-      export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="$BACKUP_SSH_KEY"
-      if ! rclone_check_connectivity "syno_backup" "${BACKUP_VERBOSE:-0}"; then
-        die "$(render_sftp_connectivity_failure_message "$host" "$port" "$user")"
-      fi
-    )
+  # 3. Pre-flight Destination Connectivity Check
+  if ! backend_${backend}_test_connectivity resolved; then
+    if [[ "$backend" == "sftp" ]]; then
+      die "$(render_sftp_connectivity_failure_message "${resolved[host]}" "${resolved[port]}" "${resolved[user]}")"
+    else
+      die "대상 저장소(Destination) 연결 실패"
+    fi
   fi
 
   # 4. Constructing destination environment variables for copy
@@ -1625,15 +1688,15 @@ cmd_migrate() {
     src_backend="sftp"
   fi
 
-  local -a dest_opts=()
+  local -a dest_opts_list=()
   if [[ "$backend" == "sftp" ]]; then
-    dest_opts+=(host="$host" port="$port" user="$user" key_file="$BACKUP_SSH_KEY")
+    dest_opts_list+=(host="${resolved[host]}" port="${resolved[port]}" user="${resolved[user]}" key_file="$BACKUP_SSH_KEY")
   else
-    dest_opts+=(endpoint="$endpoint" bucket="$bucket" access_key="$access_key" secret_key="$secret_key")
+    dest_opts_list+=(endpoint="${resolved[endpoint]}" bucket="${resolved[bucket]}" access_key="${resolved[access_key]}" secret_key="${resolved[secret_key]}")
   fi
 
   local dest_config_output
-  dest_config_output=$(build_dest_config "$backend" "$src_backend" "$profile_name" "$new_password" "${dest_opts[@]}")
+  dest_config_output=$(build_dest_config "$backend" "$src_backend" "$profile_name" "$new_password" "${dest_opts_list[@]}")
 
   local dest_repo_copy=""
   local -a dest_env=()
@@ -1694,9 +1757,9 @@ cmd_migrate() {
   log_info "로컬 백업 환경 설정 파일(backup.env) 업데이트 중..."
   local -a setting_opts=(--backend "$backend" --password "$new_password" --profile-name "$profile_name" --force)
   if [[ "$backend" == "s3" ]]; then
-    setting_opts+=(--endpoint "$endpoint" --bucket "$bucket" --access-key "$access_key" --secret-key "$secret_key")
+    setting_opts+=(--endpoint "${resolved[endpoint]}" --bucket "${resolved[bucket]}" --access-key "${resolved[access_key]}" --secret-key "${resolved[secret_key]}")
   else
-    setting_opts+=(--host "$host" --port "$port" --user "$user")
+    setting_opts+=(--host "${resolved[host]}" --port "${resolved[port]}" --user "${resolved[user]}")
   fi
 
   # Get the timer status of the current schedule before writing settings
@@ -1909,18 +1972,9 @@ cmd_setting() {
   local -A opts=()
   parse_opts_into opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: force dry-run" -- "$@"
 
-  local backend="${opts[backend]:-}" targets_csv="${opts[targets]:-}" password="${opts[password]:-}"
-  local keep_daily="${opts[keep-daily]:-}" keep_weekly="${opts[keep-weekly]:-}" keep_monthly="${opts[keep-monthly]:-}"
-  local profile_name="${opts[profile-name]:-}"
-  local force="${opts[force]:-0}" dry_run="${opts[dry-run]:-0}"
-
-  # backend 전용 필드만 adapter에 넘긴다 - opts는 파일 전체 플래그의 진실 공급원이고,
-  # cli는 그 부분집합 뷰.
-  local -A cli=(
-    [endpoint]="${opts[endpoint]:-}" [bucket]="${opts[bucket]:-}"
-    [access_key]="${opts[access-key]:-}" [secret_key]="${opts[secret-key]:-}"
-    [host]="${opts[host]:-}" [port]="${opts[port]:-}" [user]="${opts[user]:-}"
-  )
+  local backend="${opts[backend]:-}"
+  local force="${opts[force]:-0}"
+  local dry_run="${opts[dry-run]:-0}"
 
   if [[ -z "$backend" ]]; then
     die "$(render_missing_settings_message)"
@@ -1932,71 +1986,17 @@ cmd_setting() {
     die "이미 설정이 있습니다: ${BACKUP_ENV_FILE} (덮어쓰려면 setting --force)"
   fi
 
-  # 실제 사용자가 export한 환경변수는 backup.env를 source하기 전에 미리 캡처해둔다.
-  # (source 이후에는 같은 변수명이 파일 값으로 덮어써지므로, 미리 캡처하지 않으면
-  #  "환경변수 값"과 "기존 backup.env 값"을 구분할 수 없다.)
-  local env_targets="${BACKUP_TARGETS:-}"
-  local env_keep_daily="${KEEP_DAILY:-}"
-  local env_keep_weekly="${KEEP_WEEKLY:-}"
-  local env_keep_monthly="${KEEP_MONTHLY:-}"
-  local env_password="${BACKUP_PASSWORD:-}"
-  local env_profile_name="${BACKUP_PROFILE_NAME:-}"
-
-  # backend 전용 필드의 env-shadow는 adapter의 env_vars가 알려주는 이름만큼만 캡처한다.
-  # cmd_setting은 "어떤 이름을 캡처할지"를 모르고, 그 지식은 adapter 쪽에 남는다.
-  local -A env=()
-  local field_key var_name
-  while IFS=$'\t' read -r field_key var_name; do
-    [[ -z "$field_key" ]] && continue
-    env["$field_key"]="${!var_name:-}"
-  done < <(case "$backend" in sftp) backend_sftp_env_vars ;; s3) backend_s3_env_vars ;; esac)
-
-  local -A file=()
-
-  local file_targets="" file_keep_daily="" file_keep_weekly="" file_keep_monthly="" file_excludes="" file_profile_name=""
-  if [[ -f "$BACKUP_ENV_FILE" ]]; then
-    # shellcheck source=/dev/null
-    source "$BACKUP_ENV_FILE"
-    file_targets="${BACKUP_TARGETS:-}"
-    file_keep_daily="${KEEP_DAILY:-}"
-    file_keep_weekly="${KEEP_WEEKLY:-}"
-    file_keep_monthly="${KEEP_MONTHLY:-}"
-    file_excludes="${BACKUP_EXCLUDES:-}"
-    file_profile_name="${BACKUP_PROFILE_NAME:-}"
+  local -A resolved=()
+  local -a errors=()
+  if ! resolve_and_validate_config opts resolved errors; then
+    local e
+    for e in "${errors[@]}"; do
+      log_error "$e"
+    done
+    die "설정 유효성 검증 실패"
   fi
 
-  targets_csv=$(resolve_value "$targets_csv" "$env_targets" "$file_targets" "$DEFAULT_TARGETS")
-  check_targets_size_warning "$targets_csv"
-  keep_daily=$(resolve_value "$keep_daily" "$env_keep_daily" "$file_keep_daily" "$DEFAULT_KEEP_DAILY")
-  keep_weekly=$(resolve_value "$keep_weekly" "$env_keep_weekly" "$file_keep_weekly" "$DEFAULT_KEEP_WEEKLY")
-  keep_monthly=$(resolve_value "$keep_monthly" "$env_keep_monthly" "$file_keep_monthly" "$DEFAULT_KEEP_MONTHLY")
-  password=$(resolve_value "$password" "$env_password" "" "") || die "저장소 비밀번호(--password 또는 BACKUP_PASSWORD)가 필요합니다"
-
-  if ! err=$(validate_positive_int "$keep_daily" "keep-daily"); then die "$err"; fi
-  if ! err=$(validate_positive_int "$keep_weekly" "keep-weekly"); then die "$err"; fi
-  if ! err=$(validate_positive_int "$keep_monthly" "keep-monthly"); then die "$err"; fi
-
-  profile_name=$(resolve_value "$profile_name" "$env_profile_name" "$file_profile_name" "$(hostname)")
-  if ! err=$(validate_profile_name "$profile_name"); then die "$err"; fi
-
-  # excludes는 반복 가능한 --exclude 플래그로만 CLI에서 받으므로 환경변수 계층은 없다.
-  # parse_opts_into가 반복된 --exclude 값을 이미 콤마로 이어붙여뒀으므로, CLI에서
-  # 하나도 안 왔으면 기존 backup.env 값을, 그것도 없으면 기본값을 그대로 재사용한다.
-  local excludes_csv
-  excludes_csv=$(resolve_value "${opts[exclude]:-}" "" "$file_excludes" "$DEFAULT_EXCLUDES")
-
-  # fields is populated via backend_*_resolve's nameref, not directly in this
-  # scope - shellcheck can't see across that indirection.
-  # shellcheck disable=SC2034
-  local -A fields=()
-  case "$backend" in
-    sftp) backend_sftp_resolve cli env file fields ;;
-    s3) backend_s3_resolve cli env file fields ;;
-  esac
-
-  if ! err=$(case "$backend" in sftp) backend_sftp_validate fields ;; s3) backend_s3_validate fields ;; esac); then
-    die "$err"
-  fi
+  check_targets_size_warning "${resolved[targets]}"
 
   if (( dry_run )); then
     log_info "[dry-run] backup.env(${backend}) 생성 예정: ${BACKUP_ENV_FILE}"
@@ -2004,30 +2004,13 @@ cmd_setting() {
   fi
 
   ensure_restic_dir
-  case "$backend" in
-    sftp) backend_sftp_prepare fields ;;
-    s3) backend_s3_prepare fields ;;
-  esac
 
-  # policy is read via backend_*_render_env's nameref, not directly in this
-  # scope - shellcheck can't see across that indirection.
-  # shellcheck disable=SC2034
-  local -A policy=(
-    [password]="$password" [targets]="$targets_csv" [excludes_csv]="$excludes_csv"
-    [keep_daily]="$keep_daily" [keep_weekly]="$keep_weekly" [keep_monthly]="$keep_monthly"
-    [profile_name]="$profile_name"
-  )
-  local content
-  case "$backend" in
-    sftp) content=$(backend_sftp_render_env "$(hostname)" fields policy) ;;
-    s3) content=$(backend_s3_render_env "$(hostname)" fields policy) ;;
-  esac
+  local content="" notice=""
+  backend_${backend}_configure resolved content notice
+
   write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
 
-  case "$backend" in
-    sftp) backend_sftp_render_notice fields ;;
-    s3) backend_s3_render_notice fields ;;
-  esac
+  printf '%s\n' "$notice"
   log_info "setting(${backend}) 완료"
 }
 
