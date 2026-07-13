@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.1"
+BACKUP_SCRIPT_VERSION="0.0.2"
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -23,7 +23,7 @@ RESTICPROFILE_CONFIG_FILE="${RESTICPROFILE_CONFIG_FILE:-${RESTIC_ETC_DIR}/profil
 RESTICPROFILE_UNIT_TEMPLATE="${RESTICPROFILE_UNIT_TEMPLATE:-${RESTIC_ETC_DIR}/resticprofile-service.tmpl}"
 RESTICPROFILE_TIMER_TEMPLATE="${RESTICPROFILE_TIMER_TEMPLATE:-${RESTIC_ETC_DIR}/resticprofile-timer.tmpl}"
 
-DEFAULT_TARGETS="/var/log"
+DEFAULT_TARGETS="/var/log,/etc"
 DEFAULT_EXCLUDES="/tmp/*,/var/tmp/*"
 DEFAULT_KEEP_DAILY=7
 DEFAULT_KEEP_WEEKLY=4
@@ -40,6 +40,11 @@ log_info() {
 log_error() {
   printf 'ERROR: %s\n' "$1" >&2
   command -v logger >/dev/null 2>&1 && logger -t restic-backup -- "ERROR: $1" || true
+}
+
+log_warn() {
+  printf 'WARNING: %s\n' "$1" >&2
+  command -v logger >/dev/null 2>&1 && logger -t restic-backup -- "WARNING: $1" || true
 }
 
 die() {
@@ -128,6 +133,51 @@ validate_not_empty() {
     return 1
   fi
   return 0
+}
+
+check_targets_size_warning() {
+  local targets_csv="$1"
+  local -a paths=()
+  local old_ifs="$IFS"
+  IFS=',' read -r -a paths <<< "$targets_csv"
+  IFS="$old_ifs"
+
+  local var_log_exceeds=0
+  local etc_exceeds=0
+  # 1GB in KB is 1,048,576
+  local limit_kb=1048576
+
+  local path
+  for path in "${paths[@]}"; do
+    path=$(echo "$path" | xargs)
+    if [[ ! -d "$path" ]]; then
+      continue
+    fi
+
+    local du_output size_kb
+    du_output=$(du -sk "$path" 2>/dev/null || echo 0)
+    size_kb="${du_output%%[[:space:]]*}"
+    if ! [[ "$size_kb" =~ ^[0-9]+$ ]]; then
+      size_kb=0
+    fi
+
+    local abs_path
+    abs_path=$(realpath -m "$path" 2>/dev/null || echo "$path")
+
+    if [[ "$abs_path" == "/var/log" ]]; then
+      if (( size_kb > limit_kb )); then
+        var_log_exceeds=1
+      fi
+    elif [[ "$abs_path" == "/etc" ]]; then
+      if (( size_kb > limit_kb )); then
+        etc_exceeds=1
+      fi
+    fi
+  done
+
+  if (( var_log_exceeds && etc_exceeds )); then
+    log_warn "백업 대상인 /var/log 디렉터리와 /etc 디렉터리가 둘 다 1GB를 초과합니다. 백업 수행 시 많은 대역폭과 디스크 공간이 소모될 수 있습니다."
+  fi
 }
 
 parse_long_opts() {
@@ -756,73 +806,60 @@ cmd_status() {
 
   local profile_name; profile_name=$(resolve_profile_name)
 
+  # Color settings
+  local C_RESET="" C_BOLD="" C_DIM="" C_RED="" C_GREEN="" C_YELLOW="" C_BLUE="" C_CYAN="" C_GRAY=""
   if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-    # Beautiful ANSI styled output for interactive TTY
-    local C_RESET="\033[0m"
-    local C_BOLD="\033[1m"
-    local C_DIM="\033[2m"
-    local C_RED="\033[31m"
-    local C_GREEN="\033[32m"
-    local C_YELLOW="\033[33m"
-    local C_BLUE="\033[34m"
-    local C_CYAN="\033[36m"
-    local C_GRAY="\033[90m"
-
-    local styled_repo="${C_BOLD}${RESTIC_REPOSITORY:-알 수 없음}${C_RESET}"
-    local styled_targets="${C_BOLD}${BACKUP_TARGETS:-알 수 없음}${C_RESET}"
-
-    local timer_state
-    timer_state=$(systemctl is-active "$(resticprofile_timer_unit_name "$profile_name")" 2>/dev/null) || true
-    local styled_timer
-    if [[ "$timer_state" == "active" ]]; then
-      styled_timer="${C_GREEN}active${C_RESET}"
-    elif [[ "$timer_state" == "inactive" ]]; then
-      styled_timer="${C_GRAY}inactive${C_RESET}"
-    else
-      styled_timer="${C_RED}${timer_state:-unknown}${C_RESET}"
-    fi
-
-    local etc_perm; etc_perm="$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '?')"
-    local env_perm; env_perm="$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '?')"
-
-    local styled_etc_perm
-    if [[ "$etc_perm" == "700" ]]; then
-      styled_etc_perm="${C_GREEN}${etc_perm}${C_RESET} ${C_GRAY}(안전)${C_RESET}"
-    else
-      styled_etc_perm="${C_RED}${etc_perm}${C_RESET} ${C_YELLOW}(경고: 700 권장)${C_RESET}"
-    fi
-
-    local styled_env_perm
-    if [[ "$env_perm" == "600" ]]; then
-      styled_env_perm="${C_GREEN}${env_perm}${C_RESET} ${C_GRAY}(안전)${C_RESET}"
-    else
-      styled_env_perm="${C_RED}${env_perm}${C_RESET} ${C_YELLOW}(경고: 600 권장)${C_RESET}"
-    fi
-
-    printf '%b%b⚙  백업 상태 (Backup Status)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
-    printf '%b├──%b 저장소 위치:  %b\n' "$C_GRAY" "$C_RESET" "$styled_repo"
-    printf '%b├──%b 백업 대상:    %b\n' "$C_GRAY" "$C_RESET" "$styled_targets"
-    printf '%b├──%b 타이머 상태:  %b\n' "$C_GRAY" "$C_RESET" "$styled_timer"
-    printf '%b├──%b %s 권한: %b\n' "$C_GRAY" "$C_RESET" "$RESTIC_ETC_DIR" "$styled_etc_perm"
-    printf '%b└──%b %s 권한: %b\n' "$C_GRAY" "$C_RESET" "$BACKUP_ENV_FILE" "$styled_env_perm"
-    printf '\n'
-    printf '%b%b⚙  최근 스냅샷 (Recent Snapshots)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
-    restic snapshots --json 2>/dev/null | sed 's/^/  /' || printf '  (조회 실패 또는 미초기화)\n'
-  else
-    # Simple plain-text fallback (matches original structure exactly for backward compatibility & tests)
-    printf '저장소 위치: %s\n' "${RESTIC_REPOSITORY:-알 수 없음}"
-    printf '백업 대상: %s\n' "${BACKUP_TARGETS:-알 수 없음}"
-
-    printf '최근 스냅샷:\n'
-    restic snapshots --json 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
-
-    local timer_state
-    timer_state=$(systemctl is-active "$(resticprofile_timer_unit_name "$profile_name")" 2>/dev/null) || true
-    printf '타이머 상태: %s\n' "${timer_state:-unknown}"
-
-    printf '%s 권한: %s\n' "$RESTIC_ETC_DIR" "$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '?')"
-    printf '%s 권한: %s\n' "$BACKUP_ENV_FILE" "$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '?')"
+    C_RESET="\033[0m"
+    C_BOLD="\033[1m"
+    C_DIM="\033[2m"
+    C_RED="\033[31m"
+    C_GREEN="\033[32m"
+    C_YELLOW="\033[33m"
+    C_BLUE="\033[34m"
+    C_CYAN="\033[36m"
+    C_GRAY="\033[90m"
   fi
+
+  local styled_repo="${C_BOLD}${RESTIC_REPOSITORY:-알 수 없음}${C_RESET}"
+  local styled_targets="${C_BOLD}${BACKUP_TARGETS:-알 수 없음}${C_RESET}"
+
+  local timer_state
+  timer_state=$(systemctl is-active "$(resticprofile_timer_unit_name "$profile_name")" 2>/dev/null) || true
+  local styled_timer
+  if [[ "$timer_state" == "active" ]]; then
+    styled_timer="${C_GREEN}active${C_RESET}"
+  elif [[ "$timer_state" == "inactive" ]]; then
+    styled_timer="${C_GRAY}inactive${C_RESET}"
+  else
+    styled_timer="${C_RED}${timer_state:-unknown}${C_RESET}"
+  fi
+
+  local etc_perm; etc_perm="$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '?')"
+  local env_perm; env_perm="$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '?')"
+
+  local styled_etc_perm
+  if [[ "$etc_perm" == "700" ]]; then
+    styled_etc_perm="${C_GREEN}${etc_perm}${C_RESET} ${C_GRAY}(안전)${C_RESET}"
+  else
+    styled_etc_perm="${C_RED}${etc_perm}${C_RESET} ${C_YELLOW}(경고: 700 권장)${C_RESET}"
+  fi
+
+  local styled_env_perm
+  if [[ "$env_perm" == "600" ]]; then
+    styled_env_perm="${C_GREEN}${env_perm}${C_RESET} ${C_GRAY}(안전)${C_RESET}"
+  else
+    styled_env_perm="${C_RED}${env_perm}${C_RESET} ${C_YELLOW}(경고: 600 권장)${C_RESET}"
+  fi
+
+  printf '%b%b⚙  백업 상태 (Backup Status)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+  printf '%b├──%b 저장소 위치:  %b\n' "$C_GRAY" "$C_RESET" "$styled_repo"
+  printf '%b├──%b 백업 대상:    %b\n' "$C_GRAY" "$C_RESET" "$styled_targets"
+  printf '%b├──%b 타이머 상태:  %b\n' "$C_GRAY" "$C_RESET" "$styled_timer"
+  printf '%b├──%b %s 권한: %b\n' "$C_GRAY" "$C_RESET" "$RESTIC_ETC_DIR" "$styled_etc_perm"
+  printf '%b└──%b %s 권한: %b\n' "$C_GRAY" "$C_RESET" "$BACKUP_ENV_FILE" "$styled_env_perm"
+  printf '\n'
+  printf '%b%b⚙  최근 스냅샷 (Recent Snapshots)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+  restic snapshots --json 2>/dev/null | sed 's/^/  /' || printf '  (조회 실패 또는 미초기화)\n'
 }
 
 # ISMS 감사 대응용 통합 리포트. cmd_status는 빠른 운영 확인용이고, 이쪽은
@@ -1142,6 +1179,224 @@ cmd_uninstall() {
   fi
 }
 
+cmd_migrate() {
+  require_root
+  require_backup_env
+
+  # Sourcing current configuration
+  # shellcheck source=/dev/null
+  source "$BACKUP_ENV_FILE"
+
+  local -A opts=()
+  parse_opts_into opts "backend: endpoint: bucket: access-key: secret-key: host: port: user: new-password: skip-check force" -- "$@"
+  local skip_check="${opts[skip-check]:-0}"
+  local force="${opts[force]:-0}"
+
+  # 1. Pre-flight check on Source Repository
+  log_info "기존 저장소(Source) 상태 점검 중..."
+  restic unlock 2>/dev/null || true
+  if ! restic snapshots >/dev/null 2>&1; then
+    die "기존 저장소(Source)에 연결할 수 없거나 비밀번호가 올바르지 않습니다. 마이그레이션을 중단합니다."
+  fi
+
+  # 2. Resolving destination backend settings
+  local backend="${opts[backend]:-}"
+  if [[ -z "$backend" ]]; then
+    if [[ -t 1 ]]; then
+      backend=$(prompt_backend_choice)
+    else
+      die "마이그레이션 대상 백엔드(--backend)를 지정해야 합니다."
+    fi
+  fi
+  validate_backend "$backend"
+
+  local endpoint="${opts[endpoint]:-}"
+  local bucket="${opts[bucket]:-}"
+  local access_key="${opts[access-key]:-}"
+  local secret_key="${opts[secret-key]:-}"
+
+  local host="${opts[host]:-}"
+  local port="${opts[port]:-}"
+  local user="${opts[user]:-}"
+
+  if [[ "$backend" == "s3" ]]; then
+    if [[ -z "$endpoint" && -t 1 ]]; then
+      endpoint=$(prompt_validated "접속할 S3 호환 엔드포인트 URL을 입력하세요" "" validate_not_empty)
+    fi
+    if [[ -z "$bucket" && -t 1 ]]; then
+      bucket=$(prompt_validated "백업을 저장할 버킷 이름을 입력하세요" "" validate_not_empty)
+    fi
+    if [[ -z "$access_key" && -t 1 ]]; then
+      access_key=$(prompt_validated "버킷 접근용 access key를 입력하세요" "" validate_not_empty)
+    fi
+    if [[ -z "$secret_key" && -t 1 ]]; then
+      secret_key=$(prompt_validated "버킷 접근용 secret key를 입력하세요" "" validate_not_empty)
+    fi
+
+    if [[ -z "$endpoint" || -z "$bucket" || -z "$access_key" || -z "$secret_key" ]]; then
+      die "S3 목적지 설정 정보가 부족합니다 (--endpoint, --bucket, --access-key, --secret-key 필요)."
+    fi
+  else
+    # SFTP
+    if [[ -z "$host" && -t 1 ]]; then
+      host=$(prompt_validated "백업 데이터를 저장할 NAS의 IP 주소를 입력하세요" "" validate_not_empty)
+    fi
+    if [[ -z "$port" ]]; then
+      if [[ -t 1 ]]; then
+        port=$(prompt_validated "NAS의 SSH/SFTP 접속 포트를 입력하세요" "$DEFAULT_SFTP_PORT" validate_port)
+      else
+        port="$DEFAULT_SFTP_PORT"
+      fi
+    fi
+    validate_port "$port"
+    if [[ -z "$user" && -t 1 ]]; then
+      user=$(prompt_validated "NAS에 접속할 SFTP 계정명을 입력하세요" "" validate_not_empty)
+    fi
+
+    if [[ -z "$host" || -z "$user" ]]; then
+      die "SFTP 목적지 설정 정보가 부족합니다 (--host, --user 필요)."
+    fi
+  fi
+
+  local new_password="${opts[new-password]:-}"
+  if [[ -z "$new_password" ]]; then
+    new_password="$RESTIC_PASSWORD"
+  fi
+
+  # 3. Pre-flight Destination Connectivity Check (for SFTP)
+  local -A sftp_resolved=()
+  if [[ "$backend" == "sftp" ]]; then
+    # Prepare keys
+    local -a sftp_opts=(--host "$host" --port "$port" --user "$user")
+    if (( force )); then
+      sftp_opts+=(--force)
+    fi
+    backend_sftp_resolve sftp_resolved "${sftp_opts[@]}"
+    backend_sftp_prepare sftp_resolved
+
+    # SFTP 연결 테스트를 위해 서브셸 안에서 임시로 환경 변수를 수정하여 통신을 점검합니다.
+    # shellcheck disable=SC2030
+    (
+      export RCLONE_CONFIG_SYNO_BACKUP_TYPE="sftp"
+      export RCLONE_CONFIG_SYNO_BACKUP_HOST="$host"
+      export RCLONE_CONFIG_SYNO_BACKUP_PORT="$port"
+      export RCLONE_CONFIG_SYNO_BACKUP_USER="$user"
+      export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="${sftp_resolved[key-file]}"
+      if ! rclone_check_connectivity "syno_backup" "${BACKUP_VERBOSE:-0}"; then
+        die "$(render_sftp_connectivity_failure_message "$host" "$port" "$user")"
+      fi
+    )
+  fi
+
+  # 4. Constructing destination environment variables for copy
+  local profile_name; profile_name=$(resolve_profile_name)
+  local -a dest_env=("RESTIC_PASSWORD=$new_password")
+  local dest_repo_copy
+
+  if [[ "$backend" == "sftp" ]]; then
+    dest_repo_copy="rclone:syno_backup_dst:/backup/${profile_name}"
+    dest_env+=(
+      "RCLONE_CONFIG_SYNO_BACKUP_DST_TYPE=sftp"
+      "RCLONE_CONFIG_SYNO_BACKUP_DST_HOST=$host"
+      "RCLONE_CONFIG_SYNO_BACKUP_DST_PORT=$port"
+      "RCLONE_CONFIG_SYNO_BACKUP_DST_USER=$user"
+      "RCLONE_CONFIG_SYNO_BACKUP_DST_KEY_FILE=${sftp_resolved[key-file]:-$BACKUP_SSH_KEY}"
+    )
+  else
+    # 앞선 서브셸 안에서의 임시 수정이 아닌, 본 셸에 로드된 원본 백엔드 타입 정보를 안전하게 분기 판단합니다.
+    # shellcheck disable=SC2031
+    if [[ "${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" == "sftp" ]]; then
+      dest_repo_copy="s3:${endpoint}/${bucket}/${profile_name}"
+      dest_env+=(
+        "AWS_ACCESS_KEY_ID=$access_key"
+        "AWS_SECRET_ACCESS_KEY=$secret_key"
+      )
+    else
+      dest_repo_copy="rclone:syno_backup_dst:${bucket}/${profile_name}"
+      dest_env+=(
+        "RCLONE_CONFIG_SYNO_BACKUP_DST_TYPE=s3"
+        "RCLONE_CONFIG_SYNO_BACKUP_DST_PROVIDER=other"
+        "RCLONE_CONFIG_SYNO_BACKUP_DST_ENDPOINT=$endpoint"
+        "RCLONE_CONFIG_SYNO_BACKUP_DST_ACCESS_KEY_ID=$access_key"
+        "RCLONE_CONFIG_SYNO_BACKUP_DST_SECRET_ACCESS_KEY=$secret_key"
+      )
+    fi
+  fi
+
+  run_restic_dest() {
+    env "${dest_env[@]}" restic "$@"
+  }
+
+  # 5. Create secure temp password files for transfer
+  # Using global variables (no local) so they remain in scope for the EXIT trap
+  temp_src_pass=$(mktemp /tmp/src_pass.XXXXXX)
+  temp_dst_pass=$(mktemp /tmp/dst_pass.XXXXXX)
+  chmod 600 "$temp_src_pass" "$temp_dst_pass"
+  echo -n "$RESTIC_PASSWORD" > "$temp_src_pass"
+  echo -n "$new_password" > "$temp_dst_pass"
+
+  cleanup_temp_files() {
+    rm -f "${temp_src_pass:-}" "${temp_dst_pass:-}"
+  }
+  trap cleanup_temp_files EXIT INT TERM
+
+  # Check if destination is already initialized
+  local dest_initialized=0
+  if run_restic_dest -r "$dest_repo_copy" snapshots >/dev/null 2>&1; then
+    dest_initialized=1
+  fi
+
+  # 6. Initialize destination if not yet initialized
+  if [[ "$dest_initialized" -eq 0 ]]; then
+    log_info "대상 저장소(Destination)가 존재하지 않아 초기화합니다 (Chunker 파라미터 복사)..."
+    run_restic_dest -r "$dest_repo_copy" init \
+      --from-repo "$RESTIC_REPOSITORY" \
+      --from-password-file "$temp_src_pass" \
+      --copy-chunker-params || die "대상 저장소 초기화 실패"
+  fi
+
+  # 7. Copy Snapshots
+  log_info "기존 저장소에서 대상 저장소로 백업 데이터(스냅샷) 복사 중..."
+  run_restic_dest -r "$RESTIC_REPOSITORY" copy \
+    --repo2 "$dest_repo_copy" \
+    --password-file2 "$temp_dst_pass" || die "백업 데이터 복사(restic copy) 실패"
+
+  # 8. Verify Consistency
+  if (( ! skip_check )); then
+    log_info "대상 저장소 정합성 검증(restic check) 수행 중..."
+    run_restic_dest -r "$dest_repo_copy" check || die "대상 저장소 정합성 검증 실패"
+  fi
+
+  # 9. Write new settings to backup.env and update systemd timer if active
+  log_info "로컬 백업 환경 설정 파일(backup.env) 업데이트 중..."
+  local -a setting_opts=(--backend "$backend" --password "$new_password" --profile-name "$profile_name" --force)
+  if [[ "$backend" == "s3" ]]; then
+    setting_opts+=(--endpoint "$endpoint" --bucket "$bucket" --access-key "$access_key" --secret-key "$secret_key")
+  else
+    setting_opts+=(--host "$host" --port "$port" --user "$user")
+  fi
+
+  # Get the timer status of the current schedule before writing settings
+  local timer_unit; timer_unit=$(resticprofile_timer_unit_name "$profile_name")
+  local schedule_active=0
+  if systemctl is-active "$timer_unit" >/dev/null 2>&1; then
+    schedule_active=1
+  fi
+
+  # Save setting values to backup.env
+  cmd_setting "${setting_opts[@]}"
+
+  # 10. Update systemd schedule if it was active
+  if [[ "$schedule_active" -eq 1 ]]; then
+    log_info "백업 스케줄이 활성화 상태였으므로 새 저장소 정보로 스케줄러를 재갱신합니다..."
+    cmd_schedule enable
+  fi
+
+  log_info "마이그레이션이 완료되었습니다! 클라이언트 호스트 환경이 새 저장소로 완전히 이관되었습니다."
+  log_info "기존 원격 저장소에 저장되어 있는 옛날 백업 데이터들은 안전을 위해 자동 삭제되지 않았습니다."
+  log_info "기존 데이터를 완전히 삭제하고 싶으신 경우 원격에서 직접 정리하시길 바랍니다."
+}
+
 # cmd_wizard 전용 대화형 입력 헬퍼. 프롬프트는 stderr로 내보내고 답변만
 # stdout으로 반환하므로 $(...)로 값을 캡처해도 프롬프트 문구가 섞이지 않는다.
 
@@ -1237,6 +1492,39 @@ cmd_wizard() {
 비밀번호 입력(화면에 표시되지 않습니다): ')
   setting_args+=(--password "$password")
 
+  # 1. Ask about targets
+  printf '\n--- 백업 대상 경로 설정 ---\n'
+  printf '보안 컴플라이언스(ISMS/ISO 27001) 기준에 부합하기 위해, 중요 설정 파일(/etc) 및 감사 추적 로그(/var/log)가 기본 백업 경로로 지정되어 있습니다.\n'
+  printf '  * /etc: 사용자 계정, 권한 설정 및 네트워크 구성을 보존하여 설정의 무결성을 입증합니다.\n'
+  printf '  * /var/log: 시스템 로그인 및 보안 감사 로그를 보존하여 침해사고 예방 및 사후 조사를 지원합니다.\n\n'
+  
+  printf '기본 경로(/var/log, /etc)를 백업 대상에 포함하시겠습니까? [Y/n]: '
+  local use_default_targets; read -r use_default_targets
+  
+  local final_targets=""
+  if [[ -z "$use_default_targets" || "$use_default_targets" =~ ^[Yy]$ ]]; then
+    final_targets="/var/log,/etc"
+  fi
+  
+  printf '추가로 백업할 디렉터리 경로가 있습니까? (쉼표로 구분하여 입력, 없으면 Enter): '
+  local additional_targets; read -r additional_targets
+  
+  if [[ -n "$additional_targets" ]]; then
+    if [[ -n "$final_targets" ]]; then
+      final_targets="${final_targets},${additional_targets}"
+    else
+      final_targets="$additional_targets"
+    fi
+  fi
+
+  while [[ -z "$final_targets" ]]; do
+    printf '경고: 백업 대상 경로가 비어 있습니다. 최소 한 개 이상의 경로를 지정해야 합니다.\n'
+    printf '백업할 디렉터리 경로를 입력하세요 (예: /var/log): '
+    read -r final_targets
+  done
+
+  setting_args+=(--targets "$final_targets")
+
   printf '\n다음 설정으로 진행합니다:\n'
   printf '  백엔드: %s\n' "$backend"
   if [[ "$backend" == "sftp" ]]; then
@@ -1245,6 +1533,7 @@ cmd_wizard() {
     printf '  S3 엔드포인트: %s\n' "$endpoint"
     printf '  버킷: %s\n' "$bucket"
   fi
+  printf '  백업 대상: %s\n' "$final_targets"
   printf '이대로 진행할까요? [Y/n]: '
   local confirm
   read -r confirm
@@ -1354,6 +1643,7 @@ cmd_setting() {
   fi
 
   targets_csv=$(resolve_value "$targets_csv" "$env_targets" "$file_targets" "$DEFAULT_TARGETS")
+  check_targets_size_warning "$targets_csv"
   keep_daily=$(resolve_value "$keep_daily" "$env_keep_daily" "$file_keep_daily" "$DEFAULT_KEEP_DAILY")
   keep_weekly=$(resolve_value "$keep_weekly" "$env_keep_weekly" "$file_keep_weekly" "$DEFAULT_KEEP_WEEKLY")
   keep_monthly=$(resolve_value "$keep_monthly" "$env_keep_monthly" "$file_keep_monthly" "$DEFAULT_KEEP_MONTHLY")
@@ -1433,6 +1723,7 @@ backup.sh - restic 기반 백업 설치/운영 스크립트
   backup.sh status
   backup.sh audit [--report] [--report-file <경로>]
   backup.sh uninstall [--purge]
+  backup.sh migrate --backend <s3|sftp> [옵션...] [--new-password <새비밀번호>] [--skip-check] [--force]
   backup.sh wizard
   backup.sh -h | --help
   backup.sh -V | --version
@@ -1506,6 +1797,11 @@ main() {
     uninstall)
       shift
       cmd_uninstall "$@"
+      return $?
+      ;;
+    migrate)
+      shift
+      cmd_migrate "$@"
       return $?
       ;;
     wizard)

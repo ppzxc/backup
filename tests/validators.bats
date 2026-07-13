@@ -122,3 +122,30 @@ setup() {
   run validate_profile_name "funa1.nanoit.kr"
   [ "$status" -eq 0 ]
 }
+
+@test "check_targets_size_warning warns when both /var/log and /etc are over 1GB" {
+  stub_command "du" '
+    if [[ "$*" == *"/var/log"* ]]; then
+      echo "2000000 /var/log"
+    elif [[ "$*" == *"/etc"* ]]; then
+      echo "1500000 /etc"
+    fi
+  '
+  run check_targets_size_warning "/var/log,/etc"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING:"* ]]
+  [[ "$output" == *"1GB를 초과합니다"* ]]
+}
+
+@test "check_targets_size_warning does not warn when only one of /var/log and /etc is over 1GB" {
+  stub_command "du" '
+    if [[ "$*" == *"/var/log"* ]]; then
+      echo "2000000 /var/log"
+    elif [[ "$*" == *"/etc"* ]]; then
+      echo "500000 /etc"
+    fi
+  '
+  run check_targets_size_warning "/var/log,/etc"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}

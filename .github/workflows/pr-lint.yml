@@ -1,0 +1,43 @@
+name: PR Lint Check
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+    branches:
+      - main
+
+jobs:
+  pr-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR Title and Description
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          echo "=== Checking PR Title ==="
+          echo "Title: $PR_TITLE"
+          
+          # 1. Validate PR Title (Conventional Commits)
+          TITLE_REGEX="^(feat|fix|docs|style|refactor|test|chore|ci)(\([a-z0-9_-]+\))?: .+$"
+          if [[ ! "$PR_TITLE" =~ $TITLE_REGEX ]]; then
+            echo "::error::PR Title '$PR_TITLE' does not follow Conventional Commits format."
+            echo "Format must match: type(scope): description (e.g., 'feat: add migrate command')"
+            echo "Supported types: feat, fix, docs, style, refactor, test, chore, ci"
+            exit 1
+          fi
+          echo "PR Title matches conventional commits format."
+
+          echo "=== Checking PR Description ==="
+          # 2. Validate PR Body (Description)
+          # Trim whitespace using awk/xargs
+          TRIMMED_BODY=$(echo "$PR_BODY" | xargs || echo "")
+          if [[ -z "$TRIMMED_BODY" ]]; then
+            echo "::error::PR Description (body) must not be empty. Please provide a brief summary of your changes."
+            exit 1
+          fi
+          if [[ ${#TRIMMED_BODY} -lt 15 ]]; then
+            echo "::error::PR Description is too short (currently ${#TRIMMED_BODY} characters). Please provide a more detailed description (minimum 15 characters)."
+            exit 1
+          fi
+          echo "PR Description check passed successfully."
