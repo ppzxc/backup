@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.3"
+BACKUP_SCRIPT_VERSION="0.0.4"
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -150,6 +151,8 @@ validate_not_empty() {
   return 0
 }
 
+# nameref로 인자를 받거나 다른 함수로 동적 연관 배열을 전달하여 사용하지 않는 것으로 오인받는 변수가 있으므로 우회
+# shellcheck disable=SC2034
 resolve_and_validate_config() {
   local -n _opts="$1"
   local -n _resolved="$2"
@@ -245,8 +248,12 @@ resolve_and_validate_config() {
   # Delegate backend-specific validation if backend is specified
   local backend="${_opts[backend]:-}"
   if [[ -n "$backend" ]]; then
+    # nameref를 통한 동적 파싱을 사용하므로 미사용 변수 경고 우회
+    # shellcheck disable=SC2034
     local -A backend_cli=()
+    # shellcheck disable=SC2034
     local -A backend_env=()
+    # shellcheck disable=SC2034
     local -A backend_file=()
 
     backend_cli[endpoint]="${_opts[endpoint]:-}"
@@ -943,6 +950,8 @@ backend_s3_render_notice() {
 }
 
 backend_sftp_configure() {
+  # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
+  # shellcheck disable=SC2178
   local -n _resolved="$1"
   local -n _out_env="$2"
   local -n _out_notice="$3"
@@ -985,6 +994,8 @@ EOF" 2>/dev/null || echo "$_out_notice")
 }
 
 backend_sftp_test_connectivity() {
+  # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
+  # shellcheck disable=SC2178
   local -n _resolved="$1"
   generate_ssh_key_if_missing
   (
@@ -998,6 +1009,8 @@ backend_sftp_test_connectivity() {
 }
 
 backend_s3_configure() {
+  # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
+  # shellcheck disable=SC2178
   local -n _resolved="$1"
   local -n _out_env="$2"
   local -n _out_notice="$3"
@@ -1066,7 +1079,7 @@ cmd_init() {
   fi
 
   # Run connection test
-  if ! backend_${backend}_test_connectivity resolved; then
+  if ! backend_"${backend}"_test_connectivity resolved; then
     if [[ "$backend" == "sftp" ]]; then
       die "$(render_sftp_connectivity_failure_message "${resolved[host]}" \
         "${resolved[port]}" "${resolved[user]}")"
@@ -1582,6 +1595,8 @@ build_dest_config() {
   printf 'RESTIC_PASSWORD=%s\n' "$new_password"
 }
 
+# nameref로 인자를 받거나 다른 함수로 동적 연관 배열을 전달하여 사용하지 않는 것으로 오인받는 변수가 있으므로 우회
+# shellcheck disable=SC2034
 cmd_migrate() {
   require_root
   require_backup_env
@@ -1647,6 +1662,8 @@ cmd_migrate() {
 
   # Call resolve_and_validate_config to validate the destination options
   # Since resolve_and_validate_config needs targets and password, we feed mock ones
+  # resolve_and_validate_config에 nameref로 인자를 넘기므로 shellcheck 오탐 방지
+  # shellcheck disable=SC2034
   local -A dest_opts=()
   local key
   for key in "${!opts[@]}"; do
@@ -1671,7 +1688,7 @@ cmd_migrate() {
   fi
 
   # 3. Pre-flight Destination Connectivity Check
-  if ! backend_${backend}_test_connectivity resolved; then
+  if ! backend_"${backend}"_test_connectivity resolved; then
     if [[ "$backend" == "sftp" ]]; then
       die "$(render_sftp_connectivity_failure_message "${resolved[host]}" "${resolved[port]}" "${resolved[user]}")"
     else
@@ -2006,7 +2023,7 @@ cmd_setting() {
   ensure_restic_dir
 
   local content="" notice=""
-  backend_${backend}_configure resolved content notice
+  backend_"${backend}"_configure resolved content notice
 
   write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
 
