@@ -242,6 +242,70 @@ resolve_and_validate_config() {
     _errors+=("$err")
   fi
 
+  # Delegate backend-specific validation if backend is specified
+  local backend="${_opts[backend]:-}"
+  if [[ -n "$backend" ]]; then
+    local -A backend_cli=()
+    local -A backend_env=()
+    local -A backend_file=()
+
+    backend_cli[endpoint]="${_opts[endpoint]:-}"
+    backend_cli[bucket]="${_opts[bucket]:-}"
+    backend_cli[access_key]="${_opts[access-key]:-}"
+    backend_cli[secret_key]="${_opts[secret-key]:-}"
+    backend_cli[host]="${_opts[host]:-}"
+    backend_cli[port]="${_opts[port]:-}"
+    backend_cli[user]="${_opts[user]:-}"
+
+    local env_vars_mapping
+    env_vars_mapping=$(case "$backend" in sftp) backend_sftp_env_vars ;; s3) backend_s3_env_vars ;; esac)
+    local field_key var_name
+    while IFS=$'\t' read -r field_key var_name; do
+      [[ -z "$field_key" ]] && continue
+      backend_env["$field_key"]="${!var_name:-}"
+    done <<< "$env_vars_mapping"
+
+    if [[ -f "${BACKUP_ENV_FILE:-}" ]]; then
+      local backend_file_raw
+      backend_file_raw=$(
+        # shellcheck source=/dev/null
+        source "$BACKUP_ENV_FILE" >/dev/null 2>&1 || true
+        while IFS=$'\t' read -r field_key var_name; do
+          [[ -z "$field_key" ]] && continue
+          printf '%s=%s\n' "$field_key" "${!var_name:-}"
+        done <<< "$env_vars_mapping"
+      )
+      local fl k v
+      while IFS= read -r fl; do
+        [[ -z "$fl" ]] && continue
+        k="${fl%%=*}"
+        v="${fl#*=}"
+        backend_file["$k"]="$v"
+      done <<< "$backend_file_raw"
+    fi
+
+    local -A backend_fields=()
+    case "$backend" in
+      sftp) backend_sftp_resolve backend_cli backend_env backend_file backend_fields ;;
+      s3) backend_s3_resolve backend_cli backend_env backend_file backend_fields ;;
+    esac
+
+    # Copy to main resolved array
+    local key
+    for key in "${!backend_fields[@]}"; do
+      _resolved["$key"]="${backend_fields[$key]}"
+    done
+
+    # Validate
+    local backend_err
+    if ! backend_err=$(case "$backend" in
+      sftp) backend_sftp_validate backend_fields 2>&1 ;;
+      s3) backend_s3_validate backend_fields 2>&1 ;;
+    esac); then
+      _errors+=("$backend_err")
+    fi
+  fi
+
   if [[ ${#_errors[@]} -gt 0 ]]; then
     return 1
   fi

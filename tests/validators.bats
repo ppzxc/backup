@@ -201,4 +201,60 @@ setup() {
   [ "${resolved[profile_name]}" = "valid-name" ]
 }
 
+@test "resolve_and_validate_config validates sftp backend parameters" {
+  local -A opts=()
+  opts[targets]="/etc"
+  opts[password]="mypassword"
+  opts[backend]="sftp"
+  opts[host]=""
+  opts[port]="invalidport"
+  opts[user]="backup_user"
+
+  local -A resolved=()
+  local -a errors=()
+  local res=0
+  resolve_and_validate_config opts resolved errors || res=$?
+  [ "$res" -eq 1 ]
+  [ ${#errors[@]} -gt 0 ]
+}
+
+@test "resolve_and_validate_config validates s3 backend parameters" {
+  local -A opts=()
+  opts[targets]="/etc"
+  opts[password]="mypassword"
+  opts[backend]="s3"
+  opts[endpoint]=""
+  opts[bucket]="mybucket"
+  opts[access-key]=""
+  opts[secret-key]=""
+
+  local -A resolved=()
+  local -a errors=()
+  local res=0
+  resolve_and_validate_config opts resolved errors || res=$?
+  [ "$res" -eq 1 ]
+  [ ${#errors[@]} -gt 0 ]
+}
+
+@test "resolve_and_validate_config succeeds with valid sftp backend" {
+  local -A opts=()
+  opts[targets]="/etc"
+  opts[password]="mypassword"
+  opts[backend]="sftp"
+  opts[host]="192.168.1.100"
+  opts[port]="22"
+  opts[user]="backup_user"
+
+  local -A resolved=()
+  local -a errors=()
+  local res=0
+  resolve_and_validate_config opts resolved errors || res=$?
+  [ "$res" -eq 0 ]
+  [ ${#errors[@]} -eq 0 ]
+  [ "${resolved[host]}" = "192.168.1.100" ]
+  [ "${resolved[port]}" = "22" ]
+  [ "${resolved[user]}" = "backup_user" ]
+}
+
+
 
