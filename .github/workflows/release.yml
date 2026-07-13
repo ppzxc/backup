@@ -1,0 +1,28 @@
+name: Release on Tag Push
+
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="${{ github.ref_name }}"
+          echo "Creating release for tag $TAG_NAME"
+          
+          # Create the release and upload backup.sh as a standalone asset
+          gh release create "$TAG_NAME" backup.sh \
+            --title "$TAG_NAME" \
+            --notes "Automated release of version $TAG_NAME. You can download backup.sh directly from the assets below."
