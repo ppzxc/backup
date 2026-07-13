@@ -752,19 +752,75 @@ cmd_run() {
 cmd_status() {
   require_backup_env
 
-  printf '저장소 위치: %s\n' "${RESTIC_REPOSITORY:-알 수 없음}"
-  printf '백업 대상: %s\n' "${BACKUP_TARGETS:-알 수 없음}"
-
-  printf '최근 스냅샷:\n'
-  restic snapshots --json 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
-
   local profile_name; profile_name=$(resolve_profile_name)
-  local timer_state
-  timer_state=$(systemctl is-active "$(resticprofile_timer_unit_name "$profile_name")" 2>/dev/null) || true
-  printf '타이머 상태: %s\n' "${timer_state:-unknown}"
 
-  printf '%s 권한: %s\n' "$RESTIC_ETC_DIR" "$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '?')"
-  printf '%s 권한: %s\n' "$BACKUP_ENV_FILE" "$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '?')"
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    # Beautiful ANSI styled output for interactive TTY
+    local C_RESET="\033[0m"
+    local C_BOLD="\033[1m"
+    local C_DIM="\033[2m"
+    local C_RED="\033[31m"
+    local C_GREEN="\033[32m"
+    local C_YELLOW="\033[33m"
+    local C_BLUE="\033[34m"
+    local C_CYAN="\033[36m"
+    local C_GRAY="\033[90m"
+
+    local styled_repo="${C_BOLD}${RESTIC_REPOSITORY:-알 수 없음}${C_RESET}"
+    local styled_targets="${C_BOLD}${BACKUP_TARGETS:-알 수 없음}${C_RESET}"
+
+    local timer_state
+    timer_state=$(systemctl is-active "$(resticprofile_timer_unit_name "$profile_name")" 2>/dev/null) || true
+    local styled_timer
+    if [[ "$timer_state" == "active" ]]; then
+      styled_timer="${C_GREEN}active${C_RESET}"
+    elif [[ "$timer_state" == "inactive" ]]; then
+      styled_timer="${C_GRAY}inactive${C_RESET}"
+    else
+      styled_timer="${C_RED}${timer_state:-unknown}${C_RESET}"
+    fi
+
+    local etc_perm; etc_perm="$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '?')"
+    local env_perm; env_perm="$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '?')"
+
+    local styled_etc_perm
+    if [[ "$etc_perm" == "700" ]]; then
+      styled_etc_perm="${C_GREEN}${etc_perm}${C_RESET} ${C_GRAY}(안전)${C_RESET}"
+    else
+      styled_etc_perm="${C_RED}${etc_perm}${C_RESET} ${C_YELLOW}(경고: 700 권장)${C_RESET}"
+    fi
+
+    local styled_env_perm
+    if [[ "$env_perm" == "600" ]]; then
+      styled_env_perm="${C_GREEN}${env_perm}${C_RESET} ${C_GRAY}(안전)${C_RESET}"
+    else
+      styled_env_perm="${C_RED}${env_perm}${C_RESET} ${C_YELLOW}(경고: 600 권장)${C_RESET}"
+    fi
+
+    printf '%b%b⚙  백업 상태 (Backup Status)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+    printf '%b├──%b 저장소 위치:  %b\n' "$C_GRAY" "$C_RESET" "$styled_repo"
+    printf '%b├──%b 백업 대상:    %b\n' "$C_GRAY" "$C_RESET" "$styled_targets"
+    printf '%b├──%b 타이머 상태:  %b\n' "$C_GRAY" "$C_RESET" "$styled_timer"
+    printf '%b├──%b %s 권한: %b\n' "$C_GRAY" "$C_RESET" "$RESTIC_ETC_DIR" "$styled_etc_perm"
+    printf '%b└──%b %s 권한: %b\n' "$C_GRAY" "$C_RESET" "$BACKUP_ENV_FILE" "$styled_env_perm"
+    printf '\n'
+    printf '%b%b⚙  최근 스냅샷 (Recent Snapshots)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+    restic snapshots --json 2>/dev/null | sed 's/^/  /' || printf '  (조회 실패 또는 미초기화)\n'
+  else
+    # Simple plain-text fallback (matches original structure exactly for backward compatibility & tests)
+    printf '저장소 위치: %s\n' "${RESTIC_REPOSITORY:-알 수 없음}"
+    printf '백업 대상: %s\n' "${BACKUP_TARGETS:-알 수 없음}"
+
+    printf '최근 스냅샷:\n'
+    restic snapshots --json 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
+
+    local timer_state
+    timer_state=$(systemctl is-active "$(resticprofile_timer_unit_name "$profile_name")" 2>/dev/null) || true
+    printf '타이머 상태: %s\n' "${timer_state:-unknown}"
+
+    printf '%s 권한: %s\n' "$RESTIC_ETC_DIR" "$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '?')"
+    printf '%s 권한: %s\n' "$BACKUP_ENV_FILE" "$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '?')"
+  fi
 }
 
 # ISMS 감사 대응용 통합 리포트. cmd_status는 빠른 운영 확인용이고, 이쪽은
