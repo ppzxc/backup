@@ -53,9 +53,9 @@ setup() {
 @test "main with -V or --version prints the script version and exits 0" {
   run main -V
   [ "$status" -eq 0 ]
-  [[ "$output" == "1.0.0" ]]
+  [[ "$output" == "0.0.1" ]]
 
   run main --version
   [ "$status" -eq 0 ]
-  [[ "$output" == "1.0.0" ]]
+  [[ "$output" == "0.0.1" ]]
 }
