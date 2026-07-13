@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.6"
+BACKUP_SCRIPT_VERSION="0.0.7"
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -564,6 +564,7 @@ render_resticprofile_config() {
   printf '  retention:\n'
   printf '    after-backup: true\n'
   printf '    prune: true\n'
+  printf '    group-by: host\n'
   printf '    keep-daily: %s\n' "$keep_daily"
   printf '    keep-weekly: %s\n' "$keep_weekly"
   printf '    keep-monthly: %s\n' "$keep_monthly"
@@ -2125,6 +2126,85 @@ cmd_wizard() {
   log_info "wizard 완료"
 }
 
+cmd_config() {
+  require_root
+  if [[ ! -f "$BACKUP_ENV_FILE" ]]; then
+    die "설정 파일이 존재하지 않습니다: ${BACKUP_ENV_FILE} (먼저 wizard나 setting을 실행하세요)"
+  fi
+
+  # 1. 백엔드 판별
+  local backend="sftp"
+  if grep -q "AWS_ACCESS_KEY_ID=" "$BACKUP_ENV_FILE" || grep -q 'RESTIC_REPOSITORY="s3:' "$BACKUP_ENV_FILE"; then
+    backend="s3"
+  fi
+
+  # 2. 옵션 파싱
+  local -A opts=()
+  parse_opts_into opts "targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: on-calendar: dry-run" -- "$@"
+
+  opts[backend]="$backend"
+  local dry_run="${opts[dry-run]:-0}"
+
+  # 3. 설정 해석 및 검증
+  local -A resolved=()
+  local -a errors=()
+  if ! resolve_and_validate_config opts resolved errors; then
+    local e
+    for e in "${errors[@]}"; do
+      log_error "$e"
+    done
+    die "설정 변경 유효성 검증 실패"
+  fi
+
+  check_targets_size_warning "${resolved[targets]}"
+
+  # 스케줄 주기(on_calendar) 결정
+  local on_calendar="${opts[on-calendar]:-}"
+  if [[ -z "$on_calendar" ]]; then
+    if [[ -f "$RESTICPROFILE_CONFIG_FILE" ]]; then
+      local parsed_schedule
+      parsed_schedule=$(grep -E 'schedule:[[:space:]]*"[^"]+"' "$RESTICPROFILE_CONFIG_FILE" | head -n1 | sed -E 's/.*schedule:[[:space:]]*"([^"]+)".*/\1/')
+      if [[ -n "$parsed_schedule" ]]; then
+        on_calendar="$parsed_schedule"
+      fi
+    fi
+  fi
+  if [[ -z "$on_calendar" ]]; then
+    on_calendar="$DEFAULT_ON_CALENDAR"
+  fi
+
+  if (( dry_run )); then
+    log_info "[dry-run] backup.env(${backend}) 설정 변경 예정: ${BACKUP_ENV_FILE}"
+    log_info "[dry-run] 변경 예정 상세: targets=${resolved[targets]}, excludes=${resolved[excludes_csv]:-(없음)}, schedule=${on_calendar}"
+    return 0
+  fi
+
+  ensure_restic_dir
+
+  # 4. 백엔드 구성 빌드
+  local content="" notice=""
+  backend_"${backend}"_configure resolved content notice
+
+  # 5. 설정 파일 저장 (권한 600)
+  write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
+
+  # 6. profiles.yaml 및 Systemd 스케줄 동기화
+  (
+    # shellcheck source=/dev/null
+    source "$BACKUP_ENV_FILE"
+    write_resticprofile_assets "${resolved[profile_name]}" "$on_calendar"
+
+    local timer_name
+    timer_name=$(resticprofile_timer_unit_name "${resolved[profile_name]}")
+    if systemctl is-enabled "$timer_name" >/dev/null 2>&1; then
+      log_info "정기 백업 스케줄 타이머(${timer_name})가 활성화되어 있어 설정을 자동 리로드합니다."
+      resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "${resolved[profile_name]}" schedule
+    fi
+  )
+
+  log_info "config(${backend}) 완료"
+}
+
 cmd_setting() {
   require_root
   local -A opts=()
@@ -2188,6 +2268,7 @@ backup.sh - restic 기반 백업 설치/운영 스크립트
   backup.sh audit [--report] [--report-file <경로>]
   backup.sh uninstall [--purge]
   backup.sh migrate --backend <s3|sftp> [옵션...] [--new-password <새비밀번호>] [--skip-check] [--force]
+  backup.sh config [옵션...]
   backup.sh wizard
   backup.sh -h | --help
   backup.sh -V | --version
@@ -2266,6 +2347,11 @@ main() {
     migrate)
       shift
       cmd_migrate "$@"
+      return $?
+      ;;
+    config)
+      shift
+      cmd_config "$@"
       return $?
       ;;
     wizard)
