@@ -15,6 +15,7 @@ setup() {
   [[ "$output" == *"schedule"* ]]
   [[ "$output" == *"run"* ]]
   [[ "$output" == *"status"* ]]
+  [[ "$output" == *"audit"* ]]
   [[ "$output" == *"uninstall"* ]]
   [[ "$output" == *"wizard"* ]]
 }

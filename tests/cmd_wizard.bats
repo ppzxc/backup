@@ -19,7 +19,6 @@ setup() {
   mkdir -p "$(dirname "$RESTICPROFILE_INSTALL_PATH")"
   printf '#!/usr/bin/env bash\ntrue\n' > "$RESTICPROFILE_INSTALL_PATH"
   chmod +x "$RESTICPROFILE_INSTALL_PATH"
-  stub_command "dnf" 'true'
   stub_command "install" 'cp "${@: -2:1}" "${@: -1}"'
   stub_command "ssh-keygen" '
     keyfile=""
@@ -134,19 +133,19 @@ setup() {
   # restic/rclone 설치는 안 됐거나 이후 지워진 경우, $BACKUP_SCRIPT_INSTALL_PATH
   # 마커만 보고 넘어가면 cmd_install이 다시 실행되지 않는다.
   rm -f "${STUB_BIN}/restic" "${STUB_BIN}/rclone"
-  stub_command "dnf" 'echo "dnf $*" >> "'"${STUB_BIN}"'/dnf.calls"'
+  stub_command "curl" 'echo "curl $*" >> "'"${STUB_BIN}"'/curl.calls"; exit 1'
 
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
     printf "2\n1.2.3.4\n22\nbackup_restic\nrepo-pass\n\ny\n\n" | cmd_wizard
   '
   [[ "$output" == *"패키지를 설치합니다"* ]]
-  run cat "${STUB_BIN}/dnf.calls"
-  [[ "$output" == *"restic rclone"* ]]
+  run cat "${STUB_BIN}/curl.calls"
+  [[ "$output" == *"restic"* ]]
 }
 
 @test "wizard skips the install step when restic/rclone/resticprofile are all already present" {
-  stub_command "dnf" 'echo "dnf should not run" >> "'"${STUB_BIN}"'/dnf.calls"'
+  stub_command "curl" 'echo "curl should not run" >> "'"${STUB_BIN}"'/curl.calls"; exit 1'
 
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
@@ -154,5 +153,5 @@ setup() {
   '
   [ "$status" -eq 0 ]
   [[ "$output" != *"패키지를 설치합니다"* ]]
-  [ ! -f "${STUB_BIN}/dnf.calls" ]
+  [ ! -f "${STUB_BIN}/curl.calls" ]
 }
