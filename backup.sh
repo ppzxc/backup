@@ -9,6 +9,14 @@ RESTICPROFILE_INSTALL_PATH="${RESTICPROFILE_INSTALL_PATH:-/usr/local/bin/resticp
 RESTICPROFILE_VERSION="0.33.1"
 RESTICPROFILE_SHA256="${RESTICPROFILE_SHA256:-1d7027d15e3e2456e585a210f811d0f72ec40f6b3388f00425642ed579165d70}"
 RESTICPROFILE_URL="${RESTICPROFILE_URL:-https://github.com/creativeprojects/resticprofile/releases/download/v${RESTICPROFILE_VERSION}/resticprofile_no_self_update_${RESTICPROFILE_VERSION}_linux_amd64.tar.gz}"
+RESTIC_INSTALL_PATH="${RESTIC_INSTALL_PATH:-/usr/local/bin/restic}"
+RESTIC_VERSION="0.19.0"
+RESTIC_SHA256="${RESTIC_SHA256:-13176fe6d89d4357947a2cd107218ab2873a5f9d8e1ac2d4cd1c8e07e6839c21}"
+RESTIC_URL="${RESTIC_URL:-https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_linux_amd64.bz2}"
+RCLONE_INSTALL_PATH="${RCLONE_INSTALL_PATH:-/usr/local/bin/rclone}"
+RCLONE_VERSION="1.74.3"
+RCLONE_SHA256="${RCLONE_SHA256:-dbee7ccd7a5d617e4ed4cd4555c16669b511abfe8d31164f61be35ac9e999bd2}"
+RCLONE_URL="${RCLONE_URL:-https://github.com/rclone/rclone/releases/download/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-amd64.zip}"
 RESTICPROFILE_CONFIG_FILE="${RESTICPROFILE_CONFIG_FILE:-${RESTIC_ETC_DIR}/profiles.yaml}"
 RESTICPROFILE_UNIT_TEMPLATE="${RESTICPROFILE_UNIT_TEMPLATE:-${RESTIC_ETC_DIR}/resticprofile-service.tmpl}"
 RESTICPROFILE_TIMER_TEMPLATE="${RESTICPROFILE_TIMER_TEMPLATE:-${RESTIC_ETC_DIR}/resticprofile-timer.tmpl}"
@@ -332,15 +340,6 @@ render_resticprofile_config() {
   fi
 }
 
-dnf_install_packages() {
-  # epel-release must land in its own transaction first: dnf resolves a
-  # single `install` command's package set before epel-release's post-install
-  # repo registration takes effect, so restic/rclone (EPEL-only packages)
-  # are unresolvable if requested in the same command.
-  dnf install -y epel-release
-  dnf install -y restic rclone
-}
-
 install_resticprofile() {
   if [[ -x "$RESTICPROFILE_INSTALL_PATH" ]]; then
     return 0
@@ -360,6 +359,57 @@ install_resticprofile() {
   tar -xzf "${tmp_dir}/resticprofile.tar.gz" -C "$tmp_dir" resticprofile
   mkdir -p "$(dirname "$RESTICPROFILE_INSTALL_PATH")"
   install -m 0755 "${tmp_dir}/resticprofile" "$RESTICPROFILE_INSTALL_PATH"
+  rm -rf "$tmp_dir"
+}
+
+# restic 릴리스 에셋은 tar가 아니라 순수 bzip2 압축 바이너리 한 개뿐이라
+# python3의 bz2 모듈로 직접 풀어낸다(unzip/bunzip2는 최소 설치 이미지에
+# 없을 수 있지만, dnf 자체가 python3에 의존하므로 RHEL 계열이면 항상 있다).
+install_restic() {
+  if [[ -x "$RESTIC_INSTALL_PATH" ]]; then
+    return 0
+  fi
+
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  curl -fsSL -o "${tmp_dir}/restic.bz2" "$RESTIC_URL"
+
+  local actual_sha256
+  actual_sha256=$(sha256sum "${tmp_dir}/restic.bz2" | awk '{print $1}')
+  if [[ "$actual_sha256" != "$RESTIC_SHA256" ]]; then
+    rm -rf "$tmp_dir"
+    die "restic 체크섬 불일치 (예상: ${RESTIC_SHA256}, 실제: ${actual_sha256}) - 설치를 중단합니다"
+  fi
+
+  python3 -c "import bz2, shutil, sys; shutil.copyfileobj(bz2.open(sys.argv[1], 'rb'), open(sys.argv[2], 'wb'))" \
+    "${tmp_dir}/restic.bz2" "${tmp_dir}/restic"
+  mkdir -p "$(dirname "$RESTIC_INSTALL_PATH")"
+  install -m 0755 "${tmp_dir}/restic" "$RESTIC_INSTALL_PATH"
+  rm -rf "$tmp_dir"
+}
+
+# rclone 릴리스 에셋은 zip이라 python3의 zipfile 모듈로 풀어낸다. 압축 안의
+# 최상위 디렉토리명이 버전 문자열을 포함해 고정된 형태("rclone-vX.Y.Z-linux-amd64")로
+# 나오므로 별도 탐색 없이 바로 경로를 구성할 수 있다.
+install_rclone() {
+  if [[ -x "$RCLONE_INSTALL_PATH" ]]; then
+    return 0
+  fi
+
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  curl -fsSL -o "${tmp_dir}/rclone.zip" "$RCLONE_URL"
+
+  local actual_sha256
+  actual_sha256=$(sha256sum "${tmp_dir}/rclone.zip" | awk '{print $1}')
+  if [[ "$actual_sha256" != "$RCLONE_SHA256" ]]; then
+    rm -rf "$tmp_dir"
+    die "rclone 체크섬 불일치 (예상: ${RCLONE_SHA256}, 실제: ${actual_sha256}) - 설치를 중단합니다"
+  fi
+
+  python3 -m zipfile -e "${tmp_dir}/rclone.zip" "${tmp_dir}/extracted"
+  mkdir -p "$(dirname "$RCLONE_INSTALL_PATH")"
+  install -m 0755 "${tmp_dir}/extracted/rclone-v${RCLONE_VERSION}-linux-amd64/rclone" "$RCLONE_INSTALL_PATH"
   rm -rf "$tmp_dir"
 }
 
@@ -437,8 +487,8 @@ cmd_install() {
 
   if (( dry_run )); then
     cat <<EOF
-[dry-run] dnf install -y epel-release
-[dry-run] dnf install -y restic rclone
+[dry-run] restic ${RESTIC_VERSION} 다운로드+체크섬 검증 후 ${RESTIC_INSTALL_PATH}에 설치
+[dry-run] rclone ${RCLONE_VERSION} 다운로드+체크섬 검증 후 ${RCLONE_INSTALL_PATH}에 설치
 [dry-run] resticprofile ${RESTICPROFILE_VERSION} 다운로드+체크섬 검증 후 ${RESTICPROFILE_INSTALL_PATH}에 설치
 [dry-run] install -m 0755 "\$0" "${BACKUP_SCRIPT_INSTALL_PATH}"
 [dry-run] mkdir -p "${RESTIC_ETC_DIR}" && chmod 700 "${RESTIC_ETC_DIR}"
@@ -446,7 +496,8 @@ EOF
     return 0
   fi
 
-  dnf_install_packages
+  install_restic
+  install_rclone
   install_resticprofile
   self_install_copy "$0" "$force"
   ensure_restic_dir
@@ -714,6 +765,73 @@ cmd_status() {
 
   printf '%s 권한: %s\n' "$RESTIC_ETC_DIR" "$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '?')"
   printf '%s 권한: %s\n' "$BACKUP_ENV_FILE" "$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '?')"
+}
+
+# ISMS 감사 대응용 통합 리포트. cmd_status는 빠른 운영 확인용이고, 이쪽은
+# 백업 정책/보존 정책/스케줄/접근 통제를 한 화면에 모은 컴플라이언스 리포트다.
+# BACKUP_TARGETS/BACKUP_EXCLUDES/KEEP_DAILY/KEEP_WEEKLY/KEEP_MONTHLY/
+# RESTIC_REPOSITORY/RESTIC_PASSWORD는 backup.env를 source한 호출자(cmd_audit)의
+# 전역값을 그대로 읽는다(render_resticprofile_config와 동일한 관례).
+render_audit_report() {
+  local backend="$1" on_calendar="$2" timer_enabled="$3" timer_active="$4" next_run="$5" etc_perm="$6" env_perm="$7"
+
+  local encrypted_note="AES-256 (restic 저장소 자체 암호화)"
+  if [[ -z "${RESTIC_PASSWORD:-}" ]]; then
+    encrypted_note="${encrypted_note} - 경고: 비밀번호 미설정"
+  fi
+
+  printf '=== 백업 정책 ===\n'
+  printf '백엔드: %s\n' "$backend"
+  printf '저장소 위치: %s\n' "${RESTIC_REPOSITORY:-알 수 없음}"
+  printf '암호화: %s\n' "$encrypted_note"
+  printf '백업 대상: %s\n' "${BACKUP_TARGETS:-알 수 없음}"
+  printf '제외 패턴: %s\n' "${BACKUP_EXCLUDES:-(없음)}"
+  printf '\n'
+
+  printf '=== 보존 정책 ===\n'
+  printf '일간 보관: %s개\n' "${KEEP_DAILY:-?}"
+  printf '주간 보관: %s개\n' "${KEEP_WEEKLY:-?}"
+  printf '월간 보관: %s개\n' "${KEEP_MONTHLY:-?}"
+  printf '\n'
+
+  printf '=== 스케줄 ===\n'
+  printf '반복 주기(OnCalendar): %s\n' "$on_calendar"
+  printf '타이머 등록 상태: %s\n' "$timer_enabled"
+  printf '타이머 실행 상태: %s\n' "$timer_active"
+  printf '다음 실행 예정: %s\n' "$next_run"
+  printf '\n'
+
+  printf '=== 접근 통제 ===\n'
+  printf '%s 권한: %s\n' "$RESTIC_ETC_DIR" "$etc_perm"
+  printf '%s 권한: %s\n' "$BACKUP_ENV_FILE" "$env_perm"
+}
+
+cmd_audit() {
+  require_backup_env
+
+  local profile_name; profile_name=$(resolve_profile_name)
+  local timer_unit; timer_unit=$(resticprofile_timer_unit_name "$profile_name")
+
+  local timer_enabled; timer_enabled=$(systemctl is-enabled "$timer_unit" 2>/dev/null) || true
+  local timer_active; timer_active=$(systemctl is-active "$timer_unit" 2>/dev/null) || true
+  local next_run
+  next_run=$(systemctl list-timers "$timer_unit" --no-legend 2>/dev/null | awk '{print $1, $2, $3, $4}') || true
+
+  local on_calendar
+  on_calendar=$(systemctl cat "$timer_unit" 2>/dev/null | sed -n 's/^OnCalendar=//p' | head -1) || true
+
+  local backend="s3"
+  if [[ -n "${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" ]]; then
+    backend="sftp"
+  fi
+
+  render_audit_report "$backend" "${on_calendar:-알 수 없음}" "${timer_enabled:-unknown}" \
+    "${timer_active:-unknown}" "${next_run:-알 수 없음}" \
+    "$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '?')" \
+    "$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '?')"
+
+  printf '\n=== 백업 이력(restic snapshots) ===\n'
+  restic snapshots 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
 }
 
 cmd_uninstall() {
@@ -1026,13 +1144,14 @@ backup.sh - restic 기반 백업 설치/운영 스크립트
   backup.sh schedule disable
   backup.sh run
   backup.sh status
+  backup.sh audit
   backup.sh uninstall [--purge]
   backup.sh wizard
   backup.sh -h | --help
 
   모든 하위 명령에 -v/--verbose를 추가하면(위치 무관) SFTP 연결 점검 실패 시
-  ssh 자체의 진단 메시지를, init/run 실행 시 restic/resticprofile의 상세 로그를
-  함께 보여줍니다.
+  rclone 자체의 진단 메시지를, init/run 실행 시 restic/resticprofile의 상세
+  로그를 함께 보여줍니다.
 EOF
 }
 
@@ -1085,6 +1204,11 @@ main() {
     status)
       shift
       cmd_status "$@"
+      return $?
+      ;;
+    audit)
+      shift
+      cmd_audit "$@"
       return $?
       ;;
     uninstall)
