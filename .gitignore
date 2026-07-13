@@ -11,7 +11,11 @@
 /docs/*
 !/docs/adr/
 !/docs/adr/**
+!/docs/agents/
+!/docs/agents/**
 !/docs/reference/
 !/docs/reference/**
+!/docs/superpowers/
+!/docs/superpowers/**
 !/.github/
 !/.github/**
