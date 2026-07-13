@@ -1761,6 +1761,7 @@ cmd_migrate() {
   # 7. Copy Snapshots
   log_info "기존 저장소에서 대상 저장소로 백업 데이터(스냅샷) 복사 중..."
   run_restic_dest -r "$RESTIC_REPOSITORY" copy \
+    --password-file "$temp_src_pass" \
     --repo2 "$dest_repo_copy" \
     --password-file2 "$temp_dst_pass" || die "백업 데이터 복사(restic copy) 실패"
 
