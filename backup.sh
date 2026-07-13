@@ -621,6 +621,9 @@ cmd_init() {
   require_backup_env
 
   if [[ -n "${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" ]]; then
+    if ! command -v rclone >/dev/null 2>&1; then
+      die "[!] rclone이 설치되어 있지 않습니다. 'backup.sh install'을 다시 실행해 restic/rclone을 설치한 뒤 'backup.sh init'을 재시도하세요."
+    fi
     if ! rclone_check_connectivity "syno_backup" "${BACKUP_VERBOSE:-0}"; then
       die "$(render_sftp_connectivity_failure_message "$RCLONE_CONFIG_SYNO_BACKUP_HOST" \
         "$RCLONE_CONFIG_SYNO_BACKUP_PORT" "$RCLONE_CONFIG_SYNO_BACKUP_USER")"
@@ -795,7 +798,14 @@ prompt_backend_choice() {
 cmd_wizard() {
   require_root
 
-  if [[ ! -f "$BACKUP_SCRIPT_INSTALL_PATH" ]]; then
+  # $BACKUP_SCRIPT_INSTALL_PATH의 존재 여부는 "이 스크립트가 예전에 한 번
+  # 복사됐는지"만 알려줄 뿐, restic/rclone/resticprofile이 실제로 설치돼
+  # 있는지와는 무관하다 — 이전 실행이 설치 중간에 중단됐거나 패키지가 이후
+  # 지워진 경우, 이 마커만 보고 넘어가면 cmd_install이 다시 실행되지 않아
+  # 실제 의존성이 없는 채로 wizard가 계속 진행된다. 그래서 필요한 바이너리
+  # 자체의 존재를 직접 확인한다.
+  if ! command -v restic >/dev/null 2>&1 || ! command -v rclone >/dev/null 2>&1 \
+    || [[ ! -x "$RESTICPROFILE_INSTALL_PATH" ]]; then
     log_info "패키지를 설치합니다..."
     cmd_install
   fi

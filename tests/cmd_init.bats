@@ -230,3 +230,25 @@ EOF
   run cat "${STUB_BIN}/restic.calls"
   [[ "$output" == *"init"* ]]
 }
+
+@test "cmd_init reports a clear 'rclone missing' error instead of the generic connectivity checklist" {
+  cat > "$BACKUP_ENV_FILE" <<'EOF'
+export RESTIC_REPOSITORY="rclone:syno_backup:/backup/host"
+export RCLONE_CONFIG_SYNO_BACKUP_TYPE="sftp"
+export RCLONE_CONFIG_SYNO_BACKUP_HOST="1.2.3.4"
+export RCLONE_CONFIG_SYNO_BACKUP_USER="backup_restic"
+export RCLONE_CONFIG_SYNO_BACKUP_PORT="49381"
+export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="/etc/restic/backup_key"
+export RESTIC_PASSWORD="secret"
+EOF
+  # rclone을 전혀 스텁하지 않음 -> PATH에 rclone이 없는 상태(dnf install이
+  # 아직 안 됐거나 실패한 실제 상황)를 그대로 재현한다.
+  stub_command "restic" 'echo "restic $*" >> "'"${STUB_BIN}"'/restic.calls"; exit 0'
+
+  run cmd_init
+  [ "$status" -eq 1 ]
+  [ ! -f "${STUB_BIN}/restic.calls" ]
+  [[ "$output" == *"rclone"* ]]
+  [[ "$output" == *"install"* ]]
+  [[ "$output" != *"authorized_keys"* ]]
+}
