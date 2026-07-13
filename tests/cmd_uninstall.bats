@@ -20,13 +20,22 @@ ENV
   [[ "$output" == *"--name web01 unschedule"* ]]
 }
 
-@test "cmd_uninstall --purge also removes the restic config dir and restic's cache" {
+@test "cmd_uninstall --purge also removes the restic config dir, cache, installed binaries, and script" {
   mkdir -p "${TEST_ROOT}/root/.cache/restic"
   export HOME="${TEST_ROOT}/root"
+
+  # Create mock files at installation paths to verify they get deleted
+  mkdir -p "$(dirname "$RESTIC_INSTALL_PATH")" "$(dirname "$BACKUP_SCRIPT_INSTALL_PATH")"
+  touch "$RESTIC_INSTALL_PATH" "$RCLONE_INSTALL_PATH" "$RESTICPROFILE_INSTALL_PATH" "$BACKUP_SCRIPT_INSTALL_PATH"
+
   run cmd_uninstall --purge
   [ "$status" -eq 0 ]
   [ ! -d "$RESTIC_ETC_DIR" ]
   [ ! -d "${HOME}/.cache/restic" ]
+  [ ! -f "$RESTIC_INSTALL_PATH" ]
+  [ ! -f "$RCLONE_INSTALL_PATH" ]
+  [ ! -f "$RESTICPROFILE_INSTALL_PATH" ]
+  [ ! -f "$BACKUP_SCRIPT_INSTALL_PATH" ]
 }
 
 @test "cmd_uninstall survives resticprofile unschedule failing (nothing was ever scheduled)" {

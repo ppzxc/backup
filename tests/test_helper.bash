@@ -8,8 +8,11 @@ setup_backup_sh_env() {
   export BACKUP_ENV_FILE="${RESTIC_ETC_DIR}/backup.env"
   export BACKUP_SSH_KEY="${RESTIC_ETC_DIR}/backup_key"
   export BACKUP_SCRIPT_INSTALL_PATH="${TEST_ROOT}/usr/local/sbin/backup.sh"
+  export RESTIC_INSTALL_PATH="${TEST_ROOT}/usr/local/bin/restic"
+  export RCLONE_INSTALL_PATH="${TEST_ROOT}/usr/local/bin/rclone"
+  export RESTICPROFILE_INSTALL_PATH="${TEST_ROOT}/usr/local/bin/resticprofile"
   export SYSTEMD_UNIT_DIR="${TEST_ROOT}/etc/systemd/system"
-  mkdir -p "$SYSTEMD_UNIT_DIR" "$(dirname "$BACKUP_SCRIPT_INSTALL_PATH")"
+  mkdir -p "$SYSTEMD_UNIT_DIR" "$(dirname "$BACKUP_SCRIPT_INSTALL_PATH")" "$(dirname "$RESTIC_INSTALL_PATH")"
 
   export STUB_BIN="${BATS_TEST_TMPDIR}/stub-bin"
   mkdir -p "$STUB_BIN"

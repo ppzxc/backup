@@ -1130,7 +1130,11 @@ cmd_uninstall() {
   if (( purge )); then
     rm -rf "$RESTIC_ETC_DIR"
     rm -rf "${HOME:-/root}/.cache/restic"
-    log_info "uninstall --purge 완료 (${RESTIC_ETC_DIR} 삭제됨)"
+    rm -f "$RESTIC_INSTALL_PATH"
+    rm -f "$RCLONE_INSTALL_PATH"
+    rm -f "$RESTICPROFILE_INSTALL_PATH"
+    rm -f "$BACKUP_SCRIPT_INSTALL_PATH"
+    log_info "uninstall --purge 완료 (설정 파일 및 설치된 바이너리 삭제됨)"
   else
     log_info "uninstall 완료 (${RESTIC_ETC_DIR}는 유지됨)"
   fi
