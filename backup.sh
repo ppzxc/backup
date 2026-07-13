@@ -67,18 +67,18 @@ validate_backend() {
   local value="$1"
   case "$value" in
     s3|sftp) return 0 ;;
-    *) printf 'ERROR: backend must be s3 or sftp, got: %s\n' "$value"; return 1 ;;
+    *) printf 'backend must be s3 or sftp, got: %s\n' "$value"; return 1 ;;
   esac
 }
 
 validate_port() {
   local value="$1"
   if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-    printf 'ERROR: port must be numeric, got: %s\n' "$value"
+    printf 'port must be numeric, got: %s\n' "$value"
     return 1
   fi
   if (( 10#$value < 1 || 10#$value > 65535 )); then
-    printf 'ERROR: port must be between 1 and 65535, got: %s\n' "$value"
+    printf 'port must be between 1 and 65535, got: %s\n' "$value"
     return 1
   fi
   return 0
@@ -87,11 +87,11 @@ validate_port() {
 validate_positive_int() {
   local value="$1" label="$2"
   if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-    printf 'ERROR: %s must be numeric, got: %s\n' "$label" "$value"
+    printf '%s must be numeric, got: %s\n' "$label" "$value"
     return 1
   fi
   if (( 10#$value < 1 )); then
-    printf 'ERROR: %s must be positive, got: %s\n' "$label" "$value"
+    printf '%s must be positive, got: %s\n' "$label" "$value"
     return 1
   fi
   return 0
@@ -100,11 +100,11 @@ validate_positive_int() {
 validate_profile_name() {
   local value="$1"
   if [[ -z "$value" ]]; then
-    printf 'ERROR: profile-name must not be empty\n'
+    printf 'profile-name must not be empty\n'
     return 1
   fi
-  if ! [[ "$value" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-    printf 'ERROR: profile-name must contain only letters, digits, _ or -, got: %s\n' "$value"
+  if ! [[ "$value" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+    printf 'profile-name must contain only letters, digits, _, - or ., got: %s\n' "$value"
     return 1
   fi
   return 0

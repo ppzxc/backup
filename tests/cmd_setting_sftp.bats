@@ -84,3 +84,10 @@ setup() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"profile-name"* ]]
 }
+
+@test "cmd_setting defaults profile-name to the raw hostname even when it is a dotted FQDN" {
+  stub_command "hostname" 'echo "funa1.nanoit.kr"'
+  run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret
+  [ "$status" -eq 0 ]
+  grep -qF 'export BACKUP_PROFILE_NAME="funa1.nanoit.kr"' "$BACKUP_ENV_FILE"
+}
