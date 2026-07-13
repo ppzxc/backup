@@ -32,3 +32,18 @@
 * **버전 관리 (Versioning)**: 백업 스크립트 코드(`backup.sh`) 수정 시, 파일 최상단의 `BACKUP_SCRIPT_VERSION` 변수 버전을 반드시 범프(상승)해야 합니다. 버전이 변경되지 않으면 GitHub Actions의 병합 방지 워크플로우가 실패합니다.
 * **정적 분석 우회 주석**: `shellcheck` 우회가 불가피한 경우(예: nameref나 동적 소싱 경계 등), 주석 위에 구체적인 사유를 1줄로 기재한 후 `# shellcheck disable=<code>`를 선언합니다.
 * **Git 추적 규칙**: `.gitignore`는 허용 목록(Allow-list, `/*` 패턴으로 전체 차단 후 개별 `!` 예외 지정)으로 구현되어 있습니다. 새로운 최상위 파일이나 디렉터리를 추가할 때는 `.gitignore`에 이를 명시적으로 추가해야만 git 추적 대상에 들어옵니다.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs for this repo live as GitHub issues. PRs are not treated as an external request surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage labels map to the default vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Domain layout is configured as single-context. See `docs/agents/domain.md`.
+

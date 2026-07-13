@@ -51,11 +51,14 @@ setup() {
 }
 
 @test "main with -V or --version prints the script version and exits 0" {
+  local expected_version
+  expected_version=$(grep "BACKUP_SCRIPT_VERSION=" "${BATS_TEST_DIRNAME}/../backup.sh" | cut -d'"' -f2)
+
   run main -V
   [ "$status" -eq 0 ]
-  [[ "$output" == "0.0.2" ]]
+  [[ "$output" == "$expected_version" ]]
 
   run main --version
   [ "$status" -eq 0 ]
-  [[ "$output" == "0.0.2" ]]
+  [[ "$output" == "$expected_version" ]]
 }
