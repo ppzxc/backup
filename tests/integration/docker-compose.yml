@@ -12,7 +12,7 @@ services:
 
   sftp:
     image: atmoz/sftp:latest
-    command: backup_restic::1001
+    command: backup_restic::1001 backup_migrate::1001
     volumes:
       - sftp_data:/home/backup_restic/upload
 

@@ -109,19 +109,119 @@ docker compose exec -T app bash -c '
   bash backup.sh schedule disable || true
 '
 
-echo "=== SFTP to S3 마이그레이션 시나리오 ==="
-# Create migration destination bucket
-docker compose exec -T minio mc mb -p local/restic-test-migrate || true
+echo "=== 마이그레이션 시나리오: SFTP to S3 ==="
+# Reset env to original SFTP setting (source of migration)
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh setting --backend sftp \
+    --host sftp --port 22 --user backup_restic \
+    --password test-repo-password --force
+'
+# Create target bucket
+docker compose exec -T minio mc mb -p local/restic-test-sftp-to-s3 || true
 
+# Run migration
 docker compose exec -T app bash -c '
   set -euo pipefail
   bash backup.sh migrate --backend s3 \
-    --endpoint http://minio:9000 --bucket restic-test-migrate \
+    --endpoint http://minio:9000 --bucket restic-test-sftp-to-s3 \
     --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
-    --new-password migrated-repo-password --force
+    --new-password pass-sftp-to-s3 --force
+'
+# Verify migration
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  source /etc/restic/backup.env
+  restic snapshots --json | grep -q "\"hostname\""
 '
 
-echo "=== 마이그레이션된 S3 스냅샷 확인 ==="
+
+echo "=== 마이그레이션 시나리오: S3 to SFTP ==="
+# Reset env to original S3 setting (source of migration)
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh setting --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --password test-repo-password --force
+'
+# Setup key and directories for backup_migrate SFTP user
+docker compose exec -T app cat /etc/restic/backup_key.pub | \
+  docker compose exec -T sftp sh -c '
+    mkdir -p /home/backup_migrate/.ssh
+    cat > /home/backup_migrate/.ssh/authorized_keys
+    chown -R backup_migrate:users /home/backup_migrate/.ssh
+    chmod 700 /home/backup_migrate/.ssh
+    chmod 600 /home/backup_migrate/.ssh/authorized_keys
+    mkdir -p /home/backup_migrate/backup
+    chown backup_migrate:users /home/backup_migrate/backup
+  '
+
+# Clean up destination directory
+docker compose exec -T sftp sh -c 'rm -rf /home/backup_migrate/backup/*'
+
+# Run migration
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh migrate --backend sftp \
+    --host sftp --port 22 --user backup_migrate \
+    --new-password pass-s3-to-sftp --force
+'
+# Verify migration
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  source /etc/restic/backup.env
+  restic snapshots --json | grep -q "\"hostname\""
+'
+
+
+echo "=== 마이그레이션 시나리오: SFTP to SFTP ==="
+# Reset env to original SFTP setting (source of migration)
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh setting --backend sftp \
+    --host sftp --port 22 --user backup_restic \
+    --password test-repo-password --force
+'
+# Clean up destination directory
+docker compose exec -T sftp sh -c 'rm -rf /home/backup_migrate/backup/*'
+
+# Run migration to another user (backup_migrate)
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh migrate --backend sftp \
+    --host sftp --port 22 --user backup_migrate \
+    --new-password pass-sftp-to-sftp --force
+'
+# Verify migration
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  source /etc/restic/backup.env
+  restic snapshots --json | grep -q "\"hostname\""
+'
+
+
+echo "=== 마이그레이션 시나리오: S3 to S3 ==="
+# Reset env to original S3 setting (source of migration)
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh setting --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --password test-repo-password --force
+'
+# Create target bucket
+docker compose exec -T minio mc mb -p local/restic-test-s3-to-s3 || true
+
+# Run migration
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh migrate --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test-s3-to-s3 \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --new-password pass-s3-to-s3 --force
+'
+# Verify migration
 docker compose exec -T app bash -c '
   set -euo pipefail
   source /etc/restic/backup.env
