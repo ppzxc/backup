@@ -1589,18 +1589,93 @@ cmd_init() {
     fi
   fi
 
-  if restic_is_initialized; then
-    log_info "이미 초기화된 저장소입니다. 스킵합니다."
-    return 0
+  local primary_init_needed=0
+  if ! restic_is_initialized; then
+    primary_init_needed=1
   fi
 
-  local -a restic_init_args=(init)
-  if [[ "${BACKUP_VERBOSE:-0}" == "1" ]]; then
-    restic_init_args+=(--verbose)
+  if (( primary_init_needed )); then
+    local -a restic_init_args=(init)
+    if [[ "${BACKUP_VERBOSE:-0}" == "1" ]]; then
+      restic_init_args+=(--verbose)
+    fi
+    restic "${restic_init_args[@]}"
+    log_info "1차 저장소 restic init 완료"
+  else
+    log_info "1차 저장소는 이미 초기화되어 있습니다."
   fi
-  restic "${restic_init_args[@]}"
-  log_info "restic init 완료"
+
+  # 2차 초기화 동작
+  local sec_backend="${resolved[secondary_backend]:-}"
+  if [[ -n "$sec_backend" ]]; then
+    # 2차 SFTP 연결성 확인
+    if [[ "$sec_backend" == "sftp" ]]; then
+      if ! command -v rclone >/dev/null 2>&1; then
+        die "[!] rclone이 설치되어 있지 않습니다. 2차 SFTP 소산 백업을 수행할 수 없습니다."
+      fi
+
+      local -A sec_conn_resolved=()
+      sec_conn_resolved[host]="${resolved[secondary_host]}"
+      sec_conn_resolved[port]="${resolved[secondary_port]:-22}"
+      sec_conn_resolved[user]="${resolved[secondary_user]}"
+
+      (
+        export RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp"
+        export RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${sec_conn_resolved[host]}"
+        export RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${sec_conn_resolved[port]}"
+        export RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${sec_conn_resolved[user]}"
+        export RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${BACKUP_SSH_KEY}"
+        rclone_check_connectivity "syno_backup_sec" "${BACKUP_VERBOSE:-0}"
+      ) || die "2차 SFTP 소산지 연결 실패 (호스트: ${sec_conn_resolved[host]})"
+    fi
+
+    # 2차 미초기화 시 restic init 수행
+    local sec_init_needed=0
+    (
+      export RESTIC_REPOSITORY="${SECONDARY_RESTIC_REPOSITORY:-}"
+      export RESTIC_PASSWORD="${SECONDARY_RESTIC_PASSWORD:-$RESTIC_PASSWORD}"
+      if [[ "$sec_backend" == "s3" ]]; then
+        export AWS_ACCESS_KEY_ID="${SECONDARY_AWS_ACCESS_KEY_ID:-}"
+        export AWS_SECRET_ACCESS_KEY="${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
+      elif [[ "$sec_backend" == "sftp" ]]; then
+        export RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp"
+        export RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${resolved[secondary_host]:-}"
+        export RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${resolved[secondary_port]:-22}"
+        export RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${resolved[secondary_user]:-}"
+        export RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-$BACKUP_SSH_KEY}"
+      fi
+      restic snapshots >/dev/null 2>&1
+    ) || sec_init_needed=1
+
+    if (( sec_init_needed )); then
+      log_info "2차 원격 저장소를 초기화합니다..."
+      (
+        export RESTIC_REPOSITORY="${SECONDARY_RESTIC_REPOSITORY:-}"
+        export RESTIC_PASSWORD="${SECONDARY_RESTIC_PASSWORD:-$RESTIC_PASSWORD}"
+        if [[ "$sec_backend" == "s3" ]]; then
+          export AWS_ACCESS_KEY_ID="${SECONDARY_AWS_ACCESS_KEY_ID:-}"
+          export AWS_SECRET_ACCESS_KEY="${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
+        elif [[ "$sec_backend" == "sftp" ]]; then
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp"
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${resolved[secondary_host]:-}"
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${resolved[secondary_port]:-22}"
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${resolved[secondary_user]:-}"
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-$BACKUP_SSH_KEY}"
+        fi
+
+        local -a sec_init_args=(init)
+        if [[ "${BACKUP_VERBOSE:-0}" == "1" ]]; then
+          sec_init_args+=(--verbose)
+        fi
+        restic "${sec_init_args[@]}"
+      ) || die "2차 원격 저장소 초기화 실패"
+      log_info "2차 원격 저장소 restic init 완료"
+    else
+      log_info "2차 원격 저장소는 이미 초기화되어 있습니다."
+    fi
+  fi
 }
+
 
 systemd_enable_timer() {
   systemctl daemon-reload

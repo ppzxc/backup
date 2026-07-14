@@ -252,3 +252,36 @@ EOF
   [[ "$output" == *"install"* ]]
   [[ "$output" != *"authorized_keys"* ]]
 }
+
+@test "cmd_init initializes secondary remote repository if configured" {
+  cat > "$BACKUP_ENV_FILE" <<'EOF'
+export RESTIC_REPOSITORY="local:/tmp/fake-primary"
+export RESTIC_PASSWORD="secret"
+export SECONDARY_BACKEND="s3"
+export SECONDARY_RESTIC_REPOSITORY="s3:https://sec-s3.com/sec-bucket/host"
+export SECONDARY_RESTIC_PASSWORD="sec-secret"
+export SECONDARY_AWS_ACCESS_KEY_ID="SEC_AK"
+export SECONDARY_AWS_SECRET_ACCESS_KEY="SEC_SK"
+EOF
+
+  # 1차, 2차 모두 snapshots 체크 시 실패하여 미초기화 상태로 유도
+  stub_command "restic" '
+    echo "restic -r ${RESTIC_REPOSITORY} $*" >> "'"${STUB_BIN}"'/restic.calls"
+    case "$*" in
+      *snapshots*) exit 1 ;;
+      *init*) exit 0 ;;
+    esac
+  '
+
+
+  run cmd_init
+  [ "$status" -eq 0 ]
+  run cat "${STUB_BIN}/restic.calls"
+  # 1차 로컬 init 확인
+  [[ "$output" == *"restic -r local:/tmp/fake-primary snapshots"* ]]
+  [[ "$output" == *"restic -r local:/tmp/fake-primary init"* ]]
+  # 2차 S3 init 확인
+  [[ "$output" == *"restic -r s3:https://sec-s3.com/sec-bucket/host snapshots"* ]]
+  [[ "$output" == *"restic -r s3:https://sec-s3.com/sec-bucket/host init"* ]]
+}
+
