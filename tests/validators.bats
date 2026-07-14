@@ -356,6 +356,16 @@ setup() {
   [ "${resolved[notification_on]}" = "both" ]
 }
 
+@test "validate_secondary_backend fails when secondary-backend is invalid" {
+  run validate_secondary_backend "invalid_backend"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"secondary-backend must be s3 or sftp"* ]]
+}
 
-
+@test "validate_secondary_backend accepts s3 and sftp" {
+  run validate_secondary_backend "s3"
+  [ "$status" -eq 0 ]
+  run validate_secondary_backend "sftp"
+  [ "$status" -eq 0 ]
+}
 

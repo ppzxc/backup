@@ -104,6 +104,15 @@ validate_backend() {
   esac
 }
 
+validate_secondary_backend() {
+  local value="$1"
+  case "$value" in
+    s3|sftp) return 0 ;;
+    *) printf 'secondary-backend must be s3 or sftp, got: %s\n' "$value"; return 1 ;;
+  esac
+}
+
+
 validate_port() {
   local value="$1"
   if ! [[ "$value" =~ ^[0-9]+$ ]]; then
