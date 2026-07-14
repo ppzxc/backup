@@ -225,4 +225,19 @@ ENV
   [[ "$output" == *"restore_drill"* ]]
 }
 
+@test "cmd_audit resolves tester, ciso, and rto from backup.env" {
+  cat >> "$BACKUP_ENV_FILE" <<'ENV'
+export BACKUP_AUDIT_TESTER="김철수 (시스템 담당자)"
+export BACKUP_AUDIT_CISO="CISO 박영희"
+export BACKUP_AUDIT_RTO="45"
+ENV
+
+  run cmd_audit --restore-drill
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"테스터: 김철수 (시스템 담당자)"* ]]
+  [[ "$output" == *"승인자: CISO 박영희"* ]]
+  [[ "$output" == *"RTO 기준 45분"* ]]
+}
+
+
 

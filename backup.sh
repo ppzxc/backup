@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.13"
+BACKUP_SCRIPT_VERSION="0.0.14"
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -2006,9 +2006,9 @@ cmd_audit() {
   fi
 
   if (( restore_drill )); then
-    local tester="${opts[tester]:-홍길동 (인프라보안팀 선임연구원)}"
-    local ciso="${opts[ciso]:-이몽룡 (정보보안책임자 CISO)}"
-    local rto="${opts[rto]:-120}"
+    local tester; tester=$(resolve_value "${opts[tester]:-}" "${BACKUP_AUDIT_TESTER:-}" "" "홍길동 (인프라보안팀 선임연구원)")
+    local ciso; ciso=$(resolve_value "${opts[ciso]:-}" "${BACKUP_AUDIT_CISO:-}" "" "이몽룡 (정보보안책임자 CISO)")
+    local rto; rto=$(resolve_value "${opts[rto]:-}" "${BACKUP_AUDIT_RTO:-}" "" "120")
     local target_dir="${opts[target]:-/tmp/restore_test}"
     
     local os_name="Rocky Linux 9"
@@ -2119,7 +2119,7 @@ except:
   fi
 
   if (( daily )); then
-    local tester="${opts[tester]:-인프라보안팀 (시스템 자동 실행)}"
+    local tester; tester=$(resolve_value "${opts[tester]:-}" "${BACKUP_AUDIT_TESTER:-}" "" "인프라보안팀 (시스템 자동 실행)")
     local hostname_val; hostname_val=$(hostname 2>/dev/null || echo "unknown")
     local cur_time; cur_time=$(date "+%Y-%m-%d %H:%M:%S KST")
     
