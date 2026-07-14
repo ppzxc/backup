@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.14"
+BACKUP_SCRIPT_VERSION="0.0.15"
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -162,6 +162,7 @@ resolve_and_validate_config() {
   # Sourcing current configuration from file
   local file_targets="" file_keep_daily="" file_keep_weekly="" file_keep_monthly="" file_excludes="" file_profile_name="" file_password=""
   local file_notification_url="" file_notification_type="" file_notification_on="" file_notification_method="" file_notification_headers="" file_notification_body_success="" file_notification_body_failure=""
+  local file_audit_tester="" file_audit_ciso="" file_audit_rto=""
   if [[ -f "${BACKUP_ENV_FILE:-}" ]]; then
     # Sourcing in a subshell to isolate variables
     local env_data
@@ -182,6 +183,9 @@ resolve_and_validate_config() {
       printf 'notification_headers=%s\n' "$(echo -n "${BACKUP_NOTIFICATION_HEADERS:-}" | base64 | tr -d '\n')"
       printf 'notification_body_success=%s\n' "$(echo -n "${BACKUP_NOTIFICATION_BODY_SUCCESS:-}" | base64 | tr -d '\n')"
       printf 'notification_body_failure=%s\n' "$(echo -n "${BACKUP_NOTIFICATION_BODY_FAILURE:-}" | base64 | tr -d '\n')"
+      printf '%s\n' "audit_tester=${BACKUP_AUDIT_TESTER:-}"
+      printf '%s\n' "audit_ciso=${BACKUP_AUDIT_CISO:-}"
+      printf '%s\n' "audit_rto=${BACKUP_AUDIT_RTO:-}"
     )
     local line key val
     while IFS= read -r line; do
@@ -203,6 +207,9 @@ resolve_and_validate_config() {
         notification_headers) file_notification_headers="$(echo -n "$val" | base64 -d 2>/dev/null || echo -n "$val" | base64 --decode 2>/dev/null)" ;;
         notification_body_success) file_notification_body_success="$(echo -n "$val" | base64 -d 2>/dev/null || echo -n "$val" | base64 --decode 2>/dev/null)" ;;
         notification_body_failure) file_notification_body_failure="$(echo -n "$val" | base64 -d 2>/dev/null || echo -n "$val" | base64 --decode 2>/dev/null)" ;;
+        audit_tester) file_audit_tester="$val" ;;
+        audit_ciso) file_audit_ciso="$val" ;;
+        audit_rto) file_audit_rto="$val" ;;
       esac
     done <<< "$env_data"
   fi
@@ -266,6 +273,21 @@ resolve_and_validate_config() {
   _resolved[notification_body_success]=$(resolve_value "" "${BACKUP_NOTIFICATION_BODY_SUCCESS:-}" "$file_notification_body_success" "" || true)
   # shellcheck disable=SC2154
   _resolved[notification_body_failure]=$(resolve_value "" "${BACKUP_NOTIFICATION_BODY_FAILURE:-}" "$file_notification_body_failure" "" || true)
+
+  local cli_audit_tester="${_opts[audit-tester]:-}"
+  local env_audit_tester="${BACKUP_AUDIT_TESTER:-}"
+  # shellcheck disable=SC2154
+  _resolved[audit_tester]=$(resolve_value "$cli_audit_tester" "$env_audit_tester" "$file_audit_tester" "" || true)
+
+  local cli_audit_ciso="${_opts[audit-ciso]:-}"
+  local env_audit_ciso="${BACKUP_AUDIT_CISO:-}"
+  # shellcheck disable=SC2154
+  _resolved[audit_ciso]=$(resolve_value "$cli_audit_ciso" "$env_audit_ciso" "$file_audit_ciso" "" || true)
+
+  local cli_audit_rto="${_opts[audit-rto]:-}"
+  local env_audit_rto="${BACKUP_AUDIT_RTO:-}"
+  # shellcheck disable=SC2154
+  _resolved[audit_rto]=$(resolve_value "$cli_audit_rto" "$env_audit_rto" "$file_audit_rto" "" || true)
 
   # Global Validation
   if [[ -z "${_resolved[targets]:-}" ]]; then
@@ -611,6 +633,19 @@ export BACKUP_NOTIFICATION_METHOD='$(escape_single_quotes "${_res[notification_m
 export BACKUP_NOTIFICATION_HEADERS='$(escape_single_quotes "${_res[notification_headers]:-}")'
 export BACKUP_NOTIFICATION_BODY_SUCCESS='$(escape_single_quotes "${_res[notification_body_success]:-}")'
 export BACKUP_NOTIFICATION_BODY_FAILURE='$(escape_single_quotes "${_res[notification_body_failure]:-}")'
+EOF
+}
+
+render_audit_env_block() {
+  local -n _res="$1"
+  cat <<EOF
+
+# ==========================================
+# ISMS/ISMS-P 감사 보고서용 사용자 설정
+# ==========================================
+export BACKUP_AUDIT_TESTER='$(escape_single_quotes "${_res[audit_tester]:-}")'
+export BACKUP_AUDIT_CISO='$(escape_single_quotes "${_res[audit_ciso]:-}")'
+export BACKUP_AUDIT_RTO='$(escape_single_quotes "${_res[audit_rto]:-}")'
 EOF
 }
 
@@ -1175,6 +1210,7 @@ export BACKUP_PROFILE_NAME="${_resolved[profile_name]}"
 EOF
 )
   _out_env+="$(render_notification_env_block _resolved)"
+  _out_env+="$(render_audit_env_block _resolved)"
 
   # Render Notice
   _out_notice=$(cat <<EOF
@@ -1228,6 +1264,7 @@ export BACKUP_PROFILE_NAME="${_resolved[profile_name]}"
 EOF
 )
   _out_env+="$(render_notification_env_block _resolved)"
+  _out_env+="$(render_audit_env_block _resolved)"
 
   # Render Notice
   _out_notice=$(cat <<EOF
@@ -2885,6 +2922,49 @@ cmd_wizard() {
 
   setting_args+=(--targets "$final_targets")
 
+  # Ask about ISMS Audit Report settings
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    printf '\n%b%b⚙  보안 감사 보고서 설정 (ISMS Compliance Reports)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+    printf '%bISMS/ISMS-P 인증 규정 만족을 위해 일일 백업 검토 보고서 및 복구 모의훈련 보고서를 자동 생성하도록 설정할 수 있습니다.%b\n' "$C_DIM" "$C_RESET"
+    printf '보안 감사 보고서의 시스템 담당자 및 복구 시간(RTO) 설정을 구성하시겠습니까? [y/%bN%b]: %b' "$C_BOLD" "$C_RESET" "$C_RESET"
+  else
+    printf '\n--- 보안 감사 보고서 설정 ---\n'
+    printf 'ISMS/ISMS-P 인증 규정 만족을 위해 일일 백업 검토 보고서 및 복구 모의훈련 보고서를 자동 생성하도록 설정할 수 있습니다.\n'
+    printf '보안 감사 보고서의 시스템 담당자 및 복구 시간(RTO) 설정을 구성하시겠습니까? [y/N]: '
+  fi
+  local config_audit; read -r config_audit
+  
+  if [[ "$config_audit" =~ ^[Yy]$ ]]; then
+    local audit_tester
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '%b일일 검토 및 복구 테스트를 수행할 시스템 담당자(테스터)의 이름을 입력하세요 (기본값: 인프라보안팀): %b' "$C_CYAN" "$C_RESET"
+    else
+      printf '일일 검토 및 복구 테스트를 수행할 시스템 담당자(테스터)의 이름을 입력하세요 (기본값: 인프라보안팀): '
+    fi
+    read -r audit_tester
+    [[ -z "$audit_tester" ]] && audit_tester="인프라보안팀"
+    
+    local audit_ciso
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '%b보고서를 최종 승인할 정보보안책임자(CISO)의 이름을 입력하세요 (기본값: 정보보안책임자 CISO): %b' "$C_CYAN" "$C_RESET"
+    else
+      printf '보고서를 최종 승인할 정보보안책임자(CISO)의 이름을 입력하세요 (기본값: 정보보안책임자 CISO): '
+    fi
+    read -r audit_ciso
+    [[ -z "$audit_ciso" ]] && audit_ciso="정보보안책임자 CISO"
+    
+    local audit_rto
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '%b복구 목표 시간(RTO, 분 단위)을 입력하세요 (기본값: 120): %b' "$C_CYAN" "$C_RESET"
+    else
+      printf '복구 목표 시간(RTO, 분 단위)을 입력하세요 (기본값: 120): '
+    fi
+    read -r audit_rto
+    [[ -z "$audit_rto" ]] && audit_rto="120"
+    
+    setting_args+=(--audit-tester "$audit_tester" --audit-ciso "$audit_ciso" --audit-rto "$audit_rto")
+  fi
+
   if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
     printf '\n%b%b⚙  다음 설정으로 진행합니다 (Confirm Settings)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
     printf '%b├──%b 백엔드:    %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$backend" "$C_RESET"
@@ -3001,7 +3081,7 @@ cmd_config() {
 
   # 2. 옵션 파싱
   local -A opts=()
-  parse_opts_into opts "targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: on-calendar: notification-url: notification-type: notification-on: dry-run" -- "$@"
+  parse_opts_into opts "targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: on-calendar: notification-url: notification-type: notification-on: audit-tester: audit-ciso: audit-rto: dry-run" -- "$@"
 
   opts[backend]="$backend"
   local dry_run="${opts[dry-run]:-0}"
@@ -3073,7 +3153,7 @@ cmd_setting() {
   fi
   require_root
   local -A opts=()
-  parse_opts_into opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: notification-url: notification-type: notification-on: force dry-run" -- "$@"
+  parse_opts_into opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: notification-url: notification-type: notification-on: audit-tester: audit-ciso: audit-rto: force dry-run" -- "$@"
 
   local backend="${opts[backend]:-}"
   local force="${opts[force]:-0}"
