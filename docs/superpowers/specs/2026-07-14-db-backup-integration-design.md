@@ -122,13 +122,16 @@ default-db:
 #### `backup.sh audit` 연동 및 복원 드릴
 * **감사 보고서 연동**: 
   `audit_report.json` 및 `audit_report.txt` 결과 구조에 `db_backup_enabled`, `last_db_backup_time`, `db_snapshot_count` 메타데이터를 통합합니다.
-* **복원 드릴 (`--restore-drill`) 시나리오 확장**:
-  1. 기존 파일 복구 모의 훈련 수행 완료 후, DB 백업 최신 스냅샷에서 `db-dump.sql` 파일을 복원 디렉토리로 다운로드합니다.
+* **복원 드릴 (`--restore-drill`) 시나리오 확장 (안전한 파일 기반 검증)**:
+  > [!IMPORTANT]
+  > 복원 모의 훈련 시 실제 구동 중인 데이터베이스 엔진(MySQL, MariaDB, PostgreSQL 데몬)에 덤프 파일을 임포트하거나 데이터를 덮어쓰는 작업은 **절대 수행하지 않습니다.** 오직 임시 디렉토리 수준에서 파일 복구 상태만 검증합니다.
+  1. 기존 파일 복구 모의 훈련 수행 완료 후, DB 백업 최신 스냅샷에서 `db-dump.sql` 파일을 임시 격리 디렉토리(예: `/tmp/restic-restore-drill.XXXXXX/`)로 다운로드합니다.
   2. 다운로드된 파일의 크기(> 0 bytes)를 확인합니다.
-  3. `db-dump.sql` 파일의 첫 몇 줄을 확인하여 덤프 파일 포맷 헤더가 정상적인지 확인합니다.
+  3. `db-dump.sql` 파일의 첫 몇 줄을 읽어 데이터베이스 엔진별 덤프 파일 포맷 헤더가 정상적인지 무결성을 검사합니다.
      * MySQL/MariaDB: `MySQL dump` 또는 `MariaDB dump` 패턴
      * PostgreSQL: `PostgreSQL database dump` 패턴
-  4. 검증 성공/실패 여부를 최종 리포트(`restore_drill_report_YYYYMMDD.html`, `txt`, `json`)에 기록합니다.
+  4. 검증이 완료되면 다운로드된 `db-dump.sql` 파일을 포함한 임시 디렉토리를 **즉시 소거(Clean-up)**합니다.
+  5. 검증 성공/실패 여부를 최종 리포트(`restore_drill_report_YYYYMMDD.html`, `txt`, `json`)에 기록합니다.
 
 ---
 
