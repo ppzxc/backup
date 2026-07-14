@@ -42,6 +42,27 @@
 
 ---
 
+### 3.1.2. 마법사(wizard) 및 설정(setting/config) 편의성 설계
+초보 관리자와 파워 유저 모두가 DB 백업 구성을 쉽게 제어할 수 있도록 대화형 프롬프트와 점진적 업데이트 기능을 설계합니다.
+
+#### 1. 대화형 설정 마법사 (`backup.sh wizard`) 흐름 추가
+파일 백업 기본 구성 완료 후, 다음과 같은 질문 시퀀스를 순차적으로 수행합니다.
+1. **DB 백업 연동 여부**: `데이터베이스 백업을 함께 설정하시겠습니까? [y/N]`
+2. **DB 엔진 유형 선택**: `y`를 입력한 경우, 연동할 데이터베이스 엔진을 선택합니다.
+   * `1) mysql`, `2) mariadb`, `3) postgres`, `4) custom (사용자 정의 커맨드)`
+   * `4) custom`을 선택한 경우, 덤프에 사용할 실제 쉘 명령어(`--db-command`)를 입력받습니다.
+3. **가상 파일명 지정**: Restic 저장소에 저장될 백업 덤프 파일명(`--db-filename`, 기본값: `db-dump.sql`)을 입력받습니다.
+4. **DB 개별 스케줄링**: `DB 백업 전용 스케줄 주기(systemd calendar 포맷)를 지정하시겠습니까? (미지정 시 기본 백업 주기 상속) [y/N]`
+   * `y`를 입력한 경우 calendar 주기를 입력받으며, `N`을 입력하거나 생략하면 기본 백업 주기(예: 매일 새벽 2시)를 공유하여 기동하도록 설정합니다.
+
+#### 2. `setting` 및 `config` 부분 업데이트(Upsert) 기능
+* **`setting` (일괄 설정)**: 백업 초기 구축 시 디렉토리 대상과 DB 백업 대상을 한 번에 인자로 전달하여 통합 환경을 구축할 수 있습니다.
+* **`config` (부분 갱신)**: 이미 파일 백업이 활성화되어 운영 중인 서버에서, 파일 백업 설정을 보존하면서 DB 백업 옵션만 덧붙여 활성화/수정할 수 있도록 유연한 병합 메커니즘을 적용합니다.
+  * 예: `backup.sh config --db-type mariadb --db-schedule "*-*-* 04:00:00"`
+  * 이 명령은 기존 `/etc/restic/backup.env` 파일 내의 다른 설정(S3 자격증명 등)을 일절 파괴하지 않고, `BACKUP_DB_TYPE` 및 `BACKUP_DB_SCHEDULE` 값만 안전하게 삽입/치환한 뒤 `profiles.yaml`을 재생성하여 반영합니다.
+
+---
+
 ### 3.2. `profiles.yaml` 렌더링 설계 (Section 2)
 `backup.sh` 내부의 `render_resticprofile_config` 함수를 수정하여, DB 백업 설정이 존재할 경우 기존 파일 백업 프로필(`${profile_name}`, 예: `default`)을 상속(`inherit`)받는 DB 백업용 프로필(`${profile_name}-db`, 예: `default-db`)을 `profiles.yaml` 파일 하단에 렌더링합니다.
 
