@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.20"
+BACKUP_SCRIPT_VERSION="0.0.21"
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -1844,6 +1844,7 @@ render_daily_audit_report_html() {
         background-color: #ffffff;
         padding: 0;
         margin: 0;
+        font-size: 8.5pt;
       }
       .report-card {
         border: none;
@@ -1851,9 +1852,46 @@ render_daily_audit_report_html() {
         padding: 0;
         max-width: 100%;
       }
+      header {
+        margin-bottom: 15px;
+        padding-bottom: 10px;
+      }
+      h1 {
+        font-size: 15pt;
+        margin: 0 0 5px 0;
+      }
+      h2 {
+        font-size: 10.5pt;
+        margin: 12px 0 6px 0;
+      }
+      .meta-table {
+        margin-bottom: 15px;
+      }
+      .meta-table td {
+        padding: 4px 8px;
+        font-size: 8.5pt;
+      }
+      .data-table {
+        margin-bottom: 12px;
+      }
+      .data-table th, .data-table td {
+        padding: 4px 8px;
+        font-size: 8pt;
+      }
+      .signature-area {
+        margin-top: 20px;
+      }
+      .signature-box {
+        width: 100px;
+        font-size: 8pt;
+      }
+      .signature-box .sign {
+        height: 35px;
+        line-height: 35px;
+      }
       @page {
         size: A4;
-        margin: 15mm;
+        margin: 10mm;
       }
     }
   </style>
@@ -2106,6 +2144,7 @@ render_restore_drill_report_html() {
         background-color: #ffffff;
         padding: 0;
         margin: 0;
+        font-size: 8.5pt;
       }
       .report-card {
         border: none;
@@ -2113,9 +2152,46 @@ render_restore_drill_report_html() {
         padding: 0;
         max-width: 100%;
       }
+      header {
+        margin-bottom: 15px;
+        padding-bottom: 10px;
+      }
+      h1 {
+        font-size: 15pt;
+        margin: 0 0 5px 0;
+      }
+      h2 {
+        font-size: 10.5pt;
+        margin: 12px 0 6px 0;
+      }
+      .meta-table {
+        margin-bottom: 15px;
+      }
+      .meta-table td {
+        padding: 4px 8px;
+        font-size: 8.5pt;
+      }
+      .data-table {
+        margin-bottom: 12px;
+      }
+      .data-table th, .data-table td {
+        padding: 4px 8px;
+        font-size: 8pt;
+      }
+      .signature-area {
+        margin-top: 20px;
+      }
+      .signature-box {
+        width: 100px;
+        font-size: 8pt;
+      }
+      .signature-box .sign {
+        height: 35px;
+        line-height: 35px;
+      }
       @page {
         size: A4;
-        margin: 15mm;
+        margin: 10mm;
       }
     }
   </style>
@@ -2601,6 +2677,7 @@ render_audit_report_html() {
         background-color: #ffffff;
         padding: 0;
         margin: 0;
+        font-size: 8.5pt;
       }
       .report-card {
         border: none;
@@ -2608,9 +2685,46 @@ render_audit_report_html() {
         padding: 0;
         max-width: 100%;
       }
+      header {
+        margin-bottom: 15px;
+        padding-bottom: 10px;
+      }
+      h1 {
+        font-size: 15pt;
+        margin: 0 0 5px 0;
+      }
+      h2 {
+        font-size: 10.5pt;
+        margin: 12px 0 6px 0;
+      }
+      .meta-table {
+        margin-bottom: 15px;
+      }
+      .meta-table td {
+        padding: 4px 8px;
+        font-size: 8.5pt;
+      }
+      .data-table {
+        margin-bottom: 12px;
+      }
+      .data-table th, .data-table td {
+        padding: 4px 8px;
+        font-size: 8pt;
+      }
+      .signature-area {
+        margin-top: 20px;
+      }
+      .signature-box {
+        width: 100px;
+        font-size: 8pt;
+      }
+      .signature-box .sign {
+        height: 35px;
+        line-height: 35px;
+      }
       @page {
         size: A4;
-        margin: 15mm;
+        margin: 10mm;
       }
     }
   </style>
