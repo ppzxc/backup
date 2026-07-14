@@ -31,3 +31,27 @@ setup() {
   [[ "$output" == *"--endpoint https://s3.example.com"* ]]
   [[ "$output" == *"--bucket <BUCKET_NAME>"* ]]
 }
+
+@test "cmd_setting s3 secondary backup writes secondary variables in backup.env" {
+  run cmd_setting --backend sftp --host 192.168.1.100 --user backup_user --password 'repopass' --targets '/etc' \
+    --secondary-backend s3 --secondary-endpoint https://sec.s3.com --secondary-bucket sec-bucket \
+    --secondary-access-key SEC_AK --secondary-secret-key SEC_SK --secondary-password 'secpass' \
+    --secondary-keep-daily 30 --secondary-keep-weekly 12 --secondary-keep-monthly 12
+  
+  [ "$status" -eq 0 ]
+
+
+  [ -f "$BACKUP_ENV_FILE" ]
+  
+  # backup.env 내용 파싱 및 검증
+  source "$BACKUP_ENV_FILE"
+  [ "$SECONDARY_BACKEND" = "s3" ]
+  [ "$SECONDARY_RESTIC_REPOSITORY" = "s3:https://sec.s3.com/sec-bucket/$(hostname)" ]
+  [ "$SECONDARY_RESTIC_PASSWORD" = "secpass" ]
+  [ "$SECONDARY_AWS_ACCESS_KEY_ID" = "SEC_AK" ]
+  [ "$SECONDARY_AWS_SECRET_ACCESS_KEY" = "SEC_SK" ]
+  [ "$SECONDARY_KEEP_DAILY" = "30" ]
+  [ "$SECONDARY_KEEP_WEEKLY" = "12" ]
+  [ "$SECONDARY_KEEP_MONTHLY" = "12" ]
+}
+

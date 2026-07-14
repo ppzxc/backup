@@ -172,6 +172,9 @@ resolve_and_validate_config() {
   local file_targets="" file_keep_daily="" file_keep_weekly="" file_keep_monthly="" file_excludes="" file_profile_name="" file_password=""
   local file_notification_url="" file_notification_type="" file_notification_on="" file_notification_method="" file_notification_headers="" file_notification_body_success="" file_notification_body_failure=""
   local file_audit_tester="" file_audit_ciso="" file_audit_rto=""
+  local file_secondary_backend="" file_secondary_password="" file_secondary_keep_daily="" file_secondary_keep_weekly="" file_secondary_keep_monthly=""
+  local file_secondary_endpoint="" file_secondary_bucket="" file_secondary_access_key="" file_secondary_secret_key=""
+  local file_secondary_host="" file_secondary_port="" file_secondary_user="" file_secondary_repo=""
   if [[ -f "${BACKUP_ENV_FILE:-}" ]]; then
     # Sourcing in a subshell to isolate variables
     local env_data
@@ -195,6 +198,17 @@ resolve_and_validate_config() {
       printf '%s\n' "audit_tester=${BACKUP_AUDIT_TESTER:-}"
       printf '%s\n' "audit_ciso=${BACKUP_AUDIT_CISO:-}"
       printf '%s\n' "audit_rto=${BACKUP_AUDIT_RTO:-}"
+      printf '%s\n' "sec_backend=${SECONDARY_BACKEND:-}"
+      printf '%s\n' "sec_password=${SECONDARY_RESTIC_PASSWORD:-}"
+      printf '%s\n' "sec_keep_daily=${SECONDARY_KEEP_DAILY:-}"
+      printf '%s\n' "sec_keep_weekly=${SECONDARY_KEEP_WEEKLY:-}"
+      printf '%s\n' "sec_keep_monthly=${SECONDARY_KEEP_MONTHLY:-}"
+      printf '%s\n' "sec_repo=${SECONDARY_RESTIC_REPOSITORY:-}"
+      printf '%s\n' "sec_access_key=${SECONDARY_AWS_ACCESS_KEY_ID:-}"
+      printf '%s\n' "sec_secret_key=${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
+      printf '%s\n' "sec_host=${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-}"
+      printf '%s\n' "sec_port=${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-}"
+      printf '%s\n' "sec_user=${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-}"
     )
     local line key val
     while IFS= read -r line; do
@@ -219,9 +233,21 @@ resolve_and_validate_config() {
         audit_tester) file_audit_tester="$val" ;;
         audit_ciso) file_audit_ciso="$val" ;;
         audit_rto) file_audit_rto="$val" ;;
+        sec_backend) file_secondary_backend="$val" ;;
+        sec_password) file_secondary_password="$val" ;;
+        sec_keep_daily) file_secondary_keep_daily="$val" ;;
+        sec_keep_weekly) file_secondary_keep_weekly="$val" ;;
+        sec_keep_monthly) file_secondary_keep_monthly="$val" ;;
+        sec_repo) file_secondary_repo="$val" ;;
+        sec_access_key) file_secondary_access_key="$val" ;;
+        sec_secret_key) file_secondary_secret_key="$val" ;;
+        sec_host) file_secondary_host="$val" ;;
+        sec_port) file_secondary_port="$val" ;;
+        sec_user) file_secondary_user="$val" ;;
       esac
     done <<< "$env_data"
   fi
+
 
   # Read Environment Variables
   local env_targets="${BACKUP_TARGETS:-}"
@@ -233,6 +259,12 @@ resolve_and_validate_config() {
   local env_notification_url="${BACKUP_NOTIFICATION_URL:-}"
   local env_notification_type="${BACKUP_NOTIFICATION_TYPE:-}"
   local env_notification_on="${BACKUP_NOTIFICATION_ON:-}"
+
+  local env_secondary_backend="${SECONDARY_BACKEND:-}"
+  local env_secondary_password="${SECONDARY_RESTIC_PASSWORD:-}"
+  local env_secondary_keep_daily="${SECONDARY_KEEP_DAILY:-}"
+  local env_secondary_keep_weekly="${SECONDARY_KEEP_WEEKLY:-}"
+  local env_secondary_keep_monthly="${SECONDARY_KEEP_MONTHLY:-}"
 
   # Resolve values with priority: CLI option > Env variable > Config file > Default value
   local cli_targets="${_opts[targets]:-}"
@@ -252,6 +284,24 @@ resolve_and_validate_config() {
 
   local cli_profile_name="${_opts[profile-name]:-}"
   _resolved[profile_name]=$(resolve_value "$cli_profile_name" "$env_profile_name" "$file_profile_name" "$(hostname)")
+
+  local cli_sec_backend="${_opts[secondary-backend]:-}"
+  _resolved[secondary_backend]=$(resolve_value "$cli_sec_backend" "$env_secondary_backend" "$file_secondary_backend" "")
+
+  if [[ -n "${_resolved[secondary_backend]:-}" ]]; then
+    local cli_sec_password="${_opts[secondary-password]:-}"
+    _resolved[secondary_password]=$(resolve_value "$cli_sec_password" "$env_secondary_password" "$file_secondary_password" "${_resolved[password]:-}")
+
+    local cli_sec_keep_daily="${_opts[secondary-keep-daily]:-}"
+    _resolved[secondary_keep_daily]=$(resolve_value "$cli_sec_keep_daily" "$env_secondary_keep_daily" "$file_secondary_keep_daily" "${_resolved[keep_daily]:-}")
+
+    local cli_sec_keep_weekly="${_opts[secondary-keep-weekly]:-}"
+    _resolved[secondary_keep_weekly]=$(resolve_value "$cli_sec_keep_weekly" "$env_secondary_keep_weekly" "$file_secondary_keep_weekly" "${_resolved[keep_weekly]:-}")
+
+    local cli_sec_keep_monthly="${_opts[secondary-keep-monthly]:-}"
+    _resolved[secondary_keep_monthly]=$(resolve_value "$cli_sec_keep_monthly" "$env_secondary_keep_monthly" "$file_secondary_keep_monthly" "${_resolved[keep_monthly]:-}")
+  fi
+
 
   # Resolve Exclude
   local cli_exclude="${_opts[exclude]:-}"
@@ -320,6 +370,22 @@ resolve_and_validate_config() {
   if ! err=$(validate_profile_name "${_resolved[profile_name]}"); then
     _errors+=("$err")
   fi
+
+  if [[ -n "${_resolved[secondary_backend]:-}" ]]; then
+    if ! err=$(validate_secondary_backend "${_resolved[secondary_backend]}"); then
+      _errors+=("$err")
+    fi
+    if ! err=$(validate_positive_int "${_resolved[secondary_keep_daily]}" "secondary-keep-daily"); then
+      _errors+=("$err")
+    fi
+    if ! err=$(validate_positive_int "${_resolved[secondary_keep_weekly]}" "secondary-keep-weekly"); then
+      _errors+=("$err")
+    fi
+    if ! err=$(validate_positive_int "${_resolved[secondary_keep_monthly]}" "secondary-keep-monthly"); then
+      _errors+=("$err")
+    fi
+  fi
+
 
   # Strict Validation for Notifications
   local url="${_resolved[notification_url]}"
@@ -426,6 +492,84 @@ resolve_and_validate_config() {
       s3) backend_s3_validate backend_fields 2>&1 ;;
     esac); then
       _errors+=("$backend_err")
+    fi
+  fi
+
+  local sec_backend="${_resolved[secondary_backend]:-}"
+  if [[ -n "$sec_backend" ]]; then
+    local -A sec_backend_cli=()
+    local -A sec_backend_env=()
+    local -A sec_backend_file=()
+
+    sec_backend_cli[endpoint]="${_opts[secondary-endpoint]:-}"
+    sec_backend_cli[bucket]="${_opts[secondary-bucket]:-}"
+    sec_backend_cli[access_key]="${_opts[secondary-access-key]:-}"
+    sec_backend_cli[secret_key]="${_opts[secondary-secret-key]:-}"
+    sec_backend_cli[host]="${_opts[secondary-host]:-}"
+    sec_backend_cli[port]="${_opts[secondary-port]:-}"
+    sec_backend_cli[user]="${_opts[secondary-user]:-}"
+
+    if [[ "$sec_backend" == "s3" ]]; then
+      sec_backend_env[access_key]="${SECONDARY_AWS_ACCESS_KEY_ID:-${SECONDARY_BACKUP_ACCESS_KEY:-}}"
+      sec_backend_env[secret_key]="${SECONDARY_AWS_SECRET_ACCESS_KEY:-${SECONDARY_BACKUP_SECRET_KEY:-}}"
+      sec_backend_env[endpoint]="${SECONDARY_BACKUP_ENDPOINT:-}"
+      sec_backend_env[bucket]="${SECONDARY_BACKUP_BUCKET:-}"
+    elif [[ "$sec_backend" == "sftp" ]]; then
+      sec_backend_env[host]="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-${SECONDARY_BACKUP_HOST:-}}"
+      sec_backend_env[port]="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-${SECONDARY_BACKUP_PORT:-}}"
+      sec_backend_env[user]="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-${SECONDARY_BACKUP_USER:-}}"
+    fi
+
+    if [[ -f "${BACKUP_ENV_FILE:-}" ]]; then
+      local sec_backend_file_raw
+      sec_backend_file_raw=$(
+        # shellcheck source=/dev/null
+        source "$BACKUP_ENV_FILE" >/dev/null 2>&1 || true
+        printf '%s\n' "host=${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-}"
+        printf '%s\n' "port=${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-}"
+        printf '%s\n' "user=${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-}"
+        printf '%s\n' "access_key=${SECONDARY_AWS_ACCESS_KEY_ID:-}"
+        printf '%s\n' "secret_key=${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
+        printf '%s\n' "repo=${SECONDARY_RESTIC_REPOSITORY:-}"
+      )
+      local sfl sk sv
+      while IFS= read -r sfl; do
+        [[ -z "$sfl" ]] && continue
+        sk="${sfl%%=*}"
+        sv="${sfl#*=}"
+        sec_backend_file["$sk"]="$sv"
+      done <<< "$sec_backend_file_raw"
+    fi
+
+    local sec_repo="${SECONDARY_RESTIC_REPOSITORY:-${sec_backend_file[repo]:-}}"
+    local sec_parsed_endpoint="" sec_parsed_bucket=""
+    if [[ "$sec_repo" =~ ^s3:(.*)/([^/]+)/[^/]+$ ]]; then
+      sec_parsed_endpoint="${BASH_REMATCH[1]}"
+      sec_parsed_bucket="${BASH_REMATCH[2]}"
+    fi
+    if [[ -z "${sec_backend_env[endpoint]:-}" ]]; then sec_backend_env[endpoint]="$sec_parsed_endpoint"; fi
+    if [[ -z "${sec_backend_file[endpoint]:-}" ]]; then sec_backend_file[endpoint]="$sec_parsed_endpoint"; fi
+    if [[ -z "${sec_backend_env[bucket]:-}" ]]; then sec_backend_env[bucket]="$sec_parsed_bucket"; fi
+    if [[ -z "${sec_backend_file[bucket]:-}" ]]; then sec_backend_file[bucket]="$sec_parsed_bucket"; fi
+
+    local -A sec_fields=()
+    case "$sec_backend" in
+      sftp) backend_sftp_resolve sec_backend_cli sec_backend_env sec_backend_file sec_fields ;;
+      s3) backend_s3_resolve sec_backend_cli sec_backend_env sec_backend_file sec_fields ;;
+    esac
+
+    local skey
+    for skey in "${!sec_fields[@]}"; do
+      _resolved["secondary_$skey"]="${sec_fields[$skey]}"
+    done
+
+
+    local sec_backend_err
+    if ! sec_backend_err=$(case "$sec_backend" in
+      sftp) backend_sftp_validate sec_fields 2>&1 ;;
+      s3) backend_s3_validate sec_fields 2>&1 ;;
+    esac); then
+      _errors+=("Secondary backend error: $sec_backend_err")
     fi
   fi
 
@@ -1183,6 +1327,83 @@ render_s3_bucket_policy() {
 }
 EOF
 }
+
+
+render_secondary_config() {
+  local -n __res_sec_ref="$1"
+  local sec_backend="${__res_sec_ref[secondary_backend]:-}"
+  [[ -z "$sec_backend" ]] && return 0
+
+  local sec_password="${__res_sec_ref[secondary_password]:-${__res_sec_ref[password]:-}}"
+  local sec_keep_daily="${__res_sec_ref[secondary_keep_daily]:-${__res_sec_ref[keep_daily]:-}}"
+  local sec_keep_weekly="${__res_sec_ref[secondary_keep_weekly]:-${__res_sec_ref[keep_weekly]:-}}"
+  local sec_keep_monthly="${__res_sec_ref[secondary_keep_monthly]:-${__res_sec_ref[keep_monthly]:-}}"
+  local profile_name="${__res_sec_ref[profile_name]:-$(hostname)}"
+
+  printf '\n# 2차 원격 소산 백업 설정\n'
+  printf 'export SECONDARY_BACKEND="%s"\n' "$sec_backend"
+  printf 'export SECONDARY_RESTIC_PASSWORD="%s"\n' "$sec_password"
+  printf 'export SECONDARY_KEEP_DAILY="%s"\n' "$sec_keep_daily"
+  printf 'export SECONDARY_KEEP_WEEKLY="%s"\n' "$sec_keep_weekly"
+  printf 'export SECONDARY_KEEP_MONTHLY="%s"\n' "$sec_keep_monthly"
+
+  if [[ "$sec_backend" == "s3" ]]; then
+    local sec_endpoint="${__res_sec_ref[secondary_endpoint]}"
+    local sec_bucket="${__res_sec_ref[secondary_bucket]}"
+    local sec_access_key="${__res_sec_ref[secondary_access_key]}"
+    local sec_secret_key="${__res_sec_ref[secondary_secret_key]}"
+    
+    printf 'export SECONDARY_RESTIC_REPOSITORY="s3:%s/%s/%s"\n' "$sec_endpoint" "$sec_bucket" "$profile_name"
+    printf 'export SECONDARY_AWS_ACCESS_KEY_ID="%s"\n' "$sec_access_key"
+    printf 'export SECONDARY_AWS_SECRET_ACCESS_KEY="%s"\n' "$sec_secret_key"
+  elif [[ "$sec_backend" == "sftp" ]]; then
+    local sec_host="${__res_sec_ref[secondary_host]}"
+    local sec_port="${__res_sec_ref[secondary_port]:-22}"
+    local sec_user="${__res_sec_ref[secondary_user]}"
+    
+    printf 'export SECONDARY_RESTIC_REPOSITORY="rclone:syno_backup_sec:/backup/%s"\n' "$profile_name"
+    printf 'export SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp"\n'
+    printf 'export SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="%s"\n' "$sec_host"
+    printf 'export SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="%s"\n' "$sec_port"
+    printf 'export SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="%s"\n' "$sec_user"
+    printf 'export SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="%s"\n' "${BACKUP_SSH_KEY}"
+  fi
+}
+
+append_secondary_config_and_notice() {
+  local -n __res_sec_ref="$1"
+  local -n __content_sec_ref="$2"
+  local -n __notice_sec_ref="$3"
+
+  if [[ -n "${__res_sec_ref[secondary_backend]:-}" ]]; then
+    __content_sec_ref+="$(render_secondary_config "$1")"
+    local sec_notice=""
+    if [[ "${__res_sec_ref[secondary_backend]}" == "s3" ]]; then
+      sec_notice="[2차 소산지 S3] 최소권한 버킷 정책을 적용하세요:
+\$(render_s3_bucket_policy "${__res_sec_ref[secondary_bucket]}")"
+    elif [[ "${__res_sec_ref[secondary_backend]}" == "sftp" ]]; then
+      generate_ssh_key_if_missing
+      local pubkey; pubkey="$(cat "${BACKUP_SSH_KEY}.pub")"
+      sec_notice="[2차 소산지 SFTP] 아래 공개키를 2차 NAS에 등록하세요:
+----------------------------------------------------------
+${pubkey}
+----------------------------------------------------------"
+    fi
+    if [[ -n "$sec_notice" ]]; then
+      # If notice is evaluated later, evaluate helper render_s3_bucket_policy
+      if [[ "$sec_notice" == *"\$(render_s3_bucket_policy"* ]]; then
+        sec_notice=$(eval "cat <<EOF
+${sec_notice}
+EOF" 2>/dev/null || echo "$sec_notice")
+      fi
+      __notice_sec_ref="${__notice_sec_ref}
+
+${sec_notice}"
+    fi
+  fi
+}
+
+
 
 backend_s3_render_notice() {
   local -n fields_ref="$1"
@@ -4155,7 +4376,8 @@ cmd_config() {
 
   # 2. 옵션 파싱
   local -A opts=()
-  parse_opts_into opts "targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: on-calendar: notification-url: notification-type: notification-on: audit-tester: audit-ciso: audit-rto: dry-run" -- "$@"
+  parse_opts_into opts "targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: on-calendar: notification-url: notification-type: notification-on: audit-tester: audit-ciso: audit-rto: dry-run secondary-backend: secondary-password: secondary-endpoint: secondary-bucket: secondary-access-key: secondary-secret-key: secondary-host: secondary-user: secondary-port: secondary-keep-daily: secondary-keep-weekly: secondary-keep-monthly:" -- "$@"
+
 
   opts[backend]="$backend"
   local dry_run="${opts[dry-run]:-0}"
@@ -4199,6 +4421,8 @@ cmd_config() {
   # 4. 백엔드 구성 빌드
   local content="" notice=""
   backend_"${backend}"_configure resolved content notice
+  append_secondary_config_and_notice resolved content notice
+
 
   # 5. 설정 파일 저장 (권한 600)
   write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
@@ -4227,7 +4451,8 @@ cmd_setting() {
   fi
   require_root
   local -A opts=()
-  parse_opts_into opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: notification-url: notification-type: notification-on: audit-tester: audit-ciso: audit-rto: force dry-run" -- "$@"
+  parse_opts_into opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: notification-url: notification-type: notification-on: audit-tester: audit-ciso: audit-rto: force dry-run secondary-backend: secondary-password: secondary-endpoint: secondary-bucket: secondary-access-key: secondary-secret-key: secondary-host: secondary-user: secondary-port: secondary-keep-daily: secondary-keep-weekly: secondary-keep-monthly:" -- "$@"
+
 
   local backend="${opts[backend]:-}"
   local force="${opts[force]:-0}"
@@ -4264,6 +4489,8 @@ cmd_setting() {
 
   local content="" notice=""
   backend_"${backend}"_configure resolved content notice
+  append_secondary_config_and_notice resolved content notice
+
 
   write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
 
