@@ -964,7 +964,38 @@ render_resticprofile_config() {
     done
   fi
   render_resticprofile_notifications
+
+
+  # 2차 원격 소산 프로필 추가 출력
+  if [[ -n "${SECONDARY_BACKEND:-}" ]]; then
+    printf '\n%s-secondary:\n' "$profile_name"
+    printf '  repository: "%s"\n' "${SECONDARY_RESTIC_REPOSITORY:-}"
+    printf '  force-inactive-lock: true\n'
+    printf '  env:\n'
+    printf '    RESTIC_PASSWORD: "%s"\n' "${SECONDARY_RESTIC_PASSWORD:-${RESTIC_PASSWORD:-}}"
+    printf '    HOSTNAME: "%s"\n' "$(hostname)"
+
+    if [[ "$SECONDARY_BACKEND" == "s3" ]]; then
+      printf '    AWS_ACCESS_KEY_ID: "%s"\n' "${SECONDARY_AWS_ACCESS_KEY_ID:-}"
+      printf '    AWS_SECRET_ACCESS_KEY: "%s"\n' "${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
+    elif [[ "$SECONDARY_BACKEND" == "sftp" ]]; then
+      printf '    RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE: "sftp"\n'
+      printf '    RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST: "%s"\n' "${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-}}"
+      printf '    RCLONE_CONFIG_SYNO_BACKUP_SEC_USER: "%s"\n' "${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-}}"
+      printf '    RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT: "%s"\n' "${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-22}}"
+      printf '    RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE: "%s"\n' "${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE:-$BACKUP_SSH_KEY}}"
+    fi
+
+    # 2차 보존 정책
+    printf '  retention:\n'
+    printf '    prune: true\n'
+    printf '    group-by: host\n'
+    printf '    keep-daily: %s\n' "${SECONDARY_KEEP_DAILY:-$keep_daily}"
+    printf '    keep-weekly: %s\n' "${SECONDARY_KEEP_WEEKLY:-$keep_weekly}"
+    printf '    keep-monthly: %s\n' "${SECONDARY_KEEP_MONTHLY:-$keep_monthly}"
+  fi
 }
+
 
 install_binary() {
   local name="$1" version="$2" url="$3" expected_sha="$4" target_path="$5" format="$6" archive_path="${7:-}"

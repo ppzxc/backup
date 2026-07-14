@@ -172,3 +172,39 @@ setup() {
   [[ "$output" != *"🔔 SUCCESS\n"* ]]
 }
 
+@test "render_resticprofile_config renders secondary profile section when configured" {
+  export RESTIC_REPOSITORY="s3:https://s3.example.com/my-bucket/host1"
+  export RESTIC_PASSWORD="super-secret"
+  export BACKUP_TARGETS="/var/log"
+  export KEEP_DAILY="7"
+  export KEEP_WEEKLY="4"
+  export KEEP_MONTHLY="12"
+  
+  export SECONDARY_BACKEND="s3"
+  export SECONDARY_RESTIC_REPOSITORY="s3:https://sec-s3.com/sec-bucket/host1"
+  export SECONDARY_RESTIC_PASSWORD="sec-secret"
+  export SECONDARY_KEEP_DAILY="30"
+  export SECONDARY_KEEP_WEEKLY="12"
+  export SECONDARY_KEEP_MONTHLY="12"
+  export SECONDARY_AWS_ACCESS_KEY_ID="SEC_AK"
+  export SECONDARY_AWS_SECRET_ACCESS_KEY="SEC_SK"
+
+  run render_resticprofile_config "web01" "*-*-* 02:00:00"
+  [ "$status" -eq 0 ]
+  
+  # 1차 프로필 확인
+  [[ "$output" == *"web01:"* ]]
+  [[ "$output" == *"repository: \"s3:https://s3.example.com/my-bucket/host1\""* ]]
+  
+  # 2차 프로필 확인
+  [[ "$output" == *"web01-secondary:"* ]]
+  [[ "$output" == *"repository: \"s3:https://sec-s3.com/sec-bucket/host1\""* ]]
+  [[ "$output" == *"RESTIC_PASSWORD: \"sec-secret\""* ]]
+  [[ "$output" == *"AWS_ACCESS_KEY_ID: \"SEC_AK\""* ]]
+  [[ "$output" == *"AWS_SECRET_ACCESS_KEY: \"SEC_SK\""* ]]
+  [[ "$output" == *"keep-daily: 30"* ]]
+  [[ "$output" == *"keep-weekly: 12"* ]]
+  [[ "$output" == *"keep-monthly: 12"* ]]
+}
+
+
