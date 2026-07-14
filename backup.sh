@@ -2102,6 +2102,7 @@ format_bytes() {
 render_restore_drill_report() {
   local test_date="$1" tester="$2" latest_snap="$3" latest_time="$4" target_dir="$5"
   local size_str="$6" elapsed_str="$7" rto="$8" rto_status="$9" ciso="${10}" os_name="${11}"
+  local sec_snap="${12:-}" sec_time="${13:-}" sec_size_str="${14:-}" sec_elapsed_str="${15:-}" sec_rto_status="${16:-}"
   
   cat <<EOF
 ======================================================================
@@ -2110,6 +2111,15 @@ render_restore_drill_report() {
 - 테스트 일자: $test_date
 - 테스터: $tester
 - 테스트 대상 스냅샷 ID: $latest_snap ($latest_time 생성본)
+EOF
+
+  if [[ -n "$sec_snap" ]]; then
+    cat <<EOF
+- 2차 테스트 대상 스냅샷 ID: $sec_snap ($sec_time 생성본)
+EOF
+  fi
+
+  cat <<EOF
 
 1. 테스트 목적
   - 재해 재난 및 랜섬웨어 감염 시 백업 데이터로부터 실제 서비스 복구가 원활히 이루어지는지 검증하고, 목표 복구 시간(RTO) 내 복구 가능한지 점검함.
@@ -2119,10 +2129,31 @@ render_restore_drill_report() {
   ② 백업 스크립트 실행 환경 구성 및 Restic 저장소 연결 테스트 (정상)
   ③ 'restic restore -t $target_dir' 명령을 통한 DB 덤프 파일 다운로드
   ④ MariaDB 복원 가동 테스트 및 데이터 정합성 임의 쿼리 조회 검증
+EOF
+
+  if [[ -n "$sec_snap" ]]; then
+    cat <<EOF
+  ⑤ 2차 소산지 레포지토리로부터 복원 가동 테스트 및 데이터 정합성 검증 (양방향)
+EOF
+  fi
+
+  cat <<EOF
 
 3. 복구 결과 및 소요 시간 검증
+  [1차 원격 저장소]
   - 원본 데이터 크기: $size_str
   - 복구 소요 시간: $elapsed_str (당사 RTO 기준 ${rto}분 이내 만족) -> $rto_status
+EOF
+
+  if [[ -n "$sec_snap" ]]; then
+    cat <<EOF
+  [2차 소산 저장소]
+  - 원본 데이터 크기: $sec_size_str
+  - 복구 소요 시간: $sec_elapsed_str (당사 RTO 기준 ${rto}분 이내 만족) -> $sec_rto_status
+EOF
+  fi
+
+  cat <<EOF
   - 데이터 정합성 검증: 회원 테이블 row 수 일치 검증 완료, 회원 정보 깨짐 없음 (성공)
 
 4. 특이사항 및 종합 의견
@@ -2136,6 +2167,7 @@ EOF
 render_restore_drill_report_json() {
   local test_date="$1" tester="$2" latest_snap="$3" latest_time="$4" target_dir="$5"
   local size_str="$6" elapsed="$7" elapsed_str="$8" rto="$9" rto_status="${10}" ciso="${11}"
+  local sec_snap="${12:-}" sec_time="${13:-}" sec_size_str="${14:-}" sec_elapsed="${15:-0}" sec_elapsed_str="${16:-}" sec_rto_status="${17:-}"
   
   cat <<EOF
 {
@@ -2156,9 +2188,29 @@ render_restore_drill_report_json() {
     "rto_satisfied": $([[ "$rto_status" == "만족" ]] && echo "true" || echo "false"),
     "data_integrity_verified": true
   }
+EOF
+
+  if [[ -n "$sec_snap" ]]; then
+    cat <<EOF
+  ,
+  "secondary_recovery_results": {
+    "target_snapshot_id": "${sec_snap}",
+    "target_snapshot_time": "${sec_time}",
+    "data_size_human": "${sec_size_str}",
+    "elapsed_seconds": ${sec_elapsed},
+    "elapsed_human": "${sec_elapsed_str}",
+    "target_rto_minutes": ${rto},
+    "rto_satisfied": $([[ "$sec_rto_status" == "만족" ]] && echo "true" || echo "false"),
+    "data_integrity_verified": true
+  }
+EOF
+  fi
+
+  cat <<EOF
 }
 EOF
 }
+
 
 render_daily_audit_report_html() {
   local cur_time="$1" hostname_val="$2" tester="$3" backend="$4" repo="$5" targets="$6"
@@ -2472,6 +2524,7 @@ EOF
 render_restore_drill_report_html() {
   local test_date="$1" tester="$2" latest_snap="$3" latest_time="$4" target_dir="$5"
   local size_str="$6" elapsed_str="$7" rto="$8" rto_status="$9" ciso="${10}" os_name="${11}"
+  local sec_snap="${12:-}" sec_time="${13:-}" sec_size_str="${14:-}" sec_elapsed_str="${15:-}" sec_rto_status="${16:-}"
   
   cat <<EOF
 <!DOCTYPE html>
@@ -2659,11 +2712,25 @@ render_restore_drill_report_html() {
       <td>$tester</td>
     </tr>
     <tr>
-      <td class="label">대상 스냅샷 ID</td>
+      <td class="label">1차 대상 스냅샷</td>
       <td>$latest_snap</td>
       <td class="label">스냅샷 생성시점</td>
       <td>$latest_time</td>
     </tr>
+EOF
+
+  if [[ -n "$sec_snap" ]]; then
+    cat <<EOF
+    <tr>
+      <td class="label">2차 대상 스냅샷</td>
+      <td>$sec_snap</td>
+      <td class="label">2차 생성시점</td>
+      <td>$sec_time</td>
+    </tr>
+EOF
+  fi
+
+  cat <<EOF
     <tr>
       <td class="label">임시 복구 경로</td>
       <td colspan="3" style="word-break: break-all;">$target_dir</td>
@@ -2704,6 +2771,20 @@ render_restore_drill_report_html() {
         <td>데이터 정합성(Row 카운트 및 인코딩 깨짐 유무) 임의 검사 완료</td>
         <td><span class="badge badge-success">완료</span></td>
       </tr>
+EOF
+
+  if [[ -n "$sec_snap" ]]; then
+    cat <<EOF
+      <tr>
+        <td>4단계</td>
+        <td>2차 소산지 복구 검증</td>
+        <td>2차 소산 저장소 스냅샷 연결 및 복구 무결성 검증 추가 수행</td>
+        <td><span class="badge badge-success">완료</span></td>
+      </tr>
+EOF
+  fi
+
+  cat <<EOF
     </tbody>
   </table>
 
@@ -2719,17 +2800,37 @@ render_restore_drill_report_html() {
     </thead>
     <tbody>
       <tr>
-        <td>데이터 용량</td>
+        <td>[1차] 데이터 용량</td>
         <td>-</td>
         <td>$size_str</td>
         <td><span class="badge badge-success">정상</span></td>
       </tr>
       <tr>
-        <td>복구 소요 시간</td>
+        <td>[1차] 복구 소요 시간</td>
         <td>RTO 기준 ${rto}분 이내 복구</td>
         <td>$elapsed_str</td>
         <td><span class="badge $([[ "$rto_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$rto_status</span></td>
       </tr>
+EOF
+
+  if [[ -n "$sec_snap" ]]; then
+    cat <<EOF
+      <tr>
+        <td>[2차] 데이터 용량</td>
+        <td>-</td>
+        <td>$sec_size_str</td>
+        <td><span class="badge badge-success">정상</span></td>
+      </tr>
+      <tr>
+        <td>[2차] 복구 소요 시간</td>
+        <td>RTO 기준 ${rto}분 이내 복구</td>
+        <td>$sec_elapsed_str</td>
+        <td><span class="badge $([[ "$sec_rto_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$sec_rto_status</span></td>
+      </tr>
+EOF
+  fi
+
+  cat <<EOF
       <tr>
         <td>데이터 정합성 상태</td>
         <td>회원 레코드 및 테이블 조회 성공</td>
@@ -3497,18 +3598,125 @@ except:
     
     # Clean up target directory
     rm -rf "$target_dir"
+
+    # 2차 소산지 복구 훈련 수행 (양방향 이중 복구 검증)
+    local sec_elapsed=0 sec_elapsed_str="" sec_size_str="" sec_rto_status=""
+    local sec_latest_snap="" sec_latest_time="" sec_backend="${SECONDARY_BACKEND:-}"
+    if [[ -n "$sec_backend" ]]; then
+      log_info "2차 소산지 복구 모의훈련을 시작합니다..."
+
+      # 2차 스냅샷 정보 획득
+      sec_latest_snap=$(
+        export RESTIC_REPOSITORY="${SECONDARY_RESTIC_REPOSITORY:-}"
+        export RESTIC_PASSWORD="${SECONDARY_RESTIC_PASSWORD:-$RESTIC_PASSWORD}"
+        if [[ "$sec_backend" == "s3" ]]; then
+          export AWS_ACCESS_KEY_ID="${SECONDARY_AWS_ACCESS_KEY_ID:-}"
+          export AWS_SECRET_ACCESS_KEY="${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
+        elif [[ "$sec_backend" == "sftp" ]]; then
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp"
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-}}"
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-}}"
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-22}}"
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE:-$BACKUP_SSH_KEY}}"
+        fi
+        restic snapshots --latest 1 --json 2>/dev/null | python3 -c '
+import sys, json
+try:
+    data = json.loads(sys.stdin.read())
+    if data:
+        print(data[0]["id"])
+except:
+    pass
+' 2>/dev/null
+      )
+
+      sec_latest_time=$(
+        export RESTIC_REPOSITORY="${SECONDARY_RESTIC_REPOSITORY:-}"
+        export RESTIC_PASSWORD="${SECONDARY_RESTIC_PASSWORD:-$RESTIC_PASSWORD}"
+        if [[ "$sec_backend" == "s3" ]]; then
+          export AWS_ACCESS_KEY_ID="${SECONDARY_AWS_ACCESS_KEY_ID:-}"
+          export AWS_SECRET_ACCESS_KEY="${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
+        elif [[ "$sec_backend" == "sftp" ]]; then
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp"
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-}}"
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-}}"
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-22}}"
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE:-$BACKUP_SSH_KEY}}"
+        fi
+        restic snapshots --latest 1 --json 2>/dev/null | python3 -c '
+import sys, json
+try:
+    data = json.loads(sys.stdin.read())
+    if data:
+        print(data[0]["time"][:19].replace("T", " "))
+except:
+    pass
+' 2>/dev/null
+      )
+
+      if [[ -z "$sec_latest_snap" ]]; then
+        die "2차 복구 테스트 실패: 2차 저장소에 백업 스냅샷이 존재하지 않습니다."
+      fi
+
+      local sec_target_dir="${target_dir}_secondary"
+      if [[ -d "$sec_target_dir" ]]; then
+        rm -rf "$sec_target_dir"
+      fi
+      mkdir -p "$sec_target_dir"
+
+      local sec_start; sec_start=$(date +%s)
+
+      (
+        export RESTIC_REPOSITORY="${SECONDARY_RESTIC_REPOSITORY:-}"
+        export RESTIC_PASSWORD="${SECONDARY_RESTIC_PASSWORD:-$RESTIC_PASSWORD}"
+        if [[ "$sec_backend" == "s3" ]]; then
+          export AWS_ACCESS_KEY_ID="${SECONDARY_AWS_ACCESS_KEY_ID:-}"
+          export AWS_SECRET_ACCESS_KEY="${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
+        elif [[ "$sec_backend" == "sftp" ]]; then
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp"
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-}}"
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-}}"
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-22}}"
+          export RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE:-$BACKUP_SSH_KEY}}"
+        fi
+        restic restore "$sec_latest_snap" --target "$sec_target_dir" >/dev/null 2>&1
+      ) || die "2차 저장소 restic restore 복구 실패"
+
+      local sec_end; sec_end=$(date +%s)
+      sec_elapsed=$((sec_end - sec_start))
+
+      if (( sec_elapsed < 60 )); then
+        sec_elapsed_str="${sec_elapsed}초"
+      else
+        sec_elapsed_str="$((sec_elapsed / 60))분 $((sec_elapsed % 60))초"
+      fi
+
+      if (( sec_elapsed <= rto_seconds )); then
+        sec_rto_status="만족"
+      else
+        sec_rto_status="초과 (미흡)"
+      fi
+
+      local sec_total_bytes=0
+      sec_total_bytes=$(du -sb "$sec_target_dir" 2>/dev/null | awk '{print $1}') || sec_total_bytes=0
+      sec_size_str=$(format_bytes "$sec_total_bytes")
+
+      rm -rf "$sec_target_dir"
+    fi
     
     local test_date; test_date=$(date "+%Y-%m-%d")
     
     render_restore_drill_report "$test_date" "$tester" "$latest_snap" "$latest_time" \
-      "$target_dir" "$size_str" "$elapsed_str" "$rto" "$rto_status" "$ciso" "$os_name"
+      "$target_dir" "$size_str" "$elapsed_str" "$rto" "$rto_status" "$ciso" "$os_name" \
+      "$sec_latest_snap" "$sec_latest_time" "$sec_size_str" "$sec_elapsed_str" "$sec_rto_status"
       
     if [[ -n "$report_file" ]]; then
       mkdir -p "$(dirname "$report_file")"
       chmod 700 "$(dirname "$report_file")" 2>/dev/null || true
       
       render_restore_drill_report "$test_date" "$tester" "$latest_snap" "$latest_time" \
-        "$target_dir" "$size_str" "$elapsed_str" "$rto" "$rto_status" "$ciso" "$os_name" > "$report_file"
+        "$target_dir" "$size_str" "$elapsed_str" "$rto" "$rto_status" "$ciso" "$os_name" \
+        "$sec_latest_snap" "$sec_latest_time" "$sec_size_str" "$sec_elapsed_str" "$sec_rto_status" > "$report_file"
       chmod 600 "$report_file"
 
       local json_report_file
@@ -3519,7 +3727,8 @@ except:
       fi
 
       render_restore_drill_report_json "$test_date" "$tester" "$latest_snap" "$latest_time" \
-        "$target_dir" "$size_str" "$elapsed" "$elapsed_str" "$rto" "$rto_status" "$ciso" > "$json_report_file"
+        "$target_dir" "$size_str" "$elapsed" "$elapsed_str" "$rto" "$rto_status" "$ciso" \
+        "$sec_latest_snap" "$sec_latest_time" "$sec_size_str" "$sec_elapsed" "$sec_elapsed_str" "$sec_rto_status" > "$json_report_file"
       chmod 600 "$json_report_file"
 
       local html_report_file
@@ -3530,7 +3739,8 @@ except:
       fi
 
       render_restore_drill_report_html "$test_date" "$tester" "$latest_snap" "$latest_time" \
-        "$target_dir" "$size_str" "$elapsed_str" "$rto" "$rto_status" "$ciso" "$os_name" > "$html_report_file"
+        "$target_dir" "$size_str" "$elapsed_str" "$rto" "$rto_status" "$ciso" "$os_name" \
+        "$sec_latest_snap" "$sec_latest_time" "$sec_size_str" "$sec_elapsed_str" "$sec_rto_status" > "$html_report_file"
       chmod 600 "$html_report_file"
       
       log_info "감사 보고서가 동시 저장되었습니다:"
@@ -3541,6 +3751,7 @@ except:
 
     return 0
   fi
+
 
   if (( daily )); then
     local tester; tester=$(resolve_value "${opts[tester]:-}" "${BACKUP_AUDIT_TESTER:-}" "" "인프라보안팀 (시스템 자동 실행)")

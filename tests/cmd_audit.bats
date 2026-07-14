@@ -271,5 +271,38 @@ ENV
   [[ "$output" == *"RTO 기준 45분"* ]]
 }
 
+@test "cmd_audit --restore-drill performs dual restore drill for primary and secondary if configured" {
+  cat >> "$BACKUP_ENV_FILE" <<'ENV'
+export SECONDARY_BACKEND="s3"
+export SECONDARY_RESTIC_REPOSITORY="s3:https://sec-s3.com/sec-bucket/host"
+export SECONDARY_RESTIC_PASSWORD="sec-secret"
+export SECONDARY_AWS_ACCESS_KEY_ID="SEC_AK"
+export SECONDARY_AWS_SECRET_ACCESS_KEY="SEC_SK"
+ENV
+
+  stub_command "restic" '
+    echo "restic -r ${RESTIC_REPOSITORY} $*" >> "'"${STUB_BIN}"'/restic.calls"
+    case "$1" in
+      snapshots)
+        echo "[{\"id\":\"abc123456789\",\"short_id\":\"abc12345\",\"time\":\"2026-07-15T02:00:00Z\",\"hostname\":\"host\",\"paths\":[\"/var/log\"]}]"
+        exit 0
+        ;;
+      stats|check|restore)
+        exit 0
+        ;;
+    esac
+  '
+
+  run cmd_audit --restore-drill
+  [ "$status" -eq 0 ]
+  
+  run cat "${STUB_BIN}/restic.calls"
+  # 1차 복구 훈련 기동 검증
+  [[ "$output" == *"restic -r rclone:syno_backup:/backup/host restore"* ]]
+  # 2차 복구 훈련 기동 검증
+  [[ "$output" == *"restic -r s3:https://sec-s3.com/sec-bucket/host restore"* ]]
+}
+
+
 
 
