@@ -135,9 +135,36 @@ default-db:
 
 ---
 
+### 3.5. 도움말 명세 및 Cobra 스타일 CLI 인터페이스 (Section 5)
+`backup.sh` 내에 정의된 도움말 함수군(`help_setting` 및 `help_config`)을 확장하여, 새로 도입된 DB 백업 관련 플래그를 정렬된 Cobra 스타일 포맷에 맞추어 표기합니다.
+
+#### 도움말 추가 대상 플래그 예시 (`help_setting` 및 `help_config` 하단)
+```text
+  데이터베이스 백업 옵션 (Database Backup Flags):
+      --db-type <mysql|mariadb|postgres|custom>  통합할 DB 엔진 유형 (지정 시 DB 백업 활성화)
+      --db-command <명령어>          DB 백업에 사용할 덤프 커맨드 (생략 시 기본 덤프 명령어 자동 주입)
+      --db-filename <파일명>         Restic 내에 저장될 가상 덤프 파일명 (기본값: db-dump.sql)
+      --db-schedule <스케줄>         DB 백업 전용 스케줄 주기 (기본값: 기본 파일 백업 스케줄 계승)
+      --db-keep-daily <N>            DB 스냅샷 일별 보관 개수
+      --db-keep-weekly <N>           DB 스냅샷 주별 보관 개수
+      --db-keep-monthly <N>          DB 스냅샷 월별 보관 개수
+```
+
+---
+
 ## 4. 테스트 전략 (Testing Strategy)
-1. **단위 테스트 (`bats tests/`)**:
-   - `resolve_value` 및 `validate` 헬퍼 함수가 DB 백업 관련 플래그를 정상적으로 처리하는지 단위 테스트를 추가합니다.
-   - `render_resticprofile_config` 함수가 DB 백업 정보가 주어졌을 때 상속 구조의 YAML을 의도한 대로 생성하는지 검증합니다.
-2. **통합 테스트 (`tests/integration/run.sh`)**:
-   - Docker Compose를 통해 구동되는 데이터베이스 컨테이너에 대해 수동 및 systemd 스케줄러 기반의 DB 백업 및 복원 드릴 파이프라인이 정상 동작하는지 테스트 시나리오를 추가하여 통합 검증합니다.
+
+### 4.1. 단위 테스트 (Unit Tests)
+`bats tests/` 기반의 유닛 테스트 세트에 아래 테스트 커버리지를 반드시 추가하여 통과시킵니다.
+1. **DB 설정 해석 테스트**: `setting` 커맨드 호출 시 `--db-type` 및 다양한 DB 플래그가 주어졌을 때 `/etc/restic/backup.env`에 환경변수가 규칙대로 올바르게 작성되는지 검증
+2. **기본 커맨드 주입 테스트**: `--db-type`만 주어졌을 때 `mysql`, `mariadb`, `postgres` 각각에 해당하는 표준 안전 덤프 명령어(`BACKUP_DB_COMMAND`)가 자동으로 완성 및 세팅되는지 검증
+3. **YAML 렌더링 정합성 테스트**: DB 백업이 활성화되었을 때 `profiles.yaml` 내에 상속 구조(`inherit: default`)를 가지는 `${profile_name}-db` 섹션이 사양에 맞게 올바르게 출력되는지 검증
+4. **스케줄러 Mocking 동작 검증**: `scheduler_mock_register`/`unregister`/`status` 함수가 DB 스케줄 여부에 따라 mock 상태 파일에 덤프 스케줄 유무를 오차 없이 쓰고 조회하는지 검증
+
+### 4.2. 도커 통합 테스트 (Docker Integration Tests)
+`tests/integration/` 디렉토리 하위의 Docker Compose 환경 및 통합 테스트 자동화 스크립트(`run.sh`)에 아래 e2e 시나리오를 추가합니다.
+1. **데이터베이스 컨테이너 가동**: 기존 MinIO, SFTP 컨테이너 외에 테스트용 MariaDB(또는 MySQL) 및 PostgreSQL 컨테이너를 Docker Compose 스택으로 함께 띄웁니다.
+2. **백업 실행 검증**: `backup.sh run` 및 `backup.sh run --profile <profile>-db`를 수동 호출하여, 실시간 DB 스트림이 restic 저장소로 무사히 백업(Dedup 처리 포함)되는지 이력을 대조합니다.
+3. **스케줄러 기동 검증**: systemd 타이머와 유사하게 등록된 스케줄에 의해 DB 백업이 작동하는지 이관 및 가동 여부를 검사합니다.
+4. **복원 모의 훈련(Restore Drill) 검증**: `backup.sh audit --restore-drill`을 구동하여 실제 DB 컨테이너에는 영향을 주지 않으면서 다운로드된 `db-dump.sql` 파일의 무결성을 완벽하게 확인하고, 임시 파일이 디스크에서 누수 없이 지워지는지 통합 점검합니다.
+
