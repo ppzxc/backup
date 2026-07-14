@@ -64,3 +64,27 @@ ENV
   run cat "${STUB_BIN}/resticprofile.calls"
   [[ "$output" == *"--config ${RESTICPROFILE_CONFIG_FILE} --name web01 backup -v"* ]]
 }
+
+@test "cmd_run triggers secondary copy command using resticprofile" {
+  cat >> "$BACKUP_ENV_FILE" <<'ENV'
+export SECONDARY_BACKEND="s3"
+export SECONDARY_RESTIC_REPOSITORY="s3:https://sec-s3.com/sec-bucket/host"
+export SECONDARY_RESTIC_PASSWORD="sec-secret"
+export SECONDARY_AWS_ACCESS_KEY_ID="SEC_AK"
+export SECONDARY_AWS_SECRET_ACCESS_KEY="SEC_SK"
+ENV
+
+  stub_command "resticprofile" '
+    echo "resticprofile $*" >> "'"${STUB_BIN}"'/resticprofile.calls"
+    exit 0
+  '
+  
+  run cmd_run
+  [ "$status" -eq 0 ]
+  run cat "${STUB_BIN}/resticprofile.calls"
+  # 1차 백업 호출 검증
+  [[ "$output" == *"--name web01 backup"* ]]
+  # 2차 copy 호출 검증
+  [[ "$output" == *"--name web01 copy --to web01-secondary"* ]]
+}
+

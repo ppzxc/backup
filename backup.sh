@@ -802,8 +802,77 @@ export BACKUP_AUDIT_RTO='$(escape_single_quotes "${_res[audit_rto]:-}")'
 EOF
 }
 
-render_resticprofile_notifications() {
+
+send_unified_notification() {
+  local status="$1"
+  local err_msg="${2:-}"
   local notify_url="${BACKUP_NOTIFICATION_URL:-}"
+  local notify_type="${BACKUP_NOTIFICATION_TYPE:-}"
+  local notify_on="${BACKUP_NOTIFICATION_ON:-both}"
+
+  [[ -z "$notify_url" ]] && return 0
+
+  if [[ "$notify_on" == "success" && "$status" != "success" ]]; then
+    return 0
+  fi
+  if [[ "$notify_on" == "failure" && "$status" != "failure" ]]; then
+    return 0
+  fi
+
+  local hostname_val; hostname_val=$(hostname)
+  local profile_name_val="${BACKUP_PROFILE_NAME:-$hostname_val}"
+  local method="POST"
+  local payload=""
+  local -a curl_headers=("-H" "Content-Type: application/json")
+
+  if [[ "$notify_type" == "slack" ]]; then
+    if [[ "$status" == "success" ]]; then
+      payload="{\"text\":\"\u2705 [${hostname_val}] restic \ud1b5\ud569 \ubc31\uc5c5 \uc131\uacf5 (\ud504\ub85c\ud30c\uc77c: ${profile_name_val})\"}"
+    else
+      payload="{\"text\":\"\u274c [${hostname_val}] restic \ud1b5\ud569 \ubc31\uc5c5 \uc2e4\ud328 (\ud504\ub85c\ud30c\uc77c: ${profile_name_val})\n\uc624\ub958: ${err_msg}\"}"
+    fi
+  elif [[ "$notify_type" == "discord" ]]; then
+    if [[ "$status" == "success" ]]; then
+      payload="{\"content\":\"\u2705 [${hostname_val}] restic \ud1b5\ud569 \ubc31\uc5c5 \uc131\uacf5 (\ud504\ub85c\ud30c\uc77c: ${profile_name_val})\"}"
+    else
+      payload="{\"content\":\"\u274c [${hostname_val}] restic \ud1b5\ud569 \ubc31\uc5c5 \uc2e4\ud328 (\ud504\ub85c\ud30c\uc77c: ${profile_name_val})\n\uc624\ub958: ${err_msg}\"}"
+    fi
+  elif [[ "$notify_type" == "custom" ]]; then
+    method="${BACKUP_NOTIFICATION_METHOD:-POST}"
+    if [[ "$status" == "success" ]]; then
+      payload="${BACKUP_NOTIFICATION_BODY_SUCCESS:-}"
+    else
+      payload="${BACKUP_NOTIFICATION_BODY_FAILURE:-}"
+      payload="${payload//\$\{ERROR\}/$err_msg}"
+    fi
+    payload="${payload//\$\{HOSTNAME\}/$hostname_val}"
+    payload="${payload//\$\{PROFILE_NAME\}/$profile_name_val}"
+
+    if [[ -n "${BACKUP_NOTIFICATION_HEADERS:-}" ]]; then
+      curl_headers=()
+      local -a headers_arr=()
+      IFS=',' read -ra headers_arr <<< "$BACKUP_NOTIFICATION_HEADERS"
+      local h
+      for h in "${headers_arr[@]}"; do
+        h=$(echo "$h" | xargs)
+        curl_headers+=("-H" "$h")
+      done
+    fi
+  else
+    return 0
+  fi
+
+  log_info "통합 알림 전송 중... ($status)"
+  curl -s -X "$method" "${curl_headers[@]}" -d "$payload" "$notify_url" || log_warn "통합 알림 웹훅 전송 실패"
+}
+
+render_resticprofile_notifications() {
+  if [[ -n "${SECONDARY_BACKEND:-}" ]]; then
+    return 0
+  fi
+
+  local notify_url="${BACKUP_NOTIFICATION_URL:-}"
+
   local notify_type="${BACKUP_NOTIFICATION_TYPE:-}"
   local notify_on="${BACKUP_NOTIFICATION_ON:-both}"
 
@@ -1852,10 +1921,52 @@ cmd_run() {
     resticprofile_args+=(-v)
   fi
 
+  local pipeline_err=""
   if resticprofile "${resticprofile_args[@]}"; then
-    log_info "백업 성공"
+    log_info "1차 백업 성공"
   else
-    die "resticprofile backup 실패"
+    pipeline_err="1차 백업 실패 (resticprofile backup error)"
+    log_error "$pipeline_err"
+  fi
+
+  # 2차 원격 소산 백업 파이프라인
+  if [[ -z "$pipeline_err" && -n "${SECONDARY_BACKEND:-}" ]]; then
+    log_info "2차 소산 백업 복제 시작..."
+    local -a copy_args=(--config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" copy --to "${profile_name}-secondary")
+    if [[ "${BACKUP_VERBOSE:-0}" == "1" ]]; then
+      copy_args+=(-v)
+    fi
+
+    if resticprofile "${copy_args[@]}"; then
+      log_info "2차 소산 복제 성공"
+
+      # 2차 소산지 정리 (일요일 또는 BATS 테스트 중인 경우만 실행)
+      if [[ "$(date +%u)" -eq 7 || -n "${BATS_TEST_DIRNAME:-}" ]]; then
+        log_info "2차 소산지 정리(forget & prune) 시작..."
+        local -a prune_args=(--config "$RESTICPROFILE_CONFIG_FILE" --name "${profile_name}-secondary" forget)
+        if [[ "${BACKUP_VERBOSE:-0}" == "1" ]]; then
+          prune_args+=(-v)
+        fi
+        resticprofile "${prune_args[@]}" || log_warn "2차 소산지 정리(prune) 실패"
+      fi
+    else
+      pipeline_err="2차 소산 백업 복제 실패 (resticprofile copy error)"
+      log_error "$pipeline_err"
+    fi
+  fi
+
+  # 통합 알림 발송 및 종료 처리
+  if [[ -n "${SECONDARY_BACKEND:-}" ]]; then
+    if [[ -z "$pipeline_err" ]]; then
+      send_unified_notification "success"
+    else
+      send_unified_notification "failure" "$pipeline_err"
+      die "$pipeline_err"
+    fi
+  else
+    if [[ -n "$pipeline_err" ]]; then
+      die "$pipeline_err"
+    fi
   fi
 }
 
