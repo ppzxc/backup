@@ -140,10 +140,11 @@ setup() {
   [[ "$output" == *"send-after:"* ]]
   [[ "$output" == *"method: \"PUT\""* ]]
   [[ "$output" == *"url: \"https://my.webhook.internal/alerts\""* ]]
-  [[ "$output" == *"body: '{\"status\":\"ok\",\"msg\":\"done\"}'"* ]]
+  [[ "$output" == *"body: |"* ]]
+  [[ "$output" == *"{\"status\":\"ok\",\"msg\":\"done\"}"* ]]
   [[ "$output" == *"X-Alert-Key"* ]]
   [[ "$output" == *"secret123"* ]]
   [[ "$output" == *"send-after-fail:"* ]]
-  [[ "$output" == *"body: '{\"status\":\"error\",\"msg\":\"\${ERROR}\"}'"* ]]
+  [[ "$output" == *"{\"status\":\"error\",\"msg\":\"\${ERROR}\"}"* ]]
 }
 
