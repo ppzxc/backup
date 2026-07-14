@@ -55,3 +55,27 @@ ENV
   [ "$status" -eq 1 ]
   [[ "$output" == *"setting"* ]]
 }
+
+@test "cmd_schedule handles DB backup timer registration" {
+  cat >> "$BACKUP_ENV_FILE" <<'ENV'
+export BACKUP_DB_TYPE="mysql"
+export BACKUP_DB_COMMAND="mysqldump --all"
+export BACKUP_DB_SCHEDULE="*-*-* 03:00:00"
+ENV
+
+  run cmd_schedule enable
+  [ "$status" -eq 0 ]
+
+  run cat "${STUB_BIN}/resticprofile.calls"
+  [[ "$output" == *"--config ${RESTICPROFILE_CONFIG_FILE} --name web01 schedule"* ]]
+  [[ "$output" == *"--config ${RESTICPROFILE_CONFIG_FILE} --name web01-db schedule"* ]]
+
+  > "${STUB_BIN}/resticprofile.calls"
+  run cmd_schedule disable
+  [ "$status" -eq 0 ]
+
+  run cat "${STUB_BIN}/resticprofile.calls"
+  [[ "$output" == *"--config ${RESTICPROFILE_CONFIG_FILE} --name web01 unschedule"* ]]
+  [[ "$output" == *"--config ${RESTICPROFILE_CONFIG_FILE} --name web01-db unschedule"* ]]
+}
+

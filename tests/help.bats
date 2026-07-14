@@ -71,3 +71,19 @@ setup() {
   [[ "$output" == *"--secondary-endpoint"* ]]
 }
 
+@test "help commands print DB configuration options" {
+  run main setting --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--db-type"* ]]
+  [[ "$output" == *"--db-command"* ]]
+  [[ "$output" == *"--db-schedule"* ]]
+  [[ "$output" == *"--db-keep-daily"* ]]
+
+  run main config --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--db-type"* ]]
+  [[ "$output" == *"--db-command"* ]]
+  [[ "$output" == *"--db-schedule"* ]]
+}
+
+

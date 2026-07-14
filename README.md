@@ -205,6 +205,84 @@ $ sudo backup.sh setting \
     --notification-type "slack"
 ```
 
+---
+
+## 🗄️ 데이터베이스(DB) 백업 연동 및 실증 (Database Backup & Audit)
+
+`backup.sh`는 파일 시스템 백업뿐만 아니라 **상용 데이터베이스(MySQL, MariaDB, PostgreSQL 등)의 온라인 스트리밍 백업**을 자체 지원합니다. 덤프된 데이터를 로컬 디스크에 임시 파일로 쓰지 않고 메모리 상에서 암호화 파이프라인으로 전송(Streaming Stdin Backup)하므로 디스크 I/O를 크게 절약하고 보안 유출 사고를 방지합니다.
+
+### 1. DB 백업 파이프라인 구성 플래그
+
+`setting` 명령어 실행 시 데이터베이스 관련 다음 옵션들을 추가하여 백업을 구성합니다.
+
+| CLI 플래그 | 설명 | 설정 예시 |
+| :--- | :--- | :--- |
+| **`--db-type`** | 백업할 데이터베이스 종류 | `mysql`, `mariadb`, `postgres`, `custom` |
+| **`--db-command`** | 표준 출력(`stdout`)으로 백업 데이터를 내보내는 덤프 명령어 | `"mysqldump -h host ..."` (전체 쌍따옴표 묶음 필수) |
+| **`--db-filename`** | 백업 저장소 내에 저장할 가상의 SQL/덤프 파일명 | `db-dump.sql` (기본값) |
+| **`--db-keep-daily`** | DB 백업본 보존 정책 (일간) | `7` |
+| **`--db-keep-weekly`** | DB 백업본 보존 정책 (주간) | `4` |
+| **`--db-keep-monthly`** | DB 백업본 보존 정책 (월간) | `12` |
+| **`--db-schedule`** | DB 백업 스케줄 주기 (systemd 타이머 규격) | `"*-*-* 03:00:00"` (기본값: 파일 백업 주기와 동일) |
+
+---
+
+### 2. 주요 데이터베이스별 백업 설정 예시
+
+#### A. MySQL / MariaDB 백업
+`mysqldump` 또는 `mariadb-dump` 명령어를 이용하여 데이터베이스 전체를 백업 저장소로 전송합니다.
+```bash
+$ sudo ./backup.sh setting \
+    --backend s3 \
+    --endpoint http://minio:9000 \
+    --bucket my-backup-bucket \
+    --password 'repo-password' \
+    --db-type mariadb \
+    --db-command "mariadb-dump -h mariadb-server -u root -p'db-password' --all-databases --single-transaction --quick --order-by-primary" \
+    --db-filename "db-dump.sql"
+```
+
+#### B. PostgreSQL 백업 (`pg_dumpall` 또는 `pg_dump`)
+비밀번호 보안 유출을 차단하기 위해 `env PGPASSWORD` 환경 변수를 백업 명령 실행 구간에 바인딩하여 백업을 수행합니다.
+```bash
+$ sudo ./backup.sh setting \
+    --backend s3 \
+    --endpoint http://minio:9000 \
+    --bucket my-backup-bucket \
+    --password 'repo-password' \
+    --db-type postgres \
+    --db-command "env PGPASSWORD='db-password' pg_dumpall -h postgres-server -U postgres" \
+    --db-filename "pg-dump.sql"
+```
+
+#### C. 커스텀 파일/데이터 백업 (`custom`)
+데이터베이스가 아니더라도 특정 디렉터리를 실시간 압축(`tar`)하여 스트리밍 저장하고자 할 때 유용하게 활용 가능합니다.
+```bash
+$ sudo ./backup.sh setting \
+    --backend s3 \
+    --endpoint http://minio:9000 \
+    --bucket my-backup-bucket \
+    --password 'repo-password' \
+    --db-type custom \
+    --db-command "tar -czf - /var/lib/my-custom-app" \
+    --db-filename "app-data.tar.gz"
+```
+
+---
+
+### 3. 복구 모의 훈련 및 무결성 정합성 검증 (`audit`)
+
+ISMS/ISO 감사 요건 준수 및 백업 가용성 실증을 위해 **복구 훈련 서브커맨드**(`audit --restore-drill`)를 실행할 때, 실제 서비스 중인 데이터베이스에 데이터를 임포트(Import)하여 덮어씌우는 위험한 작업 대신 아래와 같이 **안전한 격리 검증**을 자동 수행합니다.
+
+1. **임시 복구**: 백업 저장소에 저장된 DB 스냅샷을 호스트의 임시 디렉터리(`/tmp/restore_drill_db/...`)로 복원합니다.
+2. **헤더 마커 검증**: 복원된 SQL 파일의 첫 10줄을 분석하여 아래와 같은 데이터베이스 고유의 덤프 파일 버전 시그니처 정보가 온전히 존재하는지 검사합니다.
+   - **`mysql` / `mariadb`**: 헤더 내부 `MySQL dump` 또는 `MariaDB dump` 패턴 매칭
+   - **`postgres`**: 헤더 내부 `PostgreSQL database dump` 또는 `PostgreSQL database cluster dump` 패턴 매칭
+   - **`custom`**: 백업된 파일의 존재 유무 및 비어있지 않은 파일 크기 검증
+3. **안전한 정리**: 검증 완료 즉시 복구 훈련용으로 활용한 임시 데이터를 삭제하여 유출을 차단하고 복구 성공 여부를 감사 보고서(MD/JSON/HTML)에 투명하게 기록합니다.
+
+---
+
 ## 🛡️ 정보보호 관리체계 (ISMS / ISMS-P) 컴플라이언스 대응
 
 본 스크립트는 **정보보호 관리체계(ISMS)**와 개인정보 보호 요건이 통합된 **정보보호 및 개인정보보호 관리체계(ISMS-P)** 심사 기준의 백업 통제 요건을 모두 충족하도록 각기 다르게 설계되었습니다. 두 인증 체계의 통제 기준과 본 스크립트의 기능 매핑은 다음과 같습니다.

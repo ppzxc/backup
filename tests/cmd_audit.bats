@@ -303,6 +303,120 @@ ENV
   [[ "$output" == *"restic -r s3:https://sec-s3.com/sec-bucket/host restore"* ]]
 }
 
+@test "render_report_markdown outputs valid markdown audit report" {
+  # resolved/audit_report 연관 배열 구조체 모의
+  declare -A test_report_data=(
+    [test_date]="2026-07-14"
+    [tester]="홍길동"
+    [ciso]="이몽룡"
+    [rto_minutes]=120
+    [primary_snap]="a6bb678e"
+    [primary_elapsed_seconds]=1
+    [primary_rto_satisfied]="true"
+    [secondary_snap]="b20f4685"
+    [secondary_elapsed_seconds]=1
+    [secondary_rto_satisfied]="true"
+  )
+
+  source "${BATS_TEST_DIRNAME}/../backup.sh"
+  local output; output=$(render_report_markdown test_report_data)
+  [ "$?" -eq 0 ]
+  [[ "$output" == *"- 테스터: 홍길동"* ]]
+  [[ "$output" == *"- 승인자: 이몽룡"* ]]
+  [[ "$output" == *"2차 테스트 대상 스냅샷 ID: b20f4685"* ]]
+}
+
+@test "render_report_json outputs valid json audit report" {
+  declare -A test_report_data=(
+    [test_date]="2026-07-14"
+    [tester]="홍길동"
+    [ciso]="이몽룡"
+    [rto_minutes]=120
+    [primary_snap]="a6bb678e"
+    [primary_elapsed_seconds]=1
+    [primary_rto_satisfied]="true"
+    [secondary_snap]="b20f4685"
+    [secondary_elapsed_seconds]=1
+    [secondary_rto_satisfied]="true"
+  )
+
+  source "${BATS_TEST_DIRNAME}/../backup.sh"
+  local output; output=$(render_report_json test_report_data)
+  [ "$?" -eq 0 ]
+  [[ "$output" == *"\"tester\": \"홍길동\""* ]]
+  [[ "$output" == *"\"ciso\": \"이몽룡\""* ]]
+  [[ "$output" == *"\"secondary_recovery_results\""* ]]
+}
+
+@test "write_audit_reports writes md, json, and html files concurrently with correct permissions" {
+  local base_report="${TEST_ROOT}/var/log/audit_test_out"
+  rm -f "${base_report}"*
+  
+  declare -A test_report_data=(
+    [test_date]="2026-07-14"
+    [tester]="홍길동"
+    [ciso]="이몽룡"
+    [rto_minutes]=120
+    [primary_snap]="a6bb678e"
+    [primary_elapsed_seconds]=1
+    [primary_rto_satisfied]="true"
+    [secondary_snap]="b20f4685"
+    [secondary_elapsed_seconds]=1
+    [secondary_rto_satisfied]="true"
+  )
+
+  source "${BATS_TEST_DIRNAME}/../backup.sh"
+  write_audit_reports test_report_data "${base_report}.md"
+  [ "$?" -eq 0 ]
+  
+  [ -f "${base_report}.md" ]
+  [ -f "${base_report}.json" ]
+  [ -f "${base_report}.html" ]
+  
+  local h_perm; h_perm=$(stat -c "%a" "${base_report}.html")
+  [ "$h_perm" = "600" ]
+}
+
+@test "cmd_audit --restore-drill supports DB restore and validation" {
+  cat >> "$BACKUP_ENV_FILE" <<'ENV'
+export BACKUP_DB_TYPE="mysql"
+export BACKUP_DB_COMMAND="mysqldump --all"
+export BACKUP_DB_FILENAME="db-dump.sql"
+ENV
+
+  stub_command "restic" '
+    case "$1" in
+      snapshots)
+        if [[ "$*" == *"--tag db"* ]]; then
+          echo "[{\"id\":\"db123456\",\"short_id\":\"db123456\",\"time\":\"2026-07-15T03:00:00Z\",\"hostname\":\"host\",\"paths\":[\"db-dump.sql\"],\"tags\":[\"db\"]}]"
+        else
+          echo "[{\"id\":\"abc12345\",\"short_id\":\"abc12345\",\"time\":\"2026-07-15T02:00:00Z\",\"hostname\":\"host\",\"paths\":[\"/var/log\"],\"tags\":[]}]"
+        fi
+        exit 0
+        ;;
+      restore)
+        if [[ "$*" == *"/tmp/restore_test_db"* ]]; then
+          mkdir -p /tmp/restore_test_db
+          echo "-- MySQL dump 10.13  Distrib 8.0.28" > /tmp/restore_test_db/db-dump.sql
+          echo "CREATE DATABASE test;" >> /tmp/restore_test_db/db-dump.sql
+        else
+          mkdir -p /tmp/restore_test
+          echo "dummy file" > /tmp/restore_test/dummy.txt
+        fi
+        exit 0
+        ;;
+    esac
+  '
+
+  run cmd_audit --restore-drill
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"데이터베이스(mysql) 복원 무결성 검증: 성공"* ]]
+}
+
+
+
+
+
 
 
 

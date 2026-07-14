@@ -80,3 +80,20 @@ setup() {
   # 4. Verify group-by: host is added to retention section
   grep -q 'group-by: host' "$RESTICPROFILE_CONFIG_FILE"
 }
+
+@test "cmd_config updates DB settings while preserving other credentials" {
+  run cmd_setting --backend s3 --endpoint http://127.0.0.1:9000 --bucket restic-bucket --access-key my-key --secret-key my-secret --password secret --targets "/etc"
+  [ "$status" -eq 0 ]
+
+  run cmd_config --db-type mysql --db-schedule "*-*-* 05:00:00"
+  [ "$status" -eq 0 ]
+
+  grep -q "export BACKUP_DB_TYPE='mysql'" "$BACKUP_ENV_FILE"
+  grep -q "export BACKUP_DB_SCHEDULE='.*05:00:00'" "$BACKUP_ENV_FILE"
+  grep -q "export BACKUP_DB_COMMAND='mysqldump --all-databases --single-transaction --quick --order-by-primary'" "$BACKUP_ENV_FILE"
+
+  grep -q 'export AWS_ACCESS_KEY_ID="my-key"' "$BACKUP_ENV_FILE"
+  grep -q 'export AWS_SECRET_ACCESS_KEY="my-secret"' "$BACKUP_ENV_FILE"
+  grep -q 'export RESTIC_PASSWORD="secret"' "$BACKUP_ENV_FILE"
+}
+

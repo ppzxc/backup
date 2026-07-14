@@ -8,6 +8,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
+
 echo "=== 컨테이너 기동 ==="
 docker compose up -d
 docker compose exec -T minio sh -c 'until mc alias set local http://localhost:9000 AKIAIOSFODNN7EXAMPLE wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY 2>/dev/null; do sleep 1; done'
@@ -16,11 +17,12 @@ docker compose exec -T minio mc mb -p local/restic-test
 echo "=== install ==="
 docker compose exec -T app bash -c '
   set -euo pipefail
-  bash backup.sh install
+  bash backup.sh install --force
   # atmoz/sftp 클라이언트 접속을 위한 ssh-keygen은 실제 RHEL에는 기본 포함되지만
   # 이 최소 rockylinux:9 이미지에는 없으므로 테스트 환경에서만 별도 설치한다.
   # systemd는 resticprofile schedule/unschedule이 만든 유닛 파일을 조회하기 위해 필요하다.
-  dnf install -y openssh-clients systemd
+  # 실제 DB 덤프 동작 검증을 위해 mariadb, postgresql 클라이언트를 함께 설치한다.
+  dnf install -y openssh-clients systemd mariadb postgresql
 '
 
 echo "=== S3 시나리오: setting -> init -> run ==="
@@ -228,5 +230,165 @@ docker compose exec -T app bash -c '
   restic snapshots --json | grep -q "\"hostname\""
 '
 
+echo "=== 실제 데이터베이스 더미 데이터 주입 ==="
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  mysql -h mariadb-5-5 -u root -ptestpass testdb -e "CREATE TABLE IF NOT EXISTS users (id INT, name VARCHAR(50)); INSERT INTO users VALUES (1, '\''user_5_5'\'');"
+  mariadb -h mariadb-latest -u root -ptestpass testdb -e "CREATE TABLE IF NOT EXISTS users (id INT, name VARCHAR(50)); INSERT INTO users VALUES (2, '\''user_latest'\'');"
+  PGPASSWORD=testpass psql -h postgres-13 -U postgres -d testdb -c "CREATE TABLE IF NOT EXISTS users (id INT, name VARCHAR(50)); INSERT INTO users VALUES (3, '\''user_pg'\'');"
+'
+
+echo "=== 1. 실제 MariaDB 5.5 백업 & 복구 실증 ==="
+# 1차 S3 및 2차 SFTP 소산지 동시 설정
+docker compose exec -T minio mc mb -p local/restic-test-primary-55 || true
+docker compose exec -T sftp sh -c 'rm -rf /home/backup_migrate/backup/*'
+
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh setting --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test-primary-55 \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --password test-repo-password \
+    --secondary-backend sftp \
+    --secondary-host sftp --secondary-port 22 --secondary-user backup_migrate \
+    --secondary-password test-sec-password --force \
+    --db-type mysql \
+    --db-command "mysqldump -h mariadb-5-5 -u root -ptestpass --all-databases --single-transaction --quick --order-by-primary" \
+    --db-keep-daily 7 --db-keep-weekly 4 --db-keep-monthly 12 \
+    --db-schedule "*-*-* 03:00:00"
+'
+
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh init
+  bash backup.sh run
+'
+
+# 복구 훈련 수행 및 보고서 동시 저장 검증
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh audit --restore-drill --report-file /tmp/audit_report_55.md
+  
+  test -f /tmp/audit_report_55.md
+  test -f /tmp/audit_report_55.json
+  test -f /tmp/audit_report_55.html
+  
+  # 보고서에 2차 복구 결과 및 DB 검증 상태가 정상 렌더링되었는지 검증
+  grep -q "2차 소산 저장소" /tmp/audit_report_55.md
+  grep -q "\"secondary_recovery_results\":" /tmp/audit_report_55.json
+  grep -q "데이터베이스(mysql) 복원 무결성 검증: 성공" /tmp/audit_report_55.md
+  grep -q "\"db_integrity_verified\": true" /tmp/audit_report_55.json
+'
+
+
+echo "=== 2. 실제 MariaDB Latest 백업 & 복구 실증 ==="
+# 1차 S3 및 2차 SFTP 소산지 동시 설정
+docker compose exec -T minio mc mb -p local/restic-test-primary-latest || true
+docker compose exec -T sftp sh -c 'rm -rf /home/backup_migrate/backup/*'
+
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh setting --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test-primary-latest \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --password test-repo-password \
+    --secondary-backend sftp \
+    --secondary-host sftp --secondary-port 22 --secondary-user backup_migrate \
+    --secondary-password test-sec-password --force \
+    --db-type mariadb \
+    --db-command "mariadb-dump -h mariadb-latest -u root -ptestpass --all-databases --single-transaction --quick --order-by-primary" \
+    --db-keep-daily 7 --db-keep-weekly 4 --db-keep-monthly 12 \
+    --db-schedule "*-*-* 03:00:00"
+'
+
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh init
+  bash backup.sh run
+'
+
+# 복구 훈련 수행 및 보고서 동시 저장 검증
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh audit --restore-drill --report-file /tmp/audit_report_latest.md
+  
+  test -f /tmp/audit_report_latest.md
+  test -f /tmp/audit_report_latest.json
+  test -f /tmp/audit_report_latest.html
+  
+  # 보고서에 2차 복구 결과 및 DB 검증 상태가 정상 렌더링되었는지 검증
+  grep -q "2차 소산 저장소" /tmp/audit_report_latest.md
+  grep -q "\"secondary_recovery_results\":" /tmp/audit_report_latest.json
+  grep -q "데이터베이스(mariadb) 복원 무결성 검증: 성공" /tmp/audit_report_latest.md
+  grep -q "\"db_integrity_verified\": true" /tmp/audit_report_latest.json
+'
+
+
+echo "=== 3. 실제 PostgreSQL Latest 백업 & 복구 실증 ==="
+# 1차 S3 및 2차 SFTP 소산지 동시 설정
+docker compose exec -T minio mc mb -p local/restic-test-primary-postgres || true
+docker compose exec -T sftp sh -c 'rm -rf /home/backup_migrate/backup/*'
+
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh setting --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test-primary-postgres \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --password test-repo-password \
+    --secondary-backend sftp \
+    --secondary-host sftp --secondary-port 22 --secondary-user backup_migrate \
+    --secondary-password test-sec-password --force \
+    --db-type postgres \
+    --db-command "env PGPASSWORD=testpass pg_dumpall -h postgres-13 -U postgres" \
+    --db-keep-daily 7 --db-keep-weekly 4 --db-keep-monthly 12 \
+    --db-schedule "*-*-* 03:00:00"
+'
+
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh init
+  bash backup.sh run
+'
+
+# 복구 훈련 수행 및 보고서 동시 저장 검증
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  bash backup.sh audit --restore-drill --report-file /tmp/audit_report_postgres.md
+  
+  test -f /tmp/audit_report_postgres.md
+  test -f /tmp/audit_report_postgres.json
+  test -f /tmp/audit_report_postgres.html
+  
+  # 보고서에 2차 복구 결과 및 DB 검증 상태가 정상 렌더링되었는지 검증
+  grep -q "2차 소산 저장소" /tmp/audit_report_postgres.md
+  grep -q "\"secondary_recovery_results\":" /tmp/audit_report_postgres.json
+  grep -q "데이터베이스(postgres) 복원 무결성 검증: 성공" /tmp/audit_report_postgres.md
+  grep -q "\"db_integrity_verified\": true" /tmp/audit_report_postgres.json
+'
+
+
+# 3. 기존 로컬 데이터 이관 검증 (upgrade-config)
+docker compose exec -T app bash -c '
+  set -euo pipefail
+  
+  # 임시 레거시 로컬 저장소 생성 및 스냅샷 생성
+  local_repo="/tmp/legacy-local"
+  rm -rf "$local_repo"
+  restic init -r "$local_repo" --password-file <(echo -n "test-repo-password")
+  
+  # 임시 백업 데이터 생성 후 로컬 저장소에 백업 실행
+  echo "legacy-data" > /tmp/legacy_file.txt
+  restic -r "$local_repo" --password-file <(echo -n "test-repo-password") backup /tmp/legacy_file.txt
+
+  
+  # upgrade-config 로 이관
+  bash backup.sh upgrade-config --legacy-dir "$local_repo"
+  
+  # 1차 원격 저장소에 로컬에서 마이그레이션된 스냅샷이 존재하는지 검증
+  source /etc/restic/backup.env
+  restic snapshots --json | grep -q "/tmp/legacy_file.txt"
+'
+
 echo "=== 모든 통합 테스트 통과 ==="
+
 

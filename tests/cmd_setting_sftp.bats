@@ -91,3 +91,25 @@ setup() {
   [ "$status" -eq 0 ]
   grep -qF 'export BACKUP_PROFILE_NAME="funa1.nanoit.kr"' "$BACKUP_ENV_FILE"
 }
+
+@test "cmd_setting sftp accepts --db-type and writes BACKUP_DB_TYPE to backup.env" {
+  run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --db-type mysql
+  [ "$status" -eq 0 ]
+  grep -q "export BACKUP_DB_TYPE='mysql'" "$BACKUP_ENV_FILE"
+}
+
+@test "cmd_setting sftp auto-fills default dump commands based on --db-type" {
+  run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --db-type mysql --force
+  [ "$status" -eq 0 ]
+  grep -q "export BACKUP_DB_COMMAND='mysqldump --all-databases --single-transaction --quick --order-by-primary'" "$BACKUP_ENV_FILE"
+
+  run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --db-type mariadb --force
+  [ "$status" -eq 0 ]
+  grep -q "export BACKUP_DB_COMMAND='mariadb-dump --all-databases --single-transaction --quick --order-by-primary'" "$BACKUP_ENV_FILE"
+
+  run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --db-type postgres --force
+  [ "$status" -eq 0 ]
+  grep -q "export BACKUP_DB_COMMAND='pg_dumpall -U postgres'" "$BACKUP_ENV_FILE"
+}
+
+

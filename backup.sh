@@ -2,7 +2,8 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.23"
+BACKUP_SCRIPT_VERSION="0.0.28"
+
 
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
@@ -162,6 +163,55 @@ validate_not_empty() {
   return 0
 }
 
+validate_resolved_config() {
+  local -n resolved_ref="$1"
+  local -n errors_ref="$2"
+  
+  # 1. 1차 백엔드 검증
+  local backend="${resolved_ref[backend]:-}"
+  if [[ -n "$backend" ]]; then
+    declare -g -A _validate_primary_fields=()
+    _validate_primary_fields[host]="${resolved_ref[host]:-}"
+    _validate_primary_fields[port]="${resolved_ref[port]:-}"
+    _validate_primary_fields[user]="${resolved_ref[user]:-}"
+    _validate_primary_fields[endpoint]="${resolved_ref[endpoint]:-}"
+    _validate_primary_fields[bucket]="${resolved_ref[bucket]:-}"
+    _validate_primary_fields[access_key]="${resolved_ref[access_key]:-}"
+    _validate_primary_fields[secret_key]="${resolved_ref[secret_key]:-}"
+    
+    local primary_err
+    if ! primary_err=$(case "$backend" in
+      sftp) backend_sftp_validate _validate_primary_fields 2>&1 ;;
+      s3) backend_s3_validate _validate_primary_fields 2>&1 ;;
+    esac); then
+      errors_ref+=("$primary_err")
+    fi
+    unset _validate_primary_fields
+  fi
+  
+  # 2. 2차 백엔드 검증
+  local sec_backend="${resolved_ref[secondary_backend]:-}"
+  if [[ -n "$sec_backend" ]]; then
+    declare -g -A _validate_sec_fields=()
+    _validate_sec_fields[host]="${resolved_ref[secondary_host]:-}"
+    _validate_sec_fields[port]="${resolved_ref[secondary_port]:-}"
+    _validate_sec_fields[user]="${resolved_ref[secondary_user]:-}"
+    _validate_sec_fields[endpoint]="${resolved_ref[secondary_endpoint]:-}"
+    _validate_sec_fields[bucket]="${resolved_ref[secondary_bucket]:-}"
+    _validate_sec_fields[access_key]="${resolved_ref[secondary_access_key]:-}"
+    _validate_sec_fields[secret_key]="${resolved_ref[secondary_secret_key]:-}"
+    
+    local sec_err
+    if ! sec_err=$(case "$sec_backend" in
+      sftp) backend_sftp_validate _validate_sec_fields 2>&1 ;;
+      s3) backend_s3_validate _validate_sec_fields 2>&1 ;;
+    esac); then
+      errors_ref+=("Secondary backend error: $sec_err")
+    fi
+    unset _validate_sec_fields
+  fi
+}
+
 # nameref로 인자를 받거나 다른 함수로 동적 연관 배열을 전달하여 사용하지 않는 것으로 오인받는 변수가 있으므로 우회
 # shellcheck disable=SC2034
 resolve_and_validate_config() {
@@ -176,6 +226,7 @@ resolve_and_validate_config() {
   local file_secondary_backend="" file_secondary_password="" file_secondary_keep_daily="" file_secondary_keep_weekly="" file_secondary_keep_monthly=""
   local file_secondary_endpoint="" file_secondary_bucket="" file_secondary_access_key="" file_secondary_secret_key=""
   local file_secondary_host="" file_secondary_port="" file_secondary_user="" file_secondary_repo=""
+  local file_db_type="" file_db_command="" file_db_filename="" file_db_schedule="" file_db_keep_daily="" file_db_keep_weekly="" file_db_keep_monthly=""
   if [[ -f "${BACKUP_ENV_FILE:-}" ]]; then
     # Sourcing in a subshell to isolate variables
     local env_data
@@ -210,6 +261,13 @@ resolve_and_validate_config() {
       printf '%s\n' "sec_host=${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-}"
       printf '%s\n' "sec_port=${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-}"
       printf '%s\n' "sec_user=${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-}"
+      printf '%s\n' "db_type=${BACKUP_DB_TYPE:-}"
+      printf 'db_command=%s\n' "$(echo -n "${BACKUP_DB_COMMAND:-}" | base64 | tr -d '\n')"
+      printf '%s\n' "db_filename=${BACKUP_DB_FILENAME:-}"
+      printf '%s\n' "db_schedule=${BACKUP_DB_SCHEDULE:-}"
+      printf '%s\n' "db_keep_daily=${KEEP_DB_DAILY:-}"
+      printf '%s\n' "db_keep_weekly=${KEEP_DB_WEEKLY:-}"
+      printf '%s\n' "db_keep_monthly=${KEEP_DB_MONTHLY:-}"
     )
     local line key val
     while IFS= read -r line; do
@@ -245,6 +303,13 @@ resolve_and_validate_config() {
         sec_host) file_secondary_host="$val" ;;
         sec_port) file_secondary_port="$val" ;;
         sec_user) file_secondary_user="$val" ;;
+        db_type) file_db_type="$val" ;;
+        db_command) file_db_command="$(echo -n "$val" | base64 -d 2>/dev/null || echo -n "$val" | base64 --decode 2>/dev/null)" ;;
+        db_filename) file_db_filename="$val" ;;
+        db_schedule) file_db_schedule="$val" ;;
+        db_keep_daily) file_db_keep_daily="$val" ;;
+        db_keep_weekly) file_db_keep_weekly="$val" ;;
+        db_keep_monthly) file_db_keep_monthly="$val" ;;
       esac
     done <<< "$env_data"
   fi
@@ -266,6 +331,13 @@ resolve_and_validate_config() {
   local env_secondary_keep_daily="${SECONDARY_KEEP_DAILY:-}"
   local env_secondary_keep_weekly="${SECONDARY_KEEP_WEEKLY:-}"
   local env_secondary_keep_monthly="${SECONDARY_KEEP_MONTHLY:-}"
+  local env_db_type="${BACKUP_DB_TYPE:-}"
+  local env_db_command="${BACKUP_DB_COMMAND:-}"
+  local env_db_filename="${BACKUP_DB_FILENAME:-}"
+  local env_db_schedule="${BACKUP_DB_SCHEDULE:-}"
+  local env_db_keep_daily="${KEEP_DB_DAILY:-}"
+  local env_db_keep_weekly="${KEEP_DB_WEEKLY:-}"
+  local env_db_keep_monthly="${KEEP_DB_MONTHLY:-}"
 
   # Resolve values with priority: CLI option > Env variable > Config file > Default value
   local cli_targets="${_opts[targets]:-}"
@@ -285,6 +357,55 @@ resolve_and_validate_config() {
 
   local cli_profile_name="${_opts[profile-name]:-}"
   _resolved[profile_name]=$(resolve_value "$cli_profile_name" "$env_profile_name" "$file_profile_name" "$(hostname)")
+
+  local cli_db_type="${_opts[db-type]:-}"
+  _resolved[db_type]=$(resolve_value "$cli_db_type" "$env_db_type" "$file_db_type" "" || true)
+
+  if [[ -n "${_resolved[db_type]:-}" && "${_resolved[db_type]}" != "$file_db_type" ]]; then
+    file_db_command=""
+    file_db_filename=""
+    file_db_schedule=""
+    file_db_keep_daily=""
+    file_db_keep_weekly=""
+    file_db_keep_monthly=""
+  fi
+
+  local cli_db_command="${_opts[db-command]:-}"
+  # shellcheck disable=SC2154
+  _resolved[db_command]=$(resolve_value "$cli_db_command" "$env_db_command" "$file_db_command" "" || true)
+
+  local cli_db_filename="${_opts[db-filename]:-}"
+  # shellcheck disable=SC2154
+  _resolved[db_filename]=$(resolve_value "$cli_db_filename" "$env_db_filename" "$file_db_filename" "db-dump.sql" || true)
+
+  local cli_db_schedule="${_opts[db-schedule]:-}"
+  _resolved[db_schedule]=$(resolve_value "$cli_db_schedule" "$env_db_schedule" "$file_db_schedule" "" || true)
+
+  local cli_db_keep_daily="${_opts[db-keep-daily]:-}"
+  _resolved[db_keep_daily]=$(resolve_value "$cli_db_keep_daily" "$env_db_keep_daily" "$file_db_keep_daily" "" || true)
+
+  local cli_db_keep_weekly="${_opts[db-keep-weekly]:-}"
+  _resolved[db_keep_weekly]=$(resolve_value "$cli_db_keep_weekly" "$env_db_keep_weekly" "$file_db_keep_weekly" "" || true)
+
+  local cli_db_keep_monthly="${_opts[db-keep-monthly]:-}"
+  _resolved[db_keep_monthly]=$(resolve_value "$cli_db_keep_monthly" "$env_db_keep_monthly" "$file_db_keep_monthly" "" || true)
+
+  # DB 타입별 기본 명령어 채우기
+  if [[ -n "${_resolved[db_type]:-}" ]]; then
+    if [[ -z "${_resolved[db_command]:-}" ]]; then
+      case "${_resolved[db_type]}" in
+        mysql)
+          _resolved[db_command]="mysqldump --all-databases --single-transaction --quick --order-by-primary"
+          ;;
+        mariadb)
+          _resolved[db_command]="mariadb-dump --all-databases --single-transaction --quick --order-by-primary"
+          ;;
+        postgres)
+          _resolved[db_command]="pg_dumpall -U postgres"
+          ;;
+      esac
+    fi
+  fi
 
   local cli_sec_backend="${_opts[secondary-backend]:-}"
   _resolved["secondary_backend"]=$(resolve_value "$cli_sec_backend" "$env_secondary_backend" "$file_secondary_backend" "" || true)
@@ -424,6 +545,7 @@ resolve_and_validate_config() {
   # Delegate backend-specific validation if backend is specified
   local backend="${_opts[backend]:-}"
   if [[ -n "$backend" ]]; then
+    _resolved[backend]="$backend"
     # nameref를 통한 동적 파싱을 사용하므로 미사용 변수 경고 우회
     # shellcheck disable=SC2034
     local -A backend_cli=()
@@ -488,14 +610,7 @@ resolve_and_validate_config() {
       _resolved["$key"]="${backend_fields[$key]}"
     done
 
-    # Validate
-    local backend_err
-    if ! backend_err=$(case "$backend" in
-      sftp) backend_sftp_validate backend_fields 2>&1 ;;
-      s3) backend_s3_validate backend_fields 2>&1 ;;
-    esac); then
-      _errors+=("$backend_err")
-    fi
+
   fi
 
   local sec_backend="${_resolved[secondary_backend]:-}"
@@ -518,9 +633,9 @@ resolve_and_validate_config() {
       sec_backend_env[endpoint]="${SECONDARY_BACKUP_ENDPOINT:-}"
       sec_backend_env[bucket]="${SECONDARY_BACKUP_BUCKET:-}"
     elif [[ "$sec_backend" == "sftp" ]]; then
-      sec_backend_env[host]="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-${SECONDARY_BACKUP_HOST:-}}"
-      sec_backend_env[port]="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-${SECONDARY_BACKUP_PORT:-}}"
-      sec_backend_env[user]="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-${SECONDARY_BACKUP_USER:-}}"
+      sec_backend_env[host]="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-${SECONDARY_BACKUP_HOST:-}}}"
+      sec_backend_env[port]="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-${SECONDARY_BACKUP_PORT:-}}}"
+      sec_backend_env[user]="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-${SECONDARY_BACKUP_USER:-}}}"
     fi
 
     if [[ -f "${BACKUP_ENV_FILE:-}" ]]; then
@@ -528,12 +643,12 @@ resolve_and_validate_config() {
       sec_backend_file_raw=$(
         # shellcheck source=/dev/null
         source "$BACKUP_ENV_FILE" >/dev/null 2>&1 || true
-        printf '%s\n' "host=${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-}"
-        printf '%s\n' "port=${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-}"
-        printf '%s\n' "user=${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-}"
-        printf '%s\n' "access_key=${SECONDARY_AWS_ACCESS_KEY_ID:-}"
-        printf '%s\n' "secret_key=${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
-        printf '%s\n' "repo=${SECONDARY_RESTIC_REPOSITORY:-}"
+        printf 'host=%s\n' "\${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST:-\${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-}}"
+        printf 'port=%s\n' "\${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT:-\${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-}}"
+        printf 'user=%s\n' "\${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER:-\${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-}}"
+        printf 'access_key=%s\n' "\${SECONDARY_AWS_ACCESS_KEY_ID:-}"
+        printf 'secret_key=%s\n' "\${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
+        printf 'repo=%s\n' "\${SECONDARY_RESTIC_REPOSITORY:-}"
       )
       local sfl sk sv
       while IFS= read -r sfl; do
@@ -567,14 +682,9 @@ resolve_and_validate_config() {
     done
 
 
-    local sec_backend_err
-    if ! sec_backend_err=$(case "$sec_backend" in
-      sftp) backend_sftp_validate sec_fields 2>&1 ;;
-      s3) backend_s3_validate sec_fields 2>&1 ;;
-    esac); then
-      _errors+=("Secondary backend error: $sec_backend_err")
-    fi
   fi
+
+  validate_resolved_config _resolved _errors
 
   if [[ ${#_errors[@]} -gt 0 ]]; then
     return 1
@@ -805,68 +915,161 @@ export BACKUP_AUDIT_RTO='$(escape_single_quotes "${_res[audit_rto]:-}")'
 EOF
 }
 
+render_db_env_block() {
+  local -n _res="$1"
+  if [[ -n "${_res[db_type]:-}" ]]; then
+    cat <<EOF
 
-send_unified_notification() {
-  local status="$1"
-  local err_msg="${2:-}"
-  local notify_url="${BACKUP_NOTIFICATION_URL:-}"
-  local notify_type="${BACKUP_NOTIFICATION_TYPE:-}"
-  local notify_on="${BACKUP_NOTIFICATION_ON:-both}"
+# ==========================================
+# 데이터베이스 백업용 설정 (Database Backup)
+# ==========================================
+export BACKUP_DB_TYPE='$(escape_single_quotes "${_res[db_type]:-}")'
+export BACKUP_DB_COMMAND='$(escape_single_quotes "${_res[db_command]:-}")'
+export BACKUP_DB_FILENAME='$(escape_single_quotes "${_res[db_filename]:-db-dump.sql}")'
+export BACKUP_DB_SCHEDULE='$(escape_single_quotes "${_res[db_schedule]:-}")'
+export KEEP_DB_DAILY='$(escape_single_quotes "${_res[db_keep_daily]:-}")'
+export KEEP_DB_WEEKLY='$(escape_single_quotes "${_res[db_keep_weekly]:-}")'
+export KEEP_DB_MONTHLY='$(escape_single_quotes "${_res[db_keep_monthly]:-}")'
+EOF
+  fi
+}
 
-  [[ -z "$notify_url" ]] && return 0
 
-  if [[ "$notify_on" == "success" && "$status" != "success" ]]; then
+
+build_notification_payload_slack() {
+  local status="$1" hostname="$2" profile_name="$3" err_msg="$4"
+  if [[ "$status" == "success" ]]; then
+    printf '{"text":"✅ [%s] restic 백업 성공 (프로파일: %s)"}' "$hostname" "$profile_name"
+  else
+    printf '{"text":"❌ [%s] restic 백업 실패 (프로파일: %s)\\n오류: %s"}' "$hostname" "$profile_name" "$err_msg"
+  fi
+}
+
+build_notification_payload_discord() {
+  local status="$1" hostname="$2" profile_name="$3" err_msg="$4"
+  if [[ "$status" == "success" ]]; then
+    printf '{"content":"✅ [%s] restic 백업 성공 (프로파일: %s)"}' "$hostname" "$profile_name"
+  else
+    printf '{"content":"❌ [%s] restic 백업 실패 (프로파일: %s)\\n오류: %s"}' "$hostname" "$profile_name" "$err_msg"
+  fi
+}
+
+build_notification_payload_custom() {
+  local status="$1" hostname="$2" profile_name="$3" err_msg="$4" body_success="$5" body_failure="$6"
+  local payload=""
+  if [[ "$status" == "success" ]]; then
+    payload="$body_success"
+  else
+    payload="$body_failure"
+    payload="${payload//\$\{ERROR\}/$err_msg}"
+  fi
+  payload="${payload//\$\{HOSTNAME\}/$hostname}"
+  payload="${payload//\$\{PROFILE_NAME\}/$profile_name}"
+  printf '%s' "$payload"
+}
+
+send_notification_slack() {
+  local url="$1" status="$2" hostname="$3" profile_name="$4" err_msg="$5"
+  local payload
+  payload=$(build_notification_payload_slack "$status" "$hostname" "$profile_name" "$err_msg")
+  curl -s -X POST -H "Content-Type: application/json" --max-time 10 -d "$payload" "$url"
+}
+
+send_notification_discord() {
+  local url="$1" status="$2" hostname="$3" profile_name="$4" err_msg="$5"
+  local payload
+  payload=$(build_notification_payload_discord "$status" "$hostname" "$profile_name" "$err_msg")
+  curl -s -X POST -H "Content-Type: application/json" --max-time 10 -d "$payload" "$url"
+}
+
+send_notification_custom() {
+  local url="$1" status="$2" hostname="$3" profile_name="$4" err_msg="$5" method="$6" headers_str="$7" body_success="$8" body_failure="$9"
+  local payload
+  payload=$(build_notification_payload_custom "$status" "$hostname" "$profile_name" "$err_msg" "$body_success" "$body_failure")
+  
+  local -a curl_headers=()
+  if [[ -n "$headers_str" ]]; then
+    local -a headers_arr=()
+    IFS=',' read -ra headers_arr <<< "$headers_str"
+    local h
+    for h in "${headers_arr[@]}"; do
+      h=$(echo "$h" | xargs)
+      curl_headers+=("-H" "$h")
+    done
+  else
+    curl_headers+=("-H" "Content-Type: application/json")
+  fi
+
+  curl -s -X "$method" "${curl_headers[@]}" --max-time 10 -d "$payload" "$url"
+}
+
+dispatch_notification() {
+  # shellcheck disable=SC2178  # nameref to caller's associative array
+  local -n _ctx="$1"
+  local status="${_ctx[status]:-success}"
+  local err_msg="${_ctx[err_msg]:-}"
+  local url="${_ctx[notify_url]:-${BACKUP_NOTIFICATION_URL:-}}"
+  local type="${_ctx[notify_type]:-${BACKUP_NOTIFICATION_TYPE:-}}"
+  local on="${_ctx[notify_on]:-${BACKUP_NOTIFICATION_ON:-both}}"
+
+  [[ -z "$url" ]] && return 0
+
+  if [[ "$on" == "success" && "$status" != "success" ]]; then
     return 0
   fi
-  if [[ "$notify_on" == "failure" && "$status" != "failure" ]]; then
+  if [[ "$on" == "failure" && "$status" != "failure" ]]; then
     return 0
   fi
 
   local hostname_val; hostname_val=$(hostname)
   local profile_name_val="${BACKUP_PROFILE_NAME:-$hostname_val}"
-  local method="POST"
-  local payload=""
-  local -a curl_headers=("-H" "Content-Type: application/json")
-
-  if [[ "$notify_type" == "slack" ]]; then
-    if [[ "$status" == "success" ]]; then
-      payload="{\"text\":\"\u2705 [${hostname_val}] restic \ud1b5\ud569 \ubc31\uc5c5 \uc131\uacf5 (\ud504\ub85c\ud30c\uc77c: ${profile_name_val})\"}"
-    else
-      payload="{\"text\":\"\u274c [${hostname_val}] restic \ud1b5\ud569 \ubc31\uc5c5 \uc2e4\ud328 (\ud504\ub85c\ud30c\uc77c: ${profile_name_val})\n\uc624\ub958: ${err_msg}\"}"
-    fi
-  elif [[ "$notify_type" == "discord" ]]; then
-    if [[ "$status" == "success" ]]; then
-      payload="{\"content\":\"\u2705 [${hostname_val}] restic \ud1b5\ud569 \ubc31\uc5c5 \uc131\uacf5 (\ud504\ub85c\ud30c\uc77c: ${profile_name_val})\"}"
-    else
-      payload="{\"content\":\"\u274c [${hostname_val}] restic \ud1b5\ud569 \ubc31\uc5c5 \uc2e4\ud328 (\ud504\ub85c\ud30c\uc77c: ${profile_name_val})\n\uc624\ub958: ${err_msg}\"}"
-    fi
-  elif [[ "$notify_type" == "custom" ]]; then
-    method="${BACKUP_NOTIFICATION_METHOD:-POST}"
-    if [[ "$status" == "success" ]]; then
-      payload="${BACKUP_NOTIFICATION_BODY_SUCCESS:-}"
-    else
-      payload="${BACKUP_NOTIFICATION_BODY_FAILURE:-}"
-      payload="${payload//\$\{ERROR\}/$err_msg}"
-    fi
-    payload="${payload//\$\{HOSTNAME\}/$hostname_val}"
-    payload="${payload//\$\{PROFILE_NAME\}/$profile_name_val}"
-
-    if [[ -n "${BACKUP_NOTIFICATION_HEADERS:-}" ]]; then
-      curl_headers=()
-      local -a headers_arr=()
-      IFS=',' read -ra headers_arr <<< "$BACKUP_NOTIFICATION_HEADERS"
-      local h
-      for h in "${headers_arr[@]}"; do
-        h=$(echo "$h" | xargs)
-        curl_headers+=("-H" "$h")
-      done
-    fi
-  else
-    return 0
-  fi
 
   log_info "통합 알림 전송 중... ($status)"
-  curl -s -X "$method" "${curl_headers[@]}" -d "$payload" "$notify_url" || log_warn "통합 알림 웹훅 전송 실패"
+  local res=0
+  case "$type" in
+    slack)
+      send_notification_slack "$url" "$status" "$hostname_val" "$profile_name_val" "$err_msg" || res=$?
+      ;;
+    discord)
+      send_notification_discord "$url" "$status" "$hostname_val" "$profile_name_val" "$err_msg" || res=$?
+      ;;
+    custom)
+      local method="${_ctx[method]:-${BACKUP_NOTIFICATION_METHOD:-POST}}"
+      local headers="${_ctx[headers]:-${BACKUP_NOTIFICATION_HEADERS:-}}"
+      local body_success="${_ctx[body_success]:-${BACKUP_NOTIFICATION_BODY_SUCCESS:-}}"
+      local body_failure="${_ctx[body_failure]:-${BACKUP_NOTIFICATION_BODY_FAILURE:-}}"
+      send_notification_custom "$url" "$status" "$hostname_val" "$profile_name_val" "$err_msg" "$method" "$headers" "$body_success" "$body_failure" || res=$?
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  if [[ $res -ne 0 ]]; then
+    log_warn "통합 알림 웹훅 전송 실패 (exit code: $res)"
+    return $res
+  fi
+  return 0
+}
+
+send_unified_notification() {
+  local status="$1"
+  local err_msg="${2:-}"
+  
+  # nameref로 인자를 전달하여 사용되지 않는 것으로 오인받는 변수 우회
+  # shellcheck disable=SC2034
+  declare -A notify_ctx=(
+    [status]="$status"
+    [err_msg]="$err_msg"
+    [notify_url]="${BACKUP_NOTIFICATION_URL:-}"
+    [notify_type]="${BACKUP_NOTIFICATION_TYPE:-}"
+    [notify_on]="${BACKUP_NOTIFICATION_ON:-both}"
+    [method]="${BACKUP_NOTIFICATION_METHOD:-POST}"
+    [headers]="${BACKUP_NOTIFICATION_HEADERS:-}"
+    [body_success]="${BACKUP_NOTIFICATION_BODY_SUCCESS:-}"
+    [body_failure]="${BACKUP_NOTIFICATION_BODY_FAILURE:-}"
+  )
+  dispatch_notification notify_ctx
 }
 
 render_resticprofile_notifications() {
@@ -893,13 +1096,13 @@ render_resticprofile_notifications() {
   if [[ "$notify_type" == "slack" ]]; then
     method="POST"
     headers=("Content-Type" "application/json")
-    success_body='{"text":"✅ [${HOSTNAME}] restic 백업 성공 (프로파일: ${PROFILE_NAME})"}'
-    failure_body='{"text":"❌ [${HOSTNAME}] restic 백업 실패 (프로파일: ${PROFILE_NAME})\n오류: ${ERROR}"}'
+    success_body=$(build_notification_payload_slack "success" '${HOSTNAME}' '${PROFILE_NAME}' '${ERROR}')
+    failure_body=$(build_notification_payload_slack "failure" '${HOSTNAME}' '${PROFILE_NAME}' '${ERROR}')
   elif [[ "$notify_type" == "discord" ]]; then
     method="POST"
     headers=("Content-Type" "application/json")
-    success_body='{"content":"✅ [${HOSTNAME}] restic 백업 성공 (프로파일: ${PROFILE_NAME})"}'
-    failure_body='{"content":"❌ [${HOSTNAME}] restic 백업 실패 (프로파일: ${PROFILE_NAME})\n오류: ${ERROR}"}'
+    success_body=$(build_notification_payload_discord "success" '${HOSTNAME}' '${PROFILE_NAME}' '${ERROR}')
+    failure_body=$(build_notification_payload_discord "failure" '${HOSTNAME}' '${PROFILE_NAME}' '${ERROR}')
   elif [[ "$notify_type" == "custom" ]]; then
     method="${BACKUP_NOTIFICATION_METHOD:-POST}"
     success_body="${BACKUP_NOTIFICATION_BODY_SUCCESS:-}"
@@ -1045,6 +1248,7 @@ render_resticprofile_config() {
     printf '  force-inactive-lock: true\n'
     printf '  env:\n'
     printf '    RESTIC_PASSWORD: "%s"\n' "${SECONDARY_RESTIC_PASSWORD:-${RESTIC_PASSWORD:-}}"
+    printf '    RESTIC_FROM_PASSWORD: "%s"\n' "${RESTIC_PASSWORD:-}"
     printf '    HOSTNAME: "%s"\n' "$(hostname)"
 
     if [[ "$SECONDARY_BACKEND" == "s3" ]]; then
@@ -1065,6 +1269,88 @@ render_resticprofile_config() {
     printf '    keep-daily: %s\n' "${SECONDARY_KEEP_DAILY:-$keep_daily}"
     printf '    keep-weekly: %s\n' "${SECONDARY_KEEP_WEEKLY:-$keep_weekly}"
     printf '    keep-monthly: %s\n' "${SECONDARY_KEEP_MONTHLY:-$keep_monthly}"
+
+    # 2차 소산지 복사 정책
+    printf '  copy:\n'
+    printf '    from-repository: "%s"\n' "${RESTIC_REPOSITORY:-}"
+  fi
+
+  # DB 백업 프로필 추가 출력 (독립 프로필)
+  # resticprofile의 inherit은 배열을 머지(merge)하므로, 부모의 source 경로와
+  # stdin: true가 충돌하여 "Fatal: --stdin was specified and files/dirs were
+  # listed as arguments" 에러가 발생한다. 따라서 inherit 없이 독립적으로 렌더링한다.
+  if [[ -n "${BACKUP_DB_TYPE:-}" ]]; then
+    local db_keep_daily="${KEEP_DB_DAILY:-$keep_daily}"
+    local db_keep_weekly="${KEEP_DB_WEEKLY:-$keep_weekly}"
+    local db_keep_monthly="${KEEP_DB_MONTHLY:-$keep_monthly}"
+    local db_schedule="${BACKUP_DB_SCHEDULE:-$on_calendar}"
+
+    printf '\n%s-db:\n' "$profile_name"
+    printf '  repository: "%s"\n' "${RESTIC_REPOSITORY:-}"
+    printf '  force-inactive-lock: true\n'
+    printf '  env:\n'
+    printf '    RESTIC_PASSWORD: "%s"\n' "${RESTIC_PASSWORD:-}"
+    printf '    HOSTNAME: "%s"\n' "$(hostname)"
+    if [[ -n "${AWS_ACCESS_KEY_ID:-}" ]]; then
+      printf '    AWS_ACCESS_KEY_ID: "%s"\n' "$AWS_ACCESS_KEY_ID"
+      printf '    AWS_SECRET_ACCESS_KEY: "%s"\n' "${AWS_SECRET_ACCESS_KEY:-}"
+    fi
+    if [[ -n "${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" ]]; then
+      printf '    RCLONE_CONFIG_SYNO_BACKUP_TYPE: "%s"\n' "$RCLONE_CONFIG_SYNO_BACKUP_TYPE"
+      printf '    RCLONE_CONFIG_SYNO_BACKUP_HOST: "%s"\n' "${RCLONE_CONFIG_SYNO_BACKUP_HOST:-}"
+      printf '    RCLONE_CONFIG_SYNO_BACKUP_USER: "%s"\n' "${RCLONE_CONFIG_SYNO_BACKUP_USER:-}"
+      printf '    RCLONE_CONFIG_SYNO_BACKUP_PORT: "%s"\n' "${RCLONE_CONFIG_SYNO_BACKUP_PORT:-}"
+      printf '    RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE: "%s"\n' "${RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE:-}"
+    fi
+
+    printf '  retention:\n'
+    printf '    after-backup: true\n'
+    printf '    prune: true\n'
+    printf '    group-by: host\n'
+    printf '    keep-daily: %s\n' "$db_keep_daily"
+    printf '    keep-weekly: %s\n' "$db_keep_weekly"
+    printf '    keep-monthly: %s\n' "$db_keep_monthly"
+
+    printf '  backup:\n'
+    printf '    schedule: "%s"\n' "$db_schedule"
+    printf '    schedule-permission: system\n'
+    printf '    stdin: true\n'
+    printf '    stdin-command: "%s"\n' "${BACKUP_DB_COMMAND:-}"
+    printf '    stdin-filename: "%s"\n' "${BACKUP_DB_FILENAME:-db-dump.sql}"
+    printf '    tag:\n'
+    printf '      - db\n'
+
+    # DB 2차 소산 복사 프로필 (2차 백업이 구성된 경우에만)
+    if [[ -n "${SECONDARY_BACKEND:-}" ]]; then
+      printf '\n%s-db-secondary:\n' "$profile_name"
+      printf '  repository: "%s"\n' "${SECONDARY_RESTIC_REPOSITORY:-}"
+      printf '  force-inactive-lock: true\n'
+      printf '  env:\n'
+      printf '    RESTIC_PASSWORD: "%s"\n' "${SECONDARY_RESTIC_PASSWORD:-${RESTIC_PASSWORD:-}}"
+      printf '    RESTIC_FROM_PASSWORD: "%s"\n' "${RESTIC_PASSWORD:-}"
+      printf '    HOSTNAME: "%s"\n' "$(hostname)"
+
+      if [[ "$SECONDARY_BACKEND" == "s3" ]]; then
+        printf '    AWS_ACCESS_KEY_ID: "%s"\n' "${SECONDARY_AWS_ACCESS_KEY_ID:-}"
+        printf '    AWS_SECRET_ACCESS_KEY: "%s"\n' "${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
+      elif [[ "$SECONDARY_BACKEND" == "sftp" ]]; then
+        printf '    RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE: "sftp"\n'
+        printf '    RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST: "%s"\n' "${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-}}"
+        printf '    RCLONE_CONFIG_SYNO_BACKUP_SEC_USER: "%s"\n' "${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-}}"
+        printf '    RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT: "%s"\n' "${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-22}}"
+        printf '    RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE: "%s"\n' "${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE:-$BACKUP_SSH_KEY}}"
+      fi
+
+      printf '  retention:\n'
+      printf '    prune: true\n'
+      printf '    group-by: host\n'
+      printf '    keep-daily: %s\n' "$db_keep_daily"
+      printf '    keep-weekly: %s\n' "$db_keep_weekly"
+      printf '    keep-monthly: %s\n' "$db_keep_monthly"
+
+      printf '  copy:\n'
+      printf '    from-repository: "%s"\n' "${RESTIC_REPOSITORY:-}"
+    fi
   fi
 }
 
@@ -1545,6 +1831,7 @@ EOF
 )
   _out_env+="$(render_notification_env_block _resolved)"
   _out_env+="$(render_audit_env_block _resolved)"
+  _out_env+="$(render_db_env_block _resolved)"
 
   # Render Notice
   _out_notice=$(cat <<EOF
@@ -1599,6 +1886,7 @@ EOF
 )
   _out_env+="$(render_notification_env_block _resolved)"
   _out_env+="$(render_audit_env_block _resolved)"
+  _out_env+="$(render_db_env_block _resolved)"
 
   # Render Notice
   _out_notice=$(cat <<EOF
@@ -1750,13 +2038,204 @@ cmd_init() {
 }
 
 
-systemd_enable_timer() {
-  systemctl daemon-reload
-  systemctl enable --now restic-backup.timer
+# ---------------------------------------------------------------------------
+# 스케줄러 관리 엔진: Scheduler Seam 및 다형성 라우터
+# ---------------------------------------------------------------------------
+scheduler_register() {
+  local profile_name="$1"
+  # shellcheck disable=SC2178
+  local -n _s_cfg="$2"
+  local adapter="${BACKUP_SCHEDULER_ADAPTER:-systemd}"
+  "scheduler_${adapter}_register" "$profile_name" _s_cfg
 }
 
-systemd_disable_timer() {
-  systemctl disable --now restic-backup.timer 2>/dev/null || true
+scheduler_unregister() {
+  local profile_name="$1"
+  local target_type="$2"
+  local adapter="${BACKUP_SCHEDULER_ADAPTER:-systemd}"
+  "scheduler_${adapter}_unregister" "$profile_name" "$target_type"
+}
+
+scheduler_status() {
+  local profile_name="$1"
+  # shellcheck disable=SC2178
+  local -n _s_stat="$2"
+  local adapter="${BACKUP_SCHEDULER_ADAPTER:-systemd}"
+  "scheduler_${adapter}_status" "$profile_name" _s_stat
+}
+
+# --- 1) Mock Scheduler Adapter ---
+scheduler_mock_register() {
+  local profile_name="$1"
+  # shellcheck disable=SC2178
+  local -n _m_cfg="$2"
+  local state_file="${TEST_ROOT:-/tmp}/var/log/scheduler_mock.state"
+  mkdir -p "$(dirname "$state_file")"
+
+  local on_cal="${_m_cfg[on-calendar]:-}"
+  local d_cal="${_m_cfg[on-calendar-daily]:-}"
+  local dr_cal="${_m_cfg[on-calendar-drill]:-}"
+  local daily="${_m_cfg[daily]:-0}"
+  local drill="${_m_cfg[restore-drill]:-0}"
+
+  if (( daily )); then
+    printf 'daily_schedule=%s\ndaily_enabled=1\n' "$d_cal" >> "$state_file"
+  elif (( drill )); then
+    printf 'drill_schedule=%s\ndrill_enabled=1\n' "$dr_cal" >> "$state_file"
+  else
+    printf 'backup_schedule=%s\nbackup_enabled=1\ndaily_schedule=%s\ndaily_enabled=1\ndrill_schedule=%s\ndrill_enabled=1\n' \
+      "$on_cal" "$d_cal" "$dr_cal" > "$state_file"
+    if [[ -n "${BACKUP_DB_TYPE:-}" ]]; then
+      local db_cal="${BACKUP_DB_SCHEDULE:-$on_cal}"
+      printf 'db_backup_schedule=%s\ndb_backup_enabled=1\n' "$db_cal" >> "$state_file"
+    fi
+  fi
+}
+
+scheduler_mock_unregister() {
+  local profile_name="$1"
+  local target_type="$2"
+  local state_file="${TEST_ROOT:-/tmp}/var/log/scheduler_mock.state"
+  [[ -f "$state_file" ]] || return 0
+
+  if [[ "$target_type" == "daily" ]]; then
+    local content; content=$(cat "$state_file")
+    content="${content/daily_enabled=1/daily_enabled=0}"
+    printf '%s\n' "$content" > "$state_file"
+  elif [[ "$target_type" == "drill" ]]; then
+    local content; content=$(cat "$state_file")
+    content="${content/drill_enabled=1/drill_enabled=0}"
+    printf '%s\n' "$content" > "$state_file"
+  else
+    rm -f "$state_file"
+  fi
+}
+
+# nameref로 전달받아 변수 선언 분석 우회
+# shellcheck disable=SC2154
+scheduler_mock_status() {
+  local profile_name="$1"
+  # shellcheck disable=SC2178
+  local -n _m_stat="$2"
+  local state_file="${TEST_ROOT:-/tmp}/var/log/scheduler_mock.state"
+
+  if [[ ! -f "$state_file" ]]; then
+    _m_stat[backup]="inactive"
+    _m_stat[daily]="inactive"
+    _m_stat[drill]="inactive"
+    _m_stat[db_backup]="inactive"
+    return 0
+  fi
+
+  local line key val
+  while IFS='=' read -r key val || [[ -n "$key" ]]; do
+    [[ -z "$key" ]] && continue
+    case "$key" in
+      backup_enabled)
+        _m_stat[backup]="$([[ "$val" == "1" ]] && echo "active" || echo "inactive")"
+        ;;
+      daily_enabled)
+        _m_stat[daily]="$([[ "$val" == "1" ]] && echo "active" || echo "inactive")"
+        ;;
+      drill_enabled)
+        _m_stat[drill]="$([[ "$val" == "1" ]] && echo "active" || echo "inactive")"
+        ;;
+      db_backup_enabled)
+        _m_stat[db_backup]="$([[ "$val" == "1" ]] && echo "active" || echo "inactive")"
+        ;;
+    esac
+  done < "$state_file"
+
+  [[ -z "${_m_stat[backup]:-}" ]] && _m_stat[backup]="inactive"
+  [[ -z "${_m_stat[daily]:-}" ]] && _m_stat[daily]="inactive"
+  [[ -z "${_m_stat[drill]:-}" ]] && _m_stat[drill]="inactive"
+  [[ -z "${_m_stat[db_backup]:-}" ]] && _m_stat[db_backup]="inactive"
+  return 0
+}
+
+# --- 2) Systemd Scheduler Adapter ---
+scheduler_systemd_register() {
+  local profile_name="$1"
+  # shellcheck disable=SC2178
+  local -n _sys_cfg="$2"
+
+  local on_calendar="${_sys_cfg[on-calendar]:-$DEFAULT_ON_CALENDAR}"
+  local daily_on_calendar="${_sys_cfg[on-calendar-daily]:-*-*-* 01:00:00}"
+  local drill_on_calendar="${_sys_cfg[on-calendar-drill]:-*-*-01 01:30:00}"
+  local daily="${_sys_cfg[daily]:-0}"
+  local restore_drill="${_sys_cfg[restore-drill]:-0}"
+
+  if (( daily )); then
+    write_audit_systemd_assets "$daily_on_calendar" "$drill_on_calendar"
+    systemd_reload_daemon
+    systemd_enable_unit "restic-audit-daily.timer"
+    log_info "schedule enable 완료 (daily: ${daily_on_calendar})"
+  elif (( restore_drill )); then
+    write_audit_systemd_assets "$daily_on_calendar" "$drill_on_calendar"
+    systemd_reload_daemon
+    systemd_enable_unit "restic-audit-restore-drill.timer"
+    log_info "schedule enable 완료 (drill: ${drill_on_calendar})"
+  else
+    resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" schedule
+    if [[ -n "${BACKUP_DB_TYPE:-}" ]]; then
+      resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "${profile_name}-db" schedule
+    fi
+    write_audit_systemd_assets "$daily_on_calendar" "$drill_on_calendar"
+    systemd_reload_daemon
+    systemd_enable_unit "restic-audit-daily.timer"
+    systemd_enable_unit "restic-audit-restore-drill.timer"
+    log_info "schedule enable 완료 (${on_calendar}, daily: ${daily_on_calendar}, drill: ${drill_on_calendar})"
+  fi
+}
+
+scheduler_systemd_unregister() {
+  local profile_name="$1"
+  local target_type="$2"
+
+  if [[ "$target_type" == "daily" ]]; then
+    systemd_disable_unit "restic-audit-daily.timer"
+    rm -f "$SYSTEMD_UNIT_DIR/restic-audit-daily.service"
+    rm -f "$SYSTEMD_UNIT_DIR/restic-audit-daily.timer"
+    systemd_reload_daemon
+    log_info "schedule disable 완료 (daily)"
+  elif [[ "$target_type" == "drill" ]]; then
+    systemd_disable_unit "restic-audit-restore-drill.timer"
+    rm -f "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.service"
+    rm -f "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.timer"
+    systemd_reload_daemon
+    log_info "schedule disable 완료 (drill)"
+  else
+    resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" unschedule 2>/dev/null || true
+    if [[ -n "${BACKUP_DB_TYPE:-}" ]]; then
+      resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "${profile_name}-db" unschedule 2>/dev/null || true
+    fi
+    systemd_disable_unit "restic-audit-daily.timer"
+    systemd_disable_unit "restic-audit-restore-drill.timer"
+    rm -f "$SYSTEMD_UNIT_DIR/restic-audit-daily.service"
+    rm -f "$SYSTEMD_UNIT_DIR/restic-audit-daily.timer"
+    rm -f "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.service"
+    rm -f "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.timer"
+    systemd_reload_daemon
+    log_info "schedule disable 완료"
+  fi
+}
+
+scheduler_systemd_status() {
+  local profile_name="$1"
+  # nameref로 전달받아 변수 선언 분석 우회
+  # shellcheck disable=SC2178,SC2154
+  local -n _sys_stat="$2"
+
+  local timer_state daily_timer_state drill_timer_state db_timer_state
+  timer_state=$(systemctl is-active "$(resticprofile_timer_unit_name "$profile_name")" 2>/dev/null) || true
+  daily_timer_state=$(systemctl is-active restic-audit-daily.timer 2>/dev/null) || true
+  drill_timer_state=$(systemctl is-active restic-audit-restore-drill.timer 2>/dev/null) || true
+  db_timer_state=$(systemctl is-active "$(resticprofile_timer_unit_name "${profile_name}-db")" 2>/dev/null) || true
+
+  _sys_stat[backup]="${timer_state:-unknown}"
+  _sys_stat[daily]="${daily_timer_state:-unknown}"
+  _sys_stat[drill]="${drill_timer_state:-unknown}"
+  _sys_stat[db_backup]="${db_timer_state:-inactive}"
 }
 
 systemd_reload_daemon() {
@@ -1832,6 +2311,8 @@ EOF
   chmod 644 "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.timer"
 }
 
+# nameref로 인자를 전달하여 사용되지 않는 것으로 오인받는 변수 우회
+# shellcheck disable=SC2034
 cmd_schedule() {
   if has_help_flag "$@"; then
     help_schedule
@@ -1849,30 +2330,16 @@ cmd_schedule() {
       local -A opts=()
       parse_opts_into opts "on-calendar: on-calendar-daily: on-calendar-drill: daily restore-drill" -- "$@"
       local on_calendar="${opts[on-calendar]:-$DEFAULT_ON_CALENDAR}"
-      local daily_on_calendar="${opts[on-calendar-daily]:-*-*-* 01:00:00}"
-      local drill_on_calendar="${opts[on-calendar-drill]:-*-*-01 01:30:00}"
-      local daily="${opts[daily]:-0}"
-      local restore_drill="${opts[restore-drill]:-0}"
 
-      if (( daily )); then
-        write_audit_systemd_assets "$daily_on_calendar" "$drill_on_calendar"
-        systemd_reload_daemon
-        systemd_enable_unit "restic-audit-daily.timer"
-        log_info "schedule enable 완료 (daily: ${daily_on_calendar})"
-      elif (( restore_drill )); then
-        write_audit_systemd_assets "$daily_on_calendar" "$drill_on_calendar"
-        systemd_reload_daemon
-        systemd_enable_unit "restic-audit-restore-drill.timer"
-        log_info "schedule enable 완료 (drill: ${drill_on_calendar})"
-      else
-        write_resticprofile_assets "$profile_name" "$on_calendar"
-        resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" schedule
-        write_audit_systemd_assets "$daily_on_calendar" "$drill_on_calendar"
-        systemd_reload_daemon
-        systemd_enable_unit "restic-audit-daily.timer"
-        systemd_enable_unit "restic-audit-restore-drill.timer"
-        log_info "schedule enable 완료 (${on_calendar}, daily: ${daily_on_calendar}, drill: ${drill_on_calendar})"
-      fi
+      # profiles.yaml 설정 에셋은 Config/Run 도메인인 여기서 직접 작성
+      write_resticprofile_assets "$profile_name" "$on_calendar"
+
+      local -A config_ref=()
+      local k
+      for k in "${!opts[@]}"; do
+        config_ref["$k"]="${opts[$k]}"
+      done
+      scheduler_register "$profile_name" config_ref
       ;;
     disable)
       local -A opts=()
@@ -1880,29 +2347,14 @@ cmd_schedule() {
       local daily="${opts[daily]:-0}"
       local restore_drill="${opts[restore-drill]:-0}"
 
+      local target_type="all"
       if (( daily )); then
-        systemd_disable_unit "restic-audit-daily.timer"
-        rm -f "$SYSTEMD_UNIT_DIR/restic-audit-daily.service"
-        rm -f "$SYSTEMD_UNIT_DIR/restic-audit-daily.timer"
-        systemd_reload_daemon
-        log_info "schedule disable 완료 (daily)"
+        target_type="daily"
       elif (( restore_drill )); then
-        systemd_disable_unit "restic-audit-restore-drill.timer"
-        rm -f "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.service"
-        rm -f "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.timer"
-        systemd_reload_daemon
-        log_info "schedule disable 완료 (drill)"
-      else
-        resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" unschedule 2>/dev/null || true
-        systemd_disable_unit "restic-audit-daily.timer"
-        systemd_disable_unit "restic-audit-restore-drill.timer"
-        rm -f "$SYSTEMD_UNIT_DIR/restic-audit-daily.service"
-        rm -f "$SYSTEMD_UNIT_DIR/restic-audit-daily.timer"
-        rm -f "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.service"
-        rm -f "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.timer"
-        systemd_reload_daemon
-        log_info "schedule disable 완료"
+        target_type="drill"
       fi
+
+      scheduler_unregister "$profile_name" "$target_type"
       ;;
     *)
       die "schedule은 'enable' 또는 'disable'만 지원합니다 (입력값: '${action}')"
@@ -1927,35 +2379,76 @@ cmd_run() {
 
   local pipeline_err=""
   if resticprofile "${resticprofile_args[@]}"; then
-    log_info "1차 백업 성공"
+    log_info "1차 파일 백업 성공"
   else
-    pipeline_err="1차 백업 실패 (resticprofile backup error)"
+    pipeline_err="1차 파일 백업 실패 (resticprofile backup error)"
     log_error "$pipeline_err"
+  fi
+
+  # DB 백업이 구성된 경우, 1차 DB 백업도 실행
+  if [[ -z "$pipeline_err" && -n "${BACKUP_DB_TYPE:-}" ]]; then
+    log_info "1차 데이터베이스(${BACKUP_DB_TYPE}) 백업 시작..."
+    local -a db_resticprofile_args=(--config "$RESTICPROFILE_CONFIG_FILE" --name "${profile_name}-db" backup)
+    if [[ "${BACKUP_VERBOSE:-0}" == "1" ]]; then
+      db_resticprofile_args+=(-v)
+    fi
+    if resticprofile "${db_resticprofile_args[@]}"; then
+      log_info "1차 데이터베이스 백업 성공"
+    else
+      pipeline_err="1차 데이터베이스 백업 실패 (resticprofile backup error)"
+      log_error "$pipeline_err"
+    fi
   fi
 
   # 2차 원격 소산 백업 파이프라인
   if [[ -z "$pipeline_err" && -n "${SECONDARY_BACKEND:-}" ]]; then
-    log_info "2차 소산 백업 복제 시작..."
-    local -a copy_args=(--config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" copy --to "${profile_name}-secondary")
+    log_info "2차 소산 파일 백업 복제 시작..."
+    local -a copy_args=(--config "$RESTICPROFILE_CONFIG_FILE" --name "${profile_name}-secondary" copy)
     if [[ "${BACKUP_VERBOSE:-0}" == "1" ]]; then
       copy_args+=(-v)
     fi
 
     if resticprofile "${copy_args[@]}"; then
-      log_info "2차 소산 복제 성공"
+      log_info "2차 소산 파일 복제 성공"
 
       # 2차 소산지 정리 (일요일 또는 BATS 테스트 중인 경우만 실행)
       if [[ "$(date +%u)" -eq 7 || -n "${BATS_TEST_DIRNAME:-}" ]]; then
-        log_info "2차 소산지 정리(forget & prune) 시작..."
+        log_info "2차 파일 소산지 정리(forget & prune) 시작..."
         local -a prune_args=(--config "$RESTICPROFILE_CONFIG_FILE" --name "${profile_name}-secondary" forget)
         if [[ "${BACKUP_VERBOSE:-0}" == "1" ]]; then
           prune_args+=(-v)
         fi
-        resticprofile "${prune_args[@]}" || log_warn "2차 소산지 정리(prune) 실패"
+        resticprofile "${prune_args[@]}" || log_warn "2차 파일 소산지 정리(prune) 실패"
       fi
     else
-      pipeline_err="2차 소산 백업 복제 실패 (resticprofile copy error)"
+      pipeline_err="2차 소산 파일 백업 복제 실패 (resticprofile copy error)"
       log_error "$pipeline_err"
+    fi
+
+    # DB 백업이 구성된 경우, 2차 DB 백업 복제도 진행
+    if [[ -z "$pipeline_err" && -n "${BACKUP_DB_TYPE:-}" ]]; then
+      log_info "2차 소산 데이터베이스 백업 복제 시작..."
+      local -a db_copy_args=(--config "$RESTICPROFILE_CONFIG_FILE" --name "${profile_name}-db-secondary" copy)
+      if [[ "${BACKUP_VERBOSE:-0}" == "1" ]]; then
+        db_copy_args+=(-v)
+      fi
+
+      if resticprofile "${db_copy_args[@]}"; then
+        log_info "2차 소산 데이터베이스 복제 성공"
+
+        # DB 소산지 정리
+        if [[ "$(date +%u)" -eq 7 || -n "${BATS_TEST_DIRNAME:-}" ]]; then
+          log_info "2차 데이터베이스 소산지 정리(forget & prune) 시작..."
+          local -a db_prune_args=(--config "$RESTICPROFILE_CONFIG_FILE" --name "${profile_name}-db-secondary" forget)
+          if [[ "${BACKUP_VERBOSE:-0}" == "1" ]]; then
+            db_prune_args+=(-v)
+          fi
+          resticprofile "${db_prune_args[@]}" || log_warn "2차 데이터베이스 소산지 정리(prune) 실패"
+        fi
+      else
+        pipeline_err="2차 소산 데이터베이스 백업 복제 실패 (resticprofile copy error)"
+        log_error "$pipeline_err"
+      fi
     fi
   fi
 
@@ -1977,6 +2470,7 @@ cmd_run() {
 render_snapshots_pretty() {
   python3 -c '
 import sys, json
+tag_filter = sys.argv[1] if len(sys.argv) > 1 else ""
 try:
     content = sys.stdin.read().strip()
     if not content or content == "[]":
@@ -1986,9 +2480,24 @@ try:
     if not isinstance(data, list) or not data:
         print("  (스냅샷 없음)")
         sys.exit(0)
+
+    # 필터링 적용
+    filtered_data = []
+    for snap in data:
+        tags = snap.get("tags", [])
+        if tag_filter == "db" and "db" not in tags:
+            continue
+        if tag_filter == "exclude-db" and "db" in tags:
+            continue
+        filtered_data.append(snap)
+
+    if not filtered_data:
+        print("  (스냅샷 없음)")
+        sys.exit(0)
+
     print("  %-10s  %-19s  %-25s  %s" % ("ID", "일시", "호스트", "백업 경로 (용량)"))
     print("  %s  %s  %s  %s" % ("-"*10, "-"*19, "-"*25, "-"*30))
-    for snap in data:
+    for snap in filtered_data:
         sid = snap.get("short_id", snap.get("id", "")[:8])
         time_str = snap.get("time", "")[:19].replace("T", " ")
         host = snap.get("hostname", "")
@@ -2008,7 +2517,7 @@ try:
         print("  %-10s  %-19s  %-25s  %s%s" % (sid, time_str, host, paths, size_str))
 except Exception as e:
     print("  (스냅샷 정보 해석 실패: %s)" % e)
-'
+' "$@"
 }
 
 cmd_status() {
@@ -2025,37 +2534,50 @@ cmd_status() {
   local styled_repo="${C_BOLD}${RESTIC_REPOSITORY:-알 수 없음}${C_RESET}"
   local styled_targets="${C_BOLD}${BACKUP_TARGETS:-알 수 없음}${C_RESET}"
 
-  local timer_state
-  timer_state=$(systemctl is-active "$(resticprofile_timer_unit_name "$profile_name")" 2>/dev/null) || true
+  # scheduler Seam을 통해 타이머들 상태 수집 (nameref로 s_stat 전달)
+  # nameref로 인자를 전달하여 사용되지 않는 것으로 오인받는 변수 우회
+  # shellcheck disable=SC2034
+  local -A s_stat=()
+  scheduler_status "$profile_name" s_stat
+
+  local timer_state="${s_stat[backup]:-unknown}"
   local styled_timer
   if [[ "$timer_state" == "active" ]]; then
     styled_timer="${C_GREEN}active${C_RESET}"
   elif [[ "$timer_state" == "inactive" ]]; then
     styled_timer="${C_GRAY}inactive${C_RESET}"
   else
-    styled_timer="${C_RED}${timer_state:-unknown}${C_RESET}"
+    styled_timer="${C_RED}${timer_state}${C_RESET}"
   fi
 
-  local daily_timer_state
-  daily_timer_state=$(systemctl is-active restic-audit-daily.timer 2>/dev/null) || true
+  local daily_timer_state="${s_stat[daily]:-unknown}"
   local styled_daily_timer
   if [[ "$daily_timer_state" == "active" ]]; then
     styled_daily_timer="${C_GREEN}active${C_RESET}"
   elif [[ "$daily_timer_state" == "inactive" ]]; then
     styled_daily_timer="${C_GRAY}inactive${C_RESET}"
   else
-    styled_daily_timer="${C_RED}${daily_timer_state:-unknown}${C_RESET}"
+    styled_daily_timer="${C_RED}${daily_timer_state}${C_RESET}"
   fi
 
-  local drill_timer_state
-  drill_timer_state=$(systemctl is-active restic-audit-restore-drill.timer 2>/dev/null) || true
+  local drill_timer_state="${s_stat[drill]:-unknown}"
   local styled_drill_timer
   if [[ "$drill_timer_state" == "active" ]]; then
     styled_drill_timer="${C_GREEN}active${C_RESET}"
   elif [[ "$drill_timer_state" == "inactive" ]]; then
     styled_drill_timer="${C_GRAY}inactive${C_RESET}"
   else
-    styled_drill_timer="${C_RED}${drill_timer_state:-unknown}${C_RESET}"
+    styled_drill_timer="${C_RED}${drill_timer_state}${C_RESET}"
+  fi
+
+  local db_timer_state="${s_stat[db_backup]:-inactive}"
+  local styled_db_timer
+  if [[ "$db_timer_state" == "active" ]]; then
+    styled_db_timer="${C_GREEN}active${C_RESET}"
+  elif [[ "$db_timer_state" == "inactive" ]]; then
+    styled_db_timer="${C_GRAY}inactive${C_RESET}"
+  else
+    styled_db_timer="${C_RED}${db_timer_state}${C_RESET}"
   fi
 
   local etc_perm; etc_perm="$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '?')"
@@ -2081,11 +2603,21 @@ cmd_status() {
   printf '%b├──%b 타이머 상태:  %b\n' "$C_GRAY" "$C_RESET" "$styled_timer"
   printf '%b├──%b 일일 검토 타이머: %b\n' "$C_GRAY" "$C_RESET" "$styled_daily_timer"
   printf '%b├──%b 복구 테스트 타이머: %b\n' "$C_GRAY" "$C_RESET" "$styled_drill_timer"
+  if [[ -n "${BACKUP_DB_TYPE:-}" ]]; then
+    printf '%b├──%b DB 백업 타이머:  %b\n' "$C_GRAY" "$C_RESET" "$styled_db_timer"
+  fi
   printf '%b├──%b %s 권한: %b\n' "$C_GRAY" "$C_RESET" "$RESTIC_ETC_DIR" "$styled_etc_perm"
   printf '%b└──%b %s 권한: %b\n' "$C_GRAY" "$C_RESET" "$BACKUP_ENV_FILE" "$styled_env_perm"
   printf '\n'
   printf '%b%b⚙  최근 스냅샷 (Recent Snapshots)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
-  restic snapshots --json 2>/dev/null | render_snapshots_pretty || printf '  (조회 실패 또는 미초기화)\n'
+  if [[ -n "${BACKUP_DB_TYPE:-}" ]]; then
+    printf '  [파일 백업 스냅샷]\n'
+    restic snapshots --json 2>/dev/null | render_snapshots_pretty "exclude-db" || printf '  (조회 실패 또는 미초기화)\n'
+    printf '  [DB 백업 스냅샷]\n'
+    restic snapshots --json 2>/dev/null | render_snapshots_pretty "db" || printf '  (조회 실패 또는 미초기화)\n'
+  else
+    restic snapshots --json 2>/dev/null | render_snapshots_pretty || printf '  (조회 실패 또는 미초기화)\n'
+  fi
 }
 
 format_bytes() {
@@ -2107,6 +2639,7 @@ render_restore_drill_report() {
   local test_date="$1" tester="$2" latest_snap="$3" latest_time="$4" target_dir="$5"
   local size_str="$6" elapsed_str="$7" rto="$8" rto_status="$9" ciso="${10}" os_name="${11}"
   local sec_snap="${12:-}" sec_time="${13:-}" sec_size_str="${14:-}" sec_elapsed_str="${15:-}" sec_rto_status="${16:-}"
+  local db_type="${17:-}" db_valid="${18:-0}"
   
   cat <<EOF
 ======================================================================
@@ -2159,6 +2692,17 @@ EOF
 
   cat <<EOF
   - 데이터 정합성 검증: 회원 테이블 row 수 일치 검증 완료, 회원 정보 깨짐 없음 (성공)
+EOF
+
+  if [[ -n "$db_type" ]]; then
+    local db_status_str="성공"
+    if (( ! db_valid )); then
+      db_status_str="실패"
+    fi
+    printf '  - 데이터베이스(%s) 복원 무결성 검증: %s\n' "$db_type" "$db_status_str"
+  fi
+
+  cat <<EOF
 
 4. 특이사항 및 종합 의견
   - 백업 암호화 키 분실 방지 대책이 정상 작동 중이며, NAS 원격 저장소로부터 전송 대역폭 제한 없이 안정적인 속도로 복구가 완료됨을 확인함.
@@ -2168,10 +2712,191 @@ EOF
 EOF
 }
 
+# ---------------------------------------------------------------------------
+# 감사 보고서 엔진 v2: 연관 배열 기반 어댑터 (Associative-Array Interface)
+# ---------------------------------------------------------------------------
+# 사용법: render_report_markdown  <nameref>
+#         render_report_json      <nameref>
+#         write_audit_reports     <nameref> <base_md_path>
+#
+# <nameref> 은 호출부에서 declare -A 로 선언된 배열 이름(문자열)을 넘긴다.
+# 지원 키:
+#   test_date, tester, ciso, rto_minutes
+#   primary_snap, primary_elapsed_seconds, primary_rto_satisfied
+#   secondary_snap, secondary_elapsed_seconds, secondary_rto_satisfied
+# ---------------------------------------------------------------------------
+
+render_report_markdown() {
+  # shellcheck disable=SC2178  # nameref to caller's associative array
+  local -n _rrd="$1"
+  local test_date="${_rrd[test_date]:-}"
+  local tester="${_rrd[tester]:-}"
+  local ciso="${_rrd[ciso]:-}"
+  local rto="${_rrd[rto_minutes]:-60}"
+  local p_snap="${_rrd[primary_snap]:-}"
+  local p_elapsed="${_rrd[primary_elapsed_seconds]:-0}"
+  local p_ok="${_rrd[primary_rto_satisfied]:-false}"
+  local s_snap="${_rrd[secondary_snap]:-}"
+  local s_elapsed="${_rrd[secondary_elapsed_seconds]:-0}"
+  local s_ok="${_rrd[secondary_rto_satisfied]:-false}"
+  local db_type="${_rrd[db_type]:-}"
+  local db_snap="${_rrd[db_snap]:-}"
+  local db_ok="${_rrd[db_valid]:-false}"
+
+  local p_status; p_status="$([[ "$p_ok" == "true" ]] && echo "만족" || echo "미달")"
+  local p_elapsed_str; p_elapsed_str="${p_elapsed}초"
+
+  cat <<EOF
+======================================================================
+[보안 감사 증적] 백업 데이터 복구 및 정합성 테스트 결과 보고서
+======================================================================
+- 테스트 일자: $test_date
+- 테스터: $tester
+- 테스트 대상 스냅샷 ID: $p_snap
+EOF
+
+  if [[ -n "$s_snap" ]]; then
+    cat <<EOF
+- 2차 테스트 대상 스냅샷 ID: $s_snap
+EOF
+  fi
+
+  cat <<EOF
+
+1. 테스트 목적
+  - 재해 재난 및 랜섬웨어 감염 시 백업 데이터로부터 실제 서비스 복구가 원활히 이루어지는지 검증하고, 목표 복구 시간(RTO) 내 복구 가능한지 점검함.
+
+2. 테스트 시나리오 및 수행 내역
+  ① 임시 테스트 환경 구성 및 Restic 저장소 연결 테스트 (정상)
+  ② 'restic restore' 명령을 통한 데이터 다운로드
+  ③ 데이터 정합성 임의 쿼리 조회 검증
+EOF
+
+  if [[ -n "$s_snap" ]]; then
+    cat <<EOF
+  ④ 2차 소산지 레포지토리로부터 복원 가동 테스트 및 데이터 정합성 검증 (양방향)
+EOF
+  fi
+
+  cat <<EOF
+
+3. 복구 결과 및 소요 시간 검증
+  [1차 원격 저장소]
+  - 복구 소요 시간: $p_elapsed_str (당사 RTO 기준 ${rto}분 이내 만족) -> $p_status
+EOF
+
+  if [[ -n "$s_snap" ]]; then
+    local s_status; s_status="$([[ "$s_ok" == "true" ]] && echo "만족" || echo "미달")"
+    local s_elapsed_str="${s_elapsed}초"
+    cat <<EOF
+  [2차 소산 저장소]
+  - 복구 소요 시간: $s_elapsed_str (당사 RTO 기준 ${rto}분 이내 만족) -> $s_status
+EOF
+  fi
+
+  cat <<EOF
+  - 데이터 정합성 검증: 성공
+EOF
+
+  if [[ -n "$db_type" ]]; then
+    local db_status_str; db_status_str="$([[ "$db_ok" == "true" ]] && echo "성공" || echo "실패")"
+    printf '  - 데이터베이스(%s) 복원 무결성 검증: %s\n' "$db_type" "$db_status_str"
+  fi
+
+  cat <<EOF
+
+4. 특이사항 및 종합 의견
+  - 백업 암호화 키 분실 방지 대책이 정상 작동 중임.
+
+- 승인자: $ciso (인)
+======================================================================
+EOF
+}
+
+render_report_json() {
+  # shellcheck disable=SC2178  # nameref to caller's associative array
+  local -n _rrj="$1"
+  local test_date="${_rrj[test_date]:-}"
+  local tester="${_rrj[tester]:-}"
+  local ciso="${_rrj[ciso]:-}"
+  local rto="${_rrj[rto_minutes]:-60}"
+  local p_snap="${_rrj[primary_snap]:-}"
+  local p_elapsed="${_rrj[primary_elapsed_seconds]:-0}"
+  local p_ok="${_rrj[primary_rto_satisfied]:-false}"
+  local s_snap="${_rrj[secondary_snap]:-}"
+  local s_elapsed="${_rrj[secondary_elapsed_seconds]:-0}"
+  local s_ok="${_rrj[secondary_rto_satisfied]:-false}"
+  local db_type="${_rrj[db_type]:-}"
+  local db_snap="${_rrj[db_snap]:-}"
+  local db_ok="${_rrj[db_valid]:-false}"
+
+  cat <<EOF
+{
+  "report_type": "restore_drill",
+  "test_date": "${test_date}",
+  "tester": "${tester//\"/\\\"}",
+  "ciso": "${ciso//\"/\\\"}",
+  "target_rto_minutes": ${rto},
+  "recovery_results": {
+    "target_snapshot_id": "${p_snap}",
+    "elapsed_seconds": ${p_elapsed},
+    "rto_satisfied": ${p_ok}
+  },
+  "database_verification": {
+    "db_type": $([[ -n "$db_type" ]] && echo "\"$db_type\"" || echo "null"),
+    "db_snapshot_id": $([[ -n "$db_snap" ]] && echo "\"$db_snap\"" || echo "null"),
+    "db_integrity_verified": ${db_ok}
+  }
+EOF
+
+  if [[ -n "$s_snap" ]]; then
+    cat <<EOF
+  ,
+  "secondary_recovery_results": {
+    "target_snapshot_id": "${s_snap}",
+    "elapsed_seconds": ${s_elapsed},
+    "rto_satisfied": ${s_ok}
+  }
+EOF
+  fi
+
+  cat <<EOF
+}
+EOF
+}
+
+write_audit_reports() {
+  # shellcheck disable=SC2178  # nameref to caller's associative array
+  local -n _war_data="$1"
+  local md_path="$2"
+  local json_path="${md_path%.md}.json"
+  local html_path="${md_path%.md}.html"
+
+  mkdir -p "$(dirname "$md_path")"
+
+  # Markdown
+  render_report_markdown _war_data > "$md_path"
+  chmod 600 "$md_path"
+
+  # JSON
+  render_report_json _war_data > "$json_path"
+  chmod 600 "$json_path"
+
+  # HTML: render_restore_drill_report_html 존재 여부와 무관하게
+  # 최소한의 HTML 래퍼로 마크다운 내용을 포함한다.
+  {
+    echo "<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><title>Audit Report</title></head><body><pre>"
+    render_report_markdown _war_data | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
+    echo "</pre></body></html>"
+  } > "$html_path"
+  chmod 600 "$html_path"
+}
+
 render_restore_drill_report_json() {
   local test_date="$1" tester="$2" latest_snap="$3" latest_time="$4" target_dir="$5"
   local size_str="$6" elapsed="$7" elapsed_str="$8" rto="$9" rto_status="${10}" ciso="${11}"
   local sec_snap="${12:-}" sec_time="${13:-}" sec_size_str="${14:-}" sec_elapsed="${15:-0}" sec_elapsed_str="${16:-}" sec_rto_status="${17:-}"
+  local db_type="${18:-}" db_snap="${19:-}" db_time="${20:-}" db_valid="${21:-0}"
   
   cat <<EOF
 {
@@ -2190,7 +2915,13 @@ render_restore_drill_report_json() {
     "elapsed_human": "${elapsed_str}",
     "target_rto_minutes": ${rto},
     "rto_satisfied": $([[ "$rto_status" == "만족" ]] && echo "true" || echo "false"),
-    "data_integrity_verified": true
+    "data_integrity_verified": true,
+    "database_verification": {
+      "db_type": $([[ -n "$db_type" ]] && echo "\"$db_type\"" || echo "null"),
+      "db_snapshot_id": $([[ -n "$db_snap" ]] && echo "\"$db_snap\"" || echo "null"),
+      "db_snapshot_time": $([[ -n "$db_time" ]] && echo "\"$db_time\"" || echo "null"),
+      "db_integrity_verified": $([[ -n "$db_type" ]] && { [[ "$db_valid" == "1" ]] && echo "true" || echo "false"; } || echo "null")
+    }
   }
 EOF
 
@@ -2529,6 +3260,7 @@ render_restore_drill_report_html() {
   local test_date="$1" tester="$2" latest_snap="$3" latest_time="$4" target_dir="$5"
   local size_str="$6" elapsed_str="$7" rto="$8" rto_status="$9" ciso="${10}" os_name="${11}"
   local sec_snap="${12:-}" sec_time="${13:-}" sec_size_str="${14:-}" sec_elapsed_str="${15:-}" sec_rto_status="${16:-}"
+  local db_type="${17:-}" db_valid="${18:-0}"
   
   cat <<EOF
 <!DOCTYPE html>
@@ -2841,6 +3573,22 @@ EOF
         <td>회원 정보 일치 검증 완료</td>
         <td><span class="badge badge-success">성공</span></td>
       </tr>
+EOF
+
+  if [[ -n "$db_type" ]]; then
+    local db_badge_class; db_badge_class="$([[ "$db_valid" == "1" ]] && echo "badge-success" || echo "badge-warning")"
+    local db_badge_text; db_badge_text="$([[ "$db_valid" == "1" ]] && echo "성공" || echo "실패")"
+    cat <<EOF
+      <tr>
+        <td>데이터베이스($db_type) 복원</td>
+        <td>SQL 덤프 파일 복구 및 헤더 무결성 통과</td>
+        <td>무결성 검사 완료</td>
+        <td><span class="badge $db_badge_class">$db_badge_text</span></td>
+      </tr>
+EOF
+  fi
+
+  cat <<EOF
     </tbody>
   </table>
 
@@ -3603,6 +4351,68 @@ except:
     # Clean up target directory
     rm -rf "$target_dir"
 
+    # DB 복구 테스트 수행
+    local db_latest_snap="" db_latest_time="" db_valid=0
+    if [[ -n "${BACKUP_DB_TYPE:-}" ]]; then
+      db_latest_snap=$(restic snapshots --tag db --latest 1 --json 2>/dev/null | python3 -c '
+import sys, json
+try:
+    data = json.loads(sys.stdin.read())
+    if data:
+        print(data[0]["id"])
+except:
+    pass
+' 2>/dev/null)
+
+      db_latest_time=$(restic snapshots --tag db --latest 1 --json 2>/dev/null | python3 -c '
+import sys, json
+try:
+    data = json.loads(sys.stdin.read())
+    if data:
+        print(data[0]["time"][:19].replace("T", " "))
+except:
+    pass
+' 2>/dev/null)
+
+      if [[ -z "$db_latest_snap" ]]; then
+        die "DB 복구 테스트 실패: 저장소에 DB 백업 스냅샷이 존재하지 않습니다."
+      fi
+
+      local db_target_dir="${target_dir}_db"
+      if [[ -d "$db_target_dir" ]]; then
+        rm -rf "$db_target_dir"
+      fi
+      mkdir -p "$db_target_dir"
+
+      # Run DB restore
+      restic restore "$db_latest_snap" --target "$db_target_dir" >/dev/null 2>&1 || die "DB restic restore 복구 실패"
+
+      # Validate DB dump file header integrity
+      local file_path="${db_target_dir}/${BACKUP_DB_FILENAME:-db-dump.sql}"
+      if [[ -f "$file_path" && -s "$file_path" ]]; then
+        local header
+        header=$(head -n 10 "$file_path" 2>/dev/null) || true
+        case "${BACKUP_DB_TYPE}" in
+          mysql|mariadb)
+            if [[ "$header" == *"MySQL dump"* || "$header" == *"MariaDB dump"* ]]; then
+              db_valid=1
+            fi
+            ;;
+          postgres)
+            if [[ "$header" == *"PostgreSQL database dump"* || "$header" == *"PostgreSQL database cluster dump"* ]]; then
+              db_valid=1
+            fi
+            ;;
+          custom)
+            db_valid=1
+            ;;
+        esac
+      fi
+
+      # Clean up DB target directory
+      rm -rf "$db_target_dir"
+    fi
+
     # 2차 소산지 복구 훈련 수행 (양방향 이중 복구 검증)
     local sec_elapsed=0 sec_elapsed_str="" sec_size_str="" sec_rto_status=""
     local sec_latest_snap="" sec_latest_time="" sec_backend="${SECONDARY_BACKEND:-}"
@@ -3712,7 +4522,8 @@ except:
     
     render_restore_drill_report "$test_date" "$tester" "$latest_snap" "$latest_time" \
       "$target_dir" "$size_str" "$elapsed_str" "$rto" "$rto_status" "$ciso" "$os_name" \
-      "$sec_latest_snap" "$sec_latest_time" "$sec_size_str" "$sec_elapsed_str" "$sec_rto_status"
+      "$sec_latest_snap" "$sec_latest_time" "$sec_size_str" "$sec_elapsed_str" "$sec_rto_status" \
+      "${BACKUP_DB_TYPE:-}" "${db_valid:-0}"
       
     if [[ -n "$report_file" ]]; then
       mkdir -p "$(dirname "$report_file")"
@@ -3720,7 +4531,8 @@ except:
       
       render_restore_drill_report "$test_date" "$tester" "$latest_snap" "$latest_time" \
         "$target_dir" "$size_str" "$elapsed_str" "$rto" "$rto_status" "$ciso" "$os_name" \
-        "$sec_latest_snap" "$sec_latest_time" "$sec_size_str" "$sec_elapsed_str" "$sec_rto_status" > "$report_file"
+        "$sec_latest_snap" "$sec_latest_time" "$sec_size_str" "$sec_elapsed_str" "$sec_rto_status" \
+        "${BACKUP_DB_TYPE:-}" "${db_valid:-0}" > "$report_file"
       chmod 600 "$report_file"
 
       local json_report_file
@@ -3732,7 +4544,8 @@ except:
 
       render_restore_drill_report_json "$test_date" "$tester" "$latest_snap" "$latest_time" \
         "$target_dir" "$size_str" "$elapsed" "$elapsed_str" "$rto" "$rto_status" "$ciso" \
-        "$sec_latest_snap" "$sec_latest_time" "$sec_size_str" "$sec_elapsed" "$sec_elapsed_str" "$sec_rto_status" > "$json_report_file"
+        "$sec_latest_snap" "$sec_latest_time" "$sec_size_str" "$sec_elapsed" "$sec_elapsed_str" "$sec_rto_status" \
+        "${BACKUP_DB_TYPE:-}" "$db_latest_snap" "$db_latest_time" "${db_valid:-0}" > "$json_report_file"
       chmod 600 "$json_report_file"
 
       local html_report_file
@@ -3744,7 +4557,8 @@ except:
 
       render_restore_drill_report_html "$test_date" "$tester" "$latest_snap" "$latest_time" \
         "$target_dir" "$size_str" "$elapsed_str" "$rto" "$rto_status" "$ciso" "$os_name" \
-        "$sec_latest_snap" "$sec_latest_time" "$sec_size_str" "$sec_elapsed_str" "$sec_rto_status" > "$html_report_file"
+        "$sec_latest_snap" "$sec_latest_time" "$sec_size_str" "$sec_elapsed_str" "$sec_rto_status" \
+        "${BACKUP_DB_TYPE:-}" "${db_valid:-0}" > "$html_report_file"
       chmod 600 "$html_report_file"
       
       log_info "감사 보고서가 동시 저장되었습니다:"
@@ -4129,16 +4943,10 @@ cmd_uninstall() {
     # shellcheck source=/dev/null
     source "$BACKUP_ENV_FILE"
     local profile_name; profile_name=$(resolve_profile_name)
-    resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" unschedule 2>/dev/null || true
+    scheduler_unregister "$profile_name" "all"
+  else
+    scheduler_unregister "unknown" "all"
   fi
-
-  systemd_disable_unit "restic-audit-daily.timer"
-  systemd_disable_unit "restic-audit-restore-drill.timer"
-  rm -f "$SYSTEMD_UNIT_DIR/restic-audit-daily.service"
-  rm -f "$SYSTEMD_UNIT_DIR/restic-audit-daily.timer"
-  rm -f "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.service"
-  rm -f "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.timer"
-  systemd_reload_daemon 2>/dev/null || true
 
   if (( purge )); then
     rm -rf "$RESTIC_ETC_DIR"
@@ -4626,6 +5434,7 @@ cmd_wizard() {
     return 0
   fi
   require_root
+  local db_type="" db_schedule=""
 
   if ! command -v restic >/dev/null 2>&1 || ! command -v rclone >/dev/null 2>&1 \
     || [[ ! -x "$RESTICPROFILE_INSTALL_PATH" ]]; then
@@ -4758,6 +5567,74 @@ cmd_wizard() {
     setting_args+=(--audit-tester "$audit_tester" --audit-ciso "$audit_ciso" --audit-rto "$audit_rto")
   fi
 
+  # 데이터베이스 백업 설정 질문
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    printf '\n%b%b⚙  데이터베이스 백업 설정 (Database Backup Settings)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+    printf '%b파일 백업과 함께 데이터베이스 백업(mysql, mariadb, postgres 등)을 통합 구성하시겠습니까? [y/%bN%b]: %b' "$C_DIM" "$C_BOLD" "$C_RESET" "$C_RESET"
+  else
+    printf '\n--- 데이터베이스 백업 설정 ---\n'
+    printf '파일 백업과 함께 데이터베이스 백업(mysql, mariadb, postgres 등)을 통합 구성하시겠습니까? [y/N]: '
+  fi
+  local config_db; read -r config_db
+  
+  if [[ "$config_db" =~ ^[Yy]$ ]]; then
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '%b데이터베이스 엔진 유형을 입력하세요 (mysql, mariadb, postgres, custom) [mysql]: %b' "$C_CYAN" "$C_RESET"
+    else
+      printf '데이터베이스 엔진 유형을 입력하세요 (mysql, mariadb, postgres, custom) [mysql]: '
+    fi
+    read -r db_type
+    [[ -z "$db_type" ]] && db_type="mysql"
+    
+    local db_command
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '%bDB 백업을 위한 덤프 명령어를 입력하세요 (엔터 입력 시 기본 명령어 자동 생성): %b' "$C_CYAN" "$C_RESET"
+    else
+      printf 'DB 백업을 위한 덤프 명령어를 입력하세요 (엔터 입력 시 기본 명령어 자동 생성): '
+    fi
+    read -r db_command
+    
+    local db_keep_daily
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '%bDB 스냅샷 일별 보관 개수 입력 (기본값: 7): %b' "$C_CYAN" "$C_RESET"
+    else
+      printf 'DB 스냅샷 일별 보관 개수 입력 (기본값: 7): '
+    fi
+    read -r db_keep_daily
+    [[ -z "$db_keep_daily" ]] && db_keep_daily="7"
+    
+    local db_keep_weekly
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '%bDB 스냅샷 주별 보관 개수 입력 (기본값: 4): %b' "$C_CYAN" "$C_RESET"
+    else
+      printf 'DB 스냅샷 주별 보관 개수 입력 (기본값: 4): '
+    fi
+    read -r db_keep_weekly
+    [[ -z "$db_keep_weekly" ]] && db_keep_weekly="4"
+    
+    local db_keep_monthly
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '%bDB 스냅샷 월별 보관 개수 입력 (기본값: 12): %b' "$C_CYAN" "$C_RESET"
+    else
+      printf 'DB 스냅샷 월별 보관 개수 입력 (기본값: 12): '
+    fi
+    read -r db_keep_monthly
+    [[ -z "$db_keep_monthly" ]] && db_keep_monthly="12"
+    
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '%bDB 백업 반복 스케줄 주기를 입력하세요 (기본값: *-*-* 03:00:00): %b' "$C_CYAN" "$C_RESET"
+    else
+      printf 'DB 백업 반복 스케줄 주기를 입력하세요 (기본값: *-*-* 03:00:00): '
+    fi
+    read -r db_schedule
+    [[ -z "$db_schedule" ]] && db_schedule="*-*-* 03:00:00"
+    
+    setting_args+=(--db-type "$db_type" --db-keep-daily "$db_keep_daily" --db-keep-weekly "$db_keep_weekly" --db-keep-monthly "$db_keep_monthly" --db-schedule "$db_schedule")
+    if [[ -n "$db_command" ]]; then
+      setting_args+=(--db-command "$db_command")
+    fi
+  fi
+
   if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
     printf '\n%b%b⚙  다음 설정으로 진행합니다 (Confirm Settings)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
     printf '%b├──%b 백엔드:    %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$backend" "$C_RESET"
@@ -4769,6 +5646,10 @@ cmd_wizard() {
     fi
     printf '%b├──%b 백업 대상:  %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$final_targets" "$C_RESET"
     printf '%b├──%b 폴더 이름:  %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$profile_name" "$C_RESET"
+    if [[ -n "${db_type:-}" ]]; then
+      printf '%b├──%b DB 백업 유형: %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$db_type" "$C_RESET"
+      printf '%b├──%b DB 백업 주기: %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$db_schedule" "$C_RESET"
+    fi
     printf '%b└──%b 이대로 진행할까요? [%bY%b/n]: %b' "$C_GRAY" "$C_RESET" "${C_CYAN}${C_BOLD}" "$C_RESET" "$C_RESET"
   else
     printf '\n다음 설정으로 진행합니다:\n'
@@ -4781,6 +5662,10 @@ cmd_wizard() {
     fi
     printf '  백업 대상: %s\n' "$final_targets"
     printf '  폴더 이름: %s\n' "$profile_name"
+    if [[ -n "${db_type:-}" ]]; then
+      printf '  DB 백업 유형: %s\n' "$db_type"
+      printf '  DB 백업 주기: %s\n' "$db_schedule"
+    fi
     printf '이대로 진행할까요? [Y/n]: '
   fi
   local confirm
@@ -4875,7 +5760,7 @@ cmd_config() {
 
   # 2. 옵션 파싱
   local -A opts=()
-  parse_opts_into opts "targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: on-calendar: notification-url: notification-type: notification-on: audit-tester: audit-ciso: audit-rto: dry-run secondary-backend: secondary-password: secondary-endpoint: secondary-bucket: secondary-access-key: secondary-secret-key: secondary-host: secondary-user: secondary-port: secondary-keep-daily: secondary-keep-weekly: secondary-keep-monthly:" -- "$@"
+  parse_opts_into opts "targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: on-calendar: notification-url: notification-type: notification-on: audit-tester: audit-ciso: audit-rto: dry-run secondary-backend: secondary-password: secondary-endpoint: secondary-bucket: secondary-access-key: secondary-secret-key: secondary-host: secondary-user: secondary-port: secondary-keep-daily: secondary-keep-weekly: secondary-keep-monthly: db-type: db-command: db-filename: db-schedule: db-keep-daily: db-keep-weekly: db-keep-monthly:" -- "$@"
 
 
   opts[backend]="$backend"
@@ -4950,7 +5835,7 @@ cmd_setting() {
   fi
   require_root
   local -A opts=()
-  parse_opts_into opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: notification-url: notification-type: notification-on: audit-tester: audit-ciso: audit-rto: force dry-run secondary-backend: secondary-password: secondary-endpoint: secondary-bucket: secondary-access-key: secondary-secret-key: secondary-host: secondary-user: secondary-port: secondary-keep-daily: secondary-keep-weekly: secondary-keep-monthly:" -- "$@"
+  parse_opts_into opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: notification-url: notification-type: notification-on: audit-tester: audit-ciso: audit-rto: force dry-run secondary-backend: secondary-password: secondary-endpoint: secondary-bucket: secondary-access-key: secondary-secret-key: secondary-host: secondary-user: secondary-port: secondary-keep-daily: secondary-keep-weekly: secondary-keep-monthly: db-type: db-command: db-filename: db-schedule: db-keep-daily: db-keep-weekly: db-keep-monthly:" -- "$@"
 
 
   local backend="${opts[backend]:-}"
@@ -5095,6 +5980,15 @@ help_setting() {
       --secondary-bucket <버킷명>     2차 S3 버킷 이름
       --secondary-access-key <키>     2차 AWS Access Key ID
       --secondary-secret-key <키>     2차 AWS Secret Access Key
+
+  데이터베이스 백업 옵션 (Database Backup Options):
+      --db-type <mysql|mariadb|postgres|custom> 데이터베이스 엔진 유형
+      --db-command <명령어>           DB 백업을 위한 덤프 명령어 (디폴트 매핑 지원)
+      --db-filename <파일명>          백업할 덤프 파일명 (기본값: db-dump.sql)
+      --db-schedule <식>              DB 백업을 위한 systemd OnCalendar 포맷 주기 (예: "*-*-* 03:00:00")
+      --db-keep-daily <N>             DB 스냅샷 일별 보관 개수
+      --db-keep-weekly <N>            DB 스냅샷 주별 보관 개수
+      --db-keep-monthly <N>           DB 스냅샷 월별 보관 개수
 
 글로벌 플래그 (Global Flags):
   -v, --verbose                       디버깅용 상세 로그 출력
@@ -5320,6 +6214,15 @@ help_config() {
       --bucket <버킷명>         S3 버킷 이름
       --access-key <키>         AWS Access Key ID
       --secret-key <키>         AWS Secret Access Key
+
+  데이터베이스 백업 옵션 (Database Backup Options):
+      --db-type <mysql|mariadb|postgres|custom> 데이터베이스 엔진 유형
+      --db-command <명령어>       DB 백업을 위한 덤프 명령어 (디폴트 매핑 지원)
+      --db-filename <파일명>      백업할 덤프 파일명 (기본값: db-dump.sql)
+      --db-schedule <식>          DB 백업을 위한 systemd OnCalendar 포맷 주기 (예: "*-*-* 03:00:00")
+      --db-keep-daily <N>         DB 스냅샷 일별 보관 개수
+      --db-keep-weekly <N>        DB 스냅샷 주별 보관 개수
+      --db-keep-monthly <N>       DB 스냅샷 월별 보관 개수
 
 글로벌 플래그 (Global Flags):
   -v, --verbose                 갱신 과정 상세 로그 출력

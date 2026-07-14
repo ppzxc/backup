@@ -38,7 +38,7 @@ setup() {
 @test "wizard walks through sftp setup end to end and writes backup.env" {
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
-    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\ny\n" | cmd_wizard
+    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\n\ny\n\n\n" | cmd_wizard
   '
   echo "WIZARD_STATUS: $status"
   echo "WIZARD_OUTPUT: $output"
@@ -77,7 +77,7 @@ setup() {
 @test "wizard answering no at the confirm step cancels without applying settings" {
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
-    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\nn\n" | cmd_wizard
+    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\nn\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
   [ ! -f "$BACKUP_ENV_FILE" ]
@@ -87,7 +87,7 @@ setup() {
 @test "wizard re-prompts instead of dying on an invalid backend choice" {
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
-    printf "9\n2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\ny\n" | cmd_wizard
+    printf "9\n2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\n\ny\n\n\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
   [ -f "$BACKUP_ENV_FILE" ]
@@ -97,7 +97,7 @@ setup() {
 @test "wizard re-prompts on an empty required field instead of accepting it" {
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
-    printf "2\n\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\ny\n" | cmd_wizard
+    printf "2\n\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\n\ny\n\n\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
   grep -q 'RCLONE_CONFIG_SYNO_BACKUP_HOST="1.2.3.4"' "$BACKUP_ENV_FILE"
@@ -107,7 +107,7 @@ setup() {
 @test "wizard re-prompts on an invalid port and accepts the default on retry" {
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
-    printf "2\n1.2.3.4\nabc\n\nbackup_restic\n\nrepo-pass\n\n\n\n\n\ny\n" | cmd_wizard
+    printf "2\n1.2.3.4\nabc\n\nbackup_restic\n\nrepo-pass\n\n\n\n\n\n\ny\n\n\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
   [[ "$output" == *"port must be numeric"* ]]
@@ -117,7 +117,7 @@ setup() {
 @test "wizard shows the port default inline instead of a separate sentence" {
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
-    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\ny\n" | cmd_wizard
+    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\n\ny\n\n\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
   [[ "$output" == *"[22]"* ]]
@@ -144,7 +144,7 @@ setup() {
 
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
-    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\ny\n" | cmd_wizard
+    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\n\ny\n\n\n" | cmd_wizard
   '
   [[ "$output" == *"패키지를 설치합니다"* ]]
   run cat "${STUB_BIN}/curl.calls"
@@ -156,7 +156,7 @@ setup() {
 
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
-    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\ny\n" | cmd_wizard
+    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\n\ny\n\n\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
   [[ "$output" != *"패키지를 설치합니다"* ]]
@@ -166,7 +166,7 @@ setup() {
 @test "wizard configures custom targets and excludes default targets if requested" {
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
-    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\nn\n/var/www\n\n\n\ny\n" | cmd_wizard
+    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\nn\n/var/www\n\n\n\n\ny\n\n\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
   [ -f "$BACKUP_ENV_FILE" ]
@@ -176,7 +176,7 @@ setup() {
 @test "wizard prompts for a custom folder name after sftp connection info" {
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
-    printf "2\n1.2.3.4\n22\nbackup_restic\nmy-nas-box\nrepo-pass\n\n\n\n\n\ny\n" | cmd_wizard
+    printf "2\n1.2.3.4\n22\nbackup_restic\nmy-nas-box\nrepo-pass\n\n\n\n\n\n\ny\n\n\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
   grep -q 'BACKUP_PROFILE_NAME="my-nas-box"' "$BACKUP_ENV_FILE"
@@ -186,7 +186,7 @@ setup() {
 @test "wizard uses hostname as default folder name when Enter is pressed at the profile-name prompt" {
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
-    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\ny\n" | cmd_wizard
+    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\n\ny\n\n\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
   local hostname_val; hostname_val=$(hostname)
@@ -196,7 +196,7 @@ setup() {
 @test "wizard shows folder name in confirm summary" {
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
-    printf "2\n1.2.3.4\n22\nbackup_restic\nmy-nas-box\nrepo-pass\n\n\n\n\n\ny\n" | cmd_wizard
+    printf "2\n1.2.3.4\n22\nbackup_restic\nmy-nas-box\nrepo-pass\n\n\n\n\n\n\ny\n\n\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
   [[ "$output" == *"my-nas-box"* ]]
@@ -205,7 +205,7 @@ setup() {
 @test "wizard configures audit report settings when requested" {
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
-    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\ny\n임꺽정\n정보보안부장 CISO\n60\n\n\ny\n" | cmd_wizard
+    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\ny\n임꺽정\n정보보안부장 CISO\n60\n\n\n\ny\n\n\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
   [ -f "$BACKUP_ENV_FILE" ]
@@ -215,3 +215,17 @@ setup() {
 }
 
 
+
+
+@test "wizard configures DB backup settings when requested" {
+  run bash -c '
+    source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
+    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\nn\ny\nmariadb\n\n7\n4\n12\n\ny\n\n\n" | cmd_wizard
+  '
+  [ "$status" -eq 0 ]
+  [ -f "$BACKUP_ENV_FILE" ]
+  grep -q "BACKUP_DB_TYPE='mariadb'" "$BACKUP_ENV_FILE"
+  grep -q "BACKUP_DB_COMMAND='mariadb-dump --all-databases --single-transaction --quick --order-by-primary'" "$BACKUP_ENV_FILE"
+  grep -q "KEEP_DB_DAILY='7'" "$BACKUP_ENV_FILE"
+  grep -q "BACKUP_DB_SCHEDULE='.*03:00:00'" "$BACKUP_ENV_FILE"
+}

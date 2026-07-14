@@ -85,6 +85,6 @@ ENV
   # 1차 백업 호출 검증
   [[ "$output" == *"--name web01 backup"* ]]
   # 2차 copy 호출 검증
-  [[ "$output" == *"--name web01 copy --to web01-secondary"* ]]
+  [[ "$output" == *"--name web01-secondary copy"* ]]
 }
 

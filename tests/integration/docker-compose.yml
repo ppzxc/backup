@@ -16,11 +16,49 @@ services:
     volumes:
       - sftp_data:/home/backup_restic/upload
 
+  mariadb-5-5:
+    image: mariadb:5.5
+    environment:
+      MYSQL_ROOT_PASSWORD: testpass
+      MYSQL_DATABASE: testdb
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 2s
+      retries: 20
+
+  mariadb-latest:
+    image: mariadb:latest
+    environment:
+      MARIADB_ROOT_PASSWORD: testpass
+      MARIADB_DATABASE: testdb
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h localhost || exit 1"]
+      interval: 2s
+      retries: 20
+
+  postgres-13:
+    image: postgres:13
+    environment:
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: testdb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d testdb || exit 1"]
+      interval: 2s
+      retries: 20
+
   app:
     image: rockylinux:9
     depends_on:
-      - minio
-      - sftp
+      minio:
+        condition: service_healthy
+      sftp:
+        condition: service_started
+      mariadb-5-5:
+        condition: service_healthy
+      mariadb-latest:
+        condition: service_healthy
+      postgres-13:
+        condition: service_healthy
     volumes:
       - ../../backup.sh:/workspace/backup.sh:ro
       - ./run.sh:/workspace/run.sh:ro

@@ -63,3 +63,49 @@ ENV
   [[ "$output" == *"inactive"* ]]
   [[ "$output" != *$'\nunknown'* ]]
 }
+
+@test "cmd_status displays DB timer and isolates DB snapshots" {
+  mkdir -p "$RESTIC_ETC_DIR"
+  chmod 700 "$RESTIC_ETC_DIR"
+  cat > "$BACKUP_ENV_FILE" <<'ENV'
+export RESTIC_REPOSITORY="rclone:syno_backup:/backup/host1"
+export RESTIC_PASSWORD="super-secret"
+export BACKUP_TARGETS="/var/log"
+export BACKUP_PROFILE_NAME="host1"
+export BACKUP_DB_TYPE="mysql"
+ENV
+  chmod 600 "$BACKUP_ENV_FILE"
+
+  stub_command "restic" '
+    if [[ "$*" == *"snapshots"* ]]; then
+      echo "[
+        {\"id\":\"1a2b3c4d\",\"time\":\"2026-07-14T02:00:00Z\",\"hostname\":\"host1\",\"paths\":[\"/var/log\"],\"tags\":[]},
+        {\"id\":\"5e6f7g8h\",\"time\":\"2026-07-14T03:00:00Z\",\"hostname\":\"host1\",\"paths\":[\"db-dump.sql\"],\"tags\":[\"db\"]}
+      ]"
+    fi
+  '
+  stub_command "systemctl" '
+    if [[ "$*" == *"is-active"* ]]; then
+      echo "active"
+      exit 0
+    fi
+  '
+
+  run cmd_status
+  [ "$status" -eq 0 ]
+
+  [[ "$output" == *"DB 백업 타이머:  active"* ]]
+
+  local file_snapshots_part
+  file_snapshots_part=$(echo "$output" | sed -n '/\[파일 백업 스냅샷\]/,/\[DB 백업 스냅샷\]/p')
+  [[ "$file_snapshots_part" == *"1a2b3c4d"* ]]
+  [[ "$file_snapshots_part" == *"/var/log"* ]]
+  [[ "$file_snapshots_part" != *"5e6f7g8h"* ]]
+
+  local db_snapshots_part
+  db_snapshots_part=$(echo "$output" | sed -n '/\[DB 백업 스냅샷\]/,$p')
+  [[ "$db_snapshots_part" == *"5e6f7g8h"* ]]
+  [[ "$db_snapshots_part" == *"db-dump.sql"* ]]
+  [[ "$db_snapshots_part" != *"1a2b3c4d"* ]]
+}
+

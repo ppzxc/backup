@@ -204,7 +204,44 @@ setup() {
   [[ "$output" == *"AWS_SECRET_ACCESS_KEY: \"SEC_SK\""* ]]
   [[ "$output" == *"keep-daily: 30"* ]]
   [[ "$output" == *"keep-weekly: 12"* ]]
+  [[ "$output" == *"keep-weekly: 12"* ]]
   [[ "$output" == *"keep-monthly: 12"* ]]
 }
+
+@test "render_resticprofile_config renders db profile section when configured" {
+  export RESTIC_REPOSITORY="s3:https://s3.example.com/my-bucket/host1"
+  export RESTIC_PASSWORD="super-secret"
+  export BACKUP_TARGETS="/var/log"
+  export KEEP_DAILY="7"
+  export KEEP_WEEKLY="4"
+  export KEEP_MONTHLY="12"
+  
+  export BACKUP_DB_TYPE="mysql"
+  export BACKUP_DB_COMMAND="mysqldump --all"
+  export BACKUP_DB_FILENAME="test-db.sql"
+  export BACKUP_DB_SCHEDULE="*-*-* 03:00:00"
+  export KEEP_DB_DAILY="5"
+  export KEEP_DB_WEEKLY="2"
+  export KEEP_DB_MONTHLY="1"
+
+  run render_resticprofile_config "web01" "*-*-* 02:00:00"
+  [ "$status" -eq 0 ]
+
+  # DB 프로필 명칭 확인 (inherit 없이 독립 프로필)
+  [[ "$output" == *"web01-db:"* ]]
+  [[ "$output" == *"repository: \"s3:https://s3.example.com/my-bucket/host1\""* ]]
+  [[ "$output" == *"stdin: true"* ]]
+  [[ "$output" == *"stdin-command: \"mysqldump --all\""* ]]
+  [[ "$output" == *"stdin-filename: \"test-db.sql\""* ]]
+  [[ "$output" == *"schedule: \"*-*-* 03:00:00\""* ]]
+  [[ "$output" == *"keep-daily: 5"* ]]
+  [[ "$output" == *"keep-weekly: 2"* ]]
+  [[ "$output" == *"keep-monthly: 1"* ]]
+  [[ "$output" == *"tag:"* ]]
+  [[ "$output" == *"- db"* ]]
+  # inherit이 없어야 한다 (stdin과 source 충돌 방지)
+  [[ "$output" != *"inherit: web01"* ]]
+}
+
 
 
