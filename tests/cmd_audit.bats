@@ -129,14 +129,20 @@ ENV
   [[ "$output" == *"${BACKUP_ENV_FILE} 권한: 600"* ]]
 }
 
-@test "cmd_audit --report-file writes txt and json files concurrently" {
+@test "cmd_audit --report-file writes txt, json, and html files concurrently" {
   local r_file="${TEST_ROOT}/var/log/audit_report.txt"
   local j_file="${TEST_ROOT}/var/log/audit_report.json"
+  local h_file="${TEST_ROOT}/var/log/audit_report.html"
 
   run cmd_audit --report-file "$r_file"
   [ "$status" -eq 0 ]
   [ -f "$r_file" ]
   [ -f "$j_file" ]
+  [ -f "$h_file" ]
+
+  # Check permissions (600)
+  local h_perm; h_perm=$(stat -c "%a" "$h_file")
+  [ "$h_perm" = "600" ]
 
   # Check text report content (Plain Text format, not TTY formatted)
   run cat "$r_file"
@@ -149,6 +155,12 @@ ENV
   [ "$status" -eq 0 ]
   [[ "$output" == *"\"backend\": \"sftp\""* ]]
   [[ "$output" == *"\"keep_daily\": 7"* ]]
+
+  # Check HTML report content
+  run cat "$h_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"<!DOCTYPE html>"* ]]
+  [[ "$output" == *"종합 백업 보안 설정 검토 보고서"* ]]
 }
 
 @test "cmd_audit fails when both --daily and --restore-drill are passed" {

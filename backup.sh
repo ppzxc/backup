@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.16"
+BACKUP_SCRIPT_VERSION="0.0.17"
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -2467,6 +2467,295 @@ render_audit_report() {
   fi
 }
 
+render_audit_report_html() {
+  local backend="$1" on_calendar="$2" timer_enabled="$3" timer_active="$4" next_run="$5"
+  local etc_perm="$6" env_perm="$7" snapshot_table_html="$8"
+  
+  local backend_desc="SFTP (Synology NAS)"
+  if [[ "$backend" == "s3" ]]; then
+    backend_desc="S3 (S3 Bucket)"
+  fi
+  
+  local encrypted_note="AES-256 (restic 저장소 자체 암호화)"
+  local crypto_class="badge-success"
+  if [[ -z "${RESTIC_PASSWORD:-}" ]]; then
+    encrypted_note="${encrypted_note} - 경고: 비밀번호 미설정"
+    crypto_class="badge-warning"
+  fi
+
+  cat <<EOF
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>종합 백업 보안 설정 검토 보고서</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+    body {
+      font-family: 'Inter', 'Malgun Gothic', sans-serif;
+      color: #1e293b;
+      margin: 0;
+      padding: 20px;
+      background-color: #f8fafc;
+    }
+    .report-card {
+      max-width: 800px;
+      margin: 0 auto;
+      background: #ffffff;
+      padding: 40px;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+    }
+    header {
+      text-align: center;
+      border-bottom: 2px solid #0f172a;
+      padding-bottom: 20px;
+      margin-bottom: 30px;
+    }
+    h1 {
+      font-size: 20pt;
+      font-weight: 700;
+      margin: 0 0 10px 0;
+      color: #0f172a;
+    }
+    .meta-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 30px;
+    }
+    .meta-table td {
+      padding: 8px 12px;
+      font-size: 10pt;
+      border: 1px solid #cbd5e1;
+    }
+    .meta-table td.label {
+      background-color: #f1f5f9;
+      font-weight: 600;
+      width: 20%;
+    }
+    h2 {
+      font-size: 12pt;
+      font-weight: 600;
+      border-left: 4px solid #3b82f6;
+      padding-left: 10px;
+      margin: 25px 0 12px 0;
+      color: #1e293b;
+    }
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 20px;
+    }
+    .data-table th, .data-table td {
+      border: 1px solid #cbd5e1;
+      padding: 8px 12px;
+      font-size: 9.5pt;
+      text-align: left;
+    }
+    .data-table th {
+      background-color: #f8fafc;
+      font-weight: 600;
+      color: #475569;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 8.5pt;
+      font-weight: 600;
+    }
+    .badge-success {
+      background-color: #dcfce7;
+      color: #15803d;
+    }
+    .badge-warning {
+      background-color: #fee2e2;
+      color: #b91c1c;
+    }
+    .signature-area {
+      margin-top: 40px;
+      display: flex;
+      justify-content: flex-end;
+      gap: 30px;
+    }
+    .signature-box {
+      border: 1px solid #cbd5e1;
+      width: 120px;
+      text-align: center;
+      font-size: 9.5pt;
+    }
+    .signature-box .title {
+      background-color: #f1f5f9;
+      padding: 4px;
+      font-weight: 600;
+      border-bottom: 1px solid #cbd5e1;
+    }
+    .signature-box .sign {
+      height: 50px;
+      line-height: 50px;
+      color: #94a3b8;
+    }
+    @media print {
+      body {
+        background-color: #ffffff;
+        padding: 0;
+        margin: 0;
+      }
+      .report-card {
+        border: none;
+        box-shadow: none;
+        padding: 0;
+        max-width: 100%;
+      }
+      @page {
+        size: A4;
+        margin: 15mm;
+      }
+    }
+  </style>
+</head>
+<body>
+
+<div class="report-card">
+  <header>
+    <h1>종합 백업 보안 설정 검토 보고서</h1>
+    <div style="font-size: 9pt; color: #64748b;">정보보호 관리체계(ISMS) 백업 감사 증적 서류</div>
+  </header>
+
+  <table class="meta-table">
+    <tr>
+      <td class="label">보고서 생성일시</td>
+      <td>$(date "+%Y-%m-%d %H:%M:%S KST")</td>
+      <td class="label">대상 서버 호스트</td>
+      <td>$(hostname 2>/dev/null || echo "unknown")</td>
+    </tr>
+    <tr>
+      <td class="label">백업 백엔드</td>
+      <td>$backend_desc</td>
+      <td class="label">암호화 상태</td>
+      <td><span class="badge $crypto_class">$encrypted_note</span></td>
+    </tr>
+    <tr>
+      <td class="label">원격 저장소 주소</td>
+      <td colspan="3" style="word-break: break-all;">${RESTIC_REPOSITORY:-알 수 없음}</td>
+    </tr>
+    <tr>
+      <td class="label">백업 대상 경로</td>
+      <td colspan="3">${BACKUP_TARGETS:-알 수 없음} (제외 패턴: ${BACKUP_EXCLUDES:-(없음)})</td>
+    </tr>
+  </table>
+
+  <h2>1. 보존 정책 (Retention Rule)</h2>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>보관 정책 구분</th>
+        <th>설정된 보관 개수</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>일간 보관 (Keep-Daily)</td>
+        <td>${KEEP_DAILY:-?}개</td>
+      </tr>
+      <tr>
+        <td>주간 보관 (Keep-Weekly)</td>
+        <td>${KEEP_WEEKLY:-?}개</td>
+      </tr>
+      <tr>
+        <td>월간 보관 (Keep-Monthly)</td>
+        <td>${KEEP_MONTHLY:-?}개</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>2. 백업 스케줄링 (Systemd Timer) 상태</h2>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>설정 항목</th>
+        <th>현재 상태 및 값</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>반복 주기 (OnCalendar)</td>
+        <td>$on_calendar</td>
+      </tr>
+      <tr>
+        <td>타이머 등록 여부</td>
+        <td><span class="badge $([[ "$timer_enabled" == "enabled" ]] && echo "badge-success" || echo "badge-warning")">$timer_enabled</span></td>
+      </tr>
+      <tr>
+        <td>타이머 활성화 여부</td>
+        <td><span class="badge $([[ "$timer_active" == "active" ]] && echo "badge-success" || echo "badge-warning")">$timer_active</span></td>
+      </tr>
+      <tr>
+        <td>다음 백업 실행 예정</td>
+        <td>$next_run</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>3. 접근 통제 (Access Control)</h2>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>점검 대상</th>
+        <th>권장 기준</th>
+        <th>현재 권한</th>
+        <th>보안 평가</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>설정 디렉터리 ($RESTIC_ETC_DIR)</td>
+        <td>700 권장</td>
+        <td>$etc_perm</td>
+        <td><span class="badge $([[ "$etc_perm" == "700" ]] && echo "badge-success" || echo "badge-warning")">$([[ "$etc_perm" == "700" ]] && echo "안전" || echo "경고")</span></td>
+      </tr>
+      <tr>
+        <td>자격증명 파일 ($BACKUP_ENV_FILE)</td>
+        <td>600 권장</td>
+        <td>$env_perm</td>
+        <td><span class="badge $([[ "$env_perm" == "600" ]] && echo "badge-success" || echo "badge-warning")">$([[ "$env_perm" == "600" ]] && echo "안전" || echo "경고")</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>4. 백업 이력 (Snapshots)</h2>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>백업 완료 일시</th>
+        <th>호스트</th>
+        <th>경로 및 용량</th>
+      </tr>
+    </thead>
+    <tbody>
+      $snapshot_table_html
+    </tbody>
+  </table>
+
+  <div class="signature-area">
+    <div class="signature-box">
+      <div class="title">검토자</div>
+      <div class="sign">시스템 운영팀 (인)</div>
+    </div>
+    <div class="signature-box">
+      <div class="title">승인자</div>
+      <div class="sign">정보보안책임자 (서명생략)</div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
+EOF
+}
+
 render_audit_report_json() {
   local backend="$1" on_calendar="$2" timer_enabled="$3" timer_active="$4" next_run="$5" etc_perm="$6" env_perm="$7"
 
@@ -2981,9 +3270,72 @@ except Exception as e:
       "$etc_perm" "$env_perm" > "$json_report_file"
     chmod 600 "$json_report_file"
 
+    # Generate HTML snapshot table
+    local snapshots_json
+    snapshots_json=$(restic snapshots --json 2>/dev/null || echo "[]")
+    
+    local snapshot_table_html
+    snapshot_table_html=$(python3 -c '
+import sys, json, subprocess
+try:
+    content = sys.stdin.read().strip()
+    if not content or content == "[]":
+        print("<tr><td colspan=\"4\">(스냅샷 없음)</td></tr>")
+        sys.exit(0)
+    data = json.loads(content)
+    data.sort(key=lambda x: x.get("time", ""), reverse=True)
+    recent = data[:3]
+    for snap in recent:
+        sid = snap.get("short_id", snap.get("id", "")[:8])
+        time_str = snap.get("time", "")[:19].replace("T", " ")
+        host = snap.get("hostname", "")
+        paths = ", ".join(snap.get("paths", []))
+        b = None
+        summary = snap.get("summary")
+        if isinstance(summary, dict) and "total_bytes_processed" in summary:
+            b = summary["total_bytes_processed"]
+        if b is None:
+            try:
+                res = subprocess.run(["restic", "stats", "--json", snap.get("id")], capture_output=True, text=True, timeout=5)
+                if res.returncode == 0:
+                    stats_data = json.loads(res.stdout)
+                    b = stats_data.get("total_size")
+            except Exception:
+                pass
+        size_str = ""
+        if b is not None:
+            if b >= 1073741824:
+                size_str = "%.2f GB" % (b / 1073741824.0)
+            elif b >= 1048576:
+                size_str = "%.2f MB" % (b / 1048576.0)
+            elif b >= 1024:
+                size_str = "%.2f KB" % (b / 1024.0)
+            else:
+                size_str = "%d B" % b
+        else:
+            size_str = "확인 불가"
+        print("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s (%s)</td></tr>" % (sid, time_str, host, paths, size_str))
+except Exception as e:
+    print("<tr><td colspan=\"4\">(스냅샷 정보 해석 실패: %s)</td></tr>" % e)
+' <<< "$snapshots_json")
+
+    # Save HTML report
+    local html_report_file
+    if [[ "$report_file" =~ \.(txt|md)$ ]]; then
+      html_report_file="${report_file%.*}.html"
+    else
+      html_report_file="${report_file}.html"
+    fi
+
+    render_audit_report_html "$backend" "${on_calendar:-알 수 없음}" "${timer_enabled:-unknown}" \
+      "${timer_active:-unknown}" "${next_run:-알 수 없음}" \
+      "$etc_perm" "$env_perm" "$snapshot_table_html" > "$html_report_file"
+    chmod 600 "$html_report_file"
+
     log_info "감사 보고서가 동시 저장되었습니다:"
     log_info "  - 텍스트 보고서: $report_file"
     log_info "  - JSON 보고서: $json_report_file"
+    log_info "  - HTML 보고서: $html_report_file"
   fi
 }
 
