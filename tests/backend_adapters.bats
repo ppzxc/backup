@@ -155,6 +155,42 @@ setup() {
   [[ "$output" == *"ListBucket"* ]]
 }
 
+@test "backend_sftp_configure uses profile_name as the repository folder, not hostname" {
+  mkdir -p "$RESTIC_ETC_DIR"
+  local -A resolved=()
+  resolved[host]="10.0.0.1"
+  resolved[port]="22"
+  resolved[user]="backup"
+  resolved[password]="pass"
+  resolved[targets]="/etc"
+  resolved[excludes_csv]=""
+  resolved[keep_daily]="7"
+  resolved[keep_weekly]="4"
+  resolved[keep_monthly]="12"
+  resolved[profile_name]="my-custom-server"
+  local output_env="" output_notice=""
+  backend_sftp_configure resolved output_env output_notice
+  [[ "$output_env" == *'RESTIC_REPOSITORY="rclone:syno_backup:/backup/my-custom-server"'* ]]
+}
+
+@test "backend_s3_configure uses profile_name as the repository folder, not hostname" {
+  local -A resolved=()
+  resolved[endpoint]="https://s3.example.com"
+  resolved[bucket]="mybucket"
+  resolved[access_key]="AK"
+  resolved[secret_key]="SK"
+  resolved[password]="pass"
+  resolved[targets]="/etc"
+  resolved[excludes_csv]=""
+  resolved[keep_daily]="7"
+  resolved[keep_weekly]="4"
+  resolved[keep_monthly]="12"
+  resolved[profile_name]="my-custom-server"
+  local output_env="" output_notice=""
+  backend_s3_configure resolved output_env output_notice
+  [[ "$output_env" == *'RESTIC_REPOSITORY="s3:https://s3.example.com/mybucket/my-custom-server"'* ]]
+}
+
 @test "backend_sftp_configure renders env and notice using resolved config" {
   mkdir -p "$RESTIC_ETC_DIR"
   local -A resolved=()

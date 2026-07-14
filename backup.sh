@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.7"
+BACKUP_SCRIPT_VERSION="0.0.8"
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -963,7 +963,7 @@ backend_sftp_configure() {
 
   # Render Env
   _out_env=$(cat <<EOF
-export RESTIC_REPOSITORY="rclone:syno_backup:/backup/$(hostname)"
+export RESTIC_REPOSITORY="rclone:syno_backup:/backup/${_resolved[profile_name]:-$(hostname)}"
 export RCLONE_CONFIG_SYNO_BACKUP_TYPE="sftp"
 export RCLONE_CONFIG_SYNO_BACKUP_HOST="${_resolved[host]}"
 export RCLONE_CONFIG_SYNO_BACKUP_USER="${_resolved[user]}"
@@ -1018,7 +1018,7 @@ backend_s3_configure() {
 
   # Render Env
   _out_env=$(cat <<EOF
-export RESTIC_REPOSITORY="s3:${_resolved[endpoint]}/${_resolved[bucket]}/$(hostname)"
+export RESTIC_REPOSITORY="s3:${_resolved[endpoint]}/${_resolved[bucket]}/${_resolved[profile_name]:-$(hostname)}"
 export AWS_ACCESS_KEY_ID="${_resolved[access_key]}"
 export AWS_SECRET_ACCESS_KEY="${_resolved[secret_key]}"
 export RESTIC_PASSWORD="${_resolved[password]}"
@@ -1979,6 +1979,10 @@ cmd_wizard() {
     setting_args+=(--endpoint "$endpoint" --bucket "$bucket" --access-key "$access_key" --secret-key "$secret_key")
   fi
 
+  local profile_name
+  profile_name=$(prompt_validated "저장소 폴더 이름을 입력하세요 (원격에 생성될 디렉터리명)" "$(hostname)" validate_profile_name)
+  setting_args+=(--profile-name "$profile_name")
+
   local password
   password=$(prompt_secret_required '저장소 비밀번호: 백업 데이터를 AES-256 기반으로 암호화하는 데 쓰이는 필수 입력값입니다. 이 비밀번호가 없으면 NAS/S3 등 원격 저장소 쪽에서도 백업 내용을 열어볼 수 없습니다. 분실 시에는 백업 데이터를 복구할 방법이 없으니 반드시 별도의 안전한 곳에 보관하세요.
 비밀번호 입력(화면에 표시되지 않습니다): ')
@@ -2044,6 +2048,7 @@ cmd_wizard() {
       printf '%b├──%b 버킷:      %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$bucket" "$C_RESET"
     fi
     printf '%b├──%b 백업 대상:  %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$final_targets" "$C_RESET"
+    printf '%b├──%b 폴더 이름:  %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$profile_name" "$C_RESET"
     printf '%b└──%b 이대로 진행할까요? [%bY%b/n]: %b' "$C_GRAY" "$C_RESET" "${C_CYAN}${C_BOLD}" "$C_RESET" "$C_RESET"
   else
     printf '\n다음 설정으로 진행합니다:\n'
@@ -2055,6 +2060,7 @@ cmd_wizard() {
       printf '  버킷: %s\n' "$bucket"
     fi
     printf '  백업 대상: %s\n' "$final_targets"
+    printf '  폴더 이름: %s\n' "$profile_name"
     printf '이대로 진행할까요? [Y/n]: '
   fi
   local confirm
