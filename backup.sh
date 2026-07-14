@@ -4549,37 +4549,60 @@ help_setting() {
   # S3 호환 오브젝트 스토리지 백엔드 설정 생성
   backup.sh setting --backend s3 --endpoint https://s3.ap-northeast-2.amazonaws.com --bucket my-backup-bucket --access-key ACCESSKEY123 --secret-key SECRETKEY456 --password 'my-secret-pass' --targets /etc
 
+  # 1차 SFTP 백업 + 2차 S3 소산 백업 설정 동시 생성
+  backup.sh setting --backend sftp --host 192.168.1.100 --user backupuser --password 'my-secret-pass' --targets /etc \
+    --secondary-backend s3 --secondary-endpoint https://s3.amazonaws.com --secondary-bucket my-sec-bucket --secondary-access-key SEC_AK --secondary-secret-key SEC_SK
+
 플래그 (Flags):
-      --backend <s3|sftp>       백업 데이터를 보낼 백엔드 유형 (필수)
-      --targets <경로,...>      백업할 로컬 디렉터리 또는 파일 경로 목록 (쉼표 구분) (필수)
-      --password <비밀번호>      백업 데이터를 암호화/복호화할 restic 저장소 비밀번호 (필수)
-      --exclude <패턴>          백업에서 제외할 파일/디렉터리 패턴 (여러 번 지정 시 쉼표로 병합)
-      --keep-daily <N>          일별 보관할 스냅샷 개수
-      --keep-weekly <N>         주별 보관할 스냅샷 개수
-      --keep-monthly <N>        월별 보관할 스냅샷 개수
-      --profile-name <이름>     resticprofile 프로파일 이름 (기본값: 호스트명)
-      --audit-tester <이름>     일일 백업 감사 및 복구 테스트를 수행할 담당자 이름
-      --audit-ciso <이름>       보고서를 최종 승인할 정보보안책임자(CISO) 이름
-      --audit-rto <분>          복구 목표 시간(RTO, 분 단위)
-      --force                   이미 백업 설정 파일이 존재할 때 경고 없이 덮어씁니다.
-      --dry-run                 실제 설정을 저장하지 않고 화면에 시뮬레이션 예정만 표시합니다.
+      --backend <s3|sftp>             백업 데이터를 보낼 백엔드 유형 (필수)
+      --targets <경로,...>            백업할 로컬 디렉터리 또는 파일 경로 목록 (쉼표 구분) (필수)
+      --password <비밀번호>            백업 데이터를 암호화/복호화할 restic 저장소 비밀번호 (필수)
+      --exclude <패턴>                백업에서 제외할 파일/디렉터리 패턴 (여러 번 지정 시 쉼표로 병합)
+      --keep-daily <N>                일별 보관할 스냅샷 개수
+      --keep-weekly <N>               주별 보관할 스냅샷 개수
+      --keep-monthly <N>              월별 보관할 스냅샷 개수
+      --profile-name <이름>           resticprofile 프로파일 이름 (기본값: 호스트명)
+      --audit-tester <이름>           일일 백업 감사 및 복구 테스트를 수행할 담당자 이름
+      --audit-ciso <이름>             보고서를 최종 승인할 정보보안책임자(CISO) 이름
+      --audit-rto <분>                복구 목표 시간(RTO, 분 단위)
+      --force                         이미 백업 설정 파일이 존재할 때 경고 없이 덮어씁니다.
+      --dry-run                       실제 설정을 저장하지 않고 화면에 시뮬레이션 예정만 표시합니다.
 
-  SFTP 백엔드 전용 옵션:
-      --host <IP/도메인>        SFTP 서버 접속 호스트 주소 (필수)
-      --port <포트>            SFTP 서버 접속 SSH 포트 (기본값: 22)
-      --user <사용자명>         SFTP 서버 접속 계정명 (필수)
+  1차 SFTP 백엔드 전용 옵션:
+      --host <IP/도메인>              SFTP 서버 접속 호스트 주소 (필수)
+      --port <포트>                  SFTP 서버 접속 SSH 포트 (기본값: 22)
+      --user <사용자명>               SFTP 서버 접속 계정명 (필수)
 
-  S3 백엔드 전용 옵션:
-      --endpoint <URL>         S3 호환 엔드포인트 주소 (HTTPS 또는 HTTP URL) (필수)
-      --bucket <버킷명>         S3 버킷 이름 (필수)
-      --access-key <키>         AWS Access Key ID (필수)
-      --secret-key <키>         AWS Secret Access Key (필수)
+  1차 S3 백엔드 전용 옵션:
+      --endpoint <URL>               S3 호환 엔드포인트 주소 (HTTPS 또는 HTTP URL) (필수)
+      --bucket <버킷명>               S3 버킷 이름 (필수)
+      --access-key <키>               AWS Access Key ID (필수)
+      --secret-key <키>               AWS Secret Access Key (필수)
+
+  2차 원격 소산 옵션 (Secondary Backup Flags):
+      --secondary-backend <s3|sftp>   2차 소산지 백엔드 유형
+      --secondary-password <암호>     2차 백업 암호 (생략 시 1차 암호 상속)
+      --secondary-keep-daily <N>      2차 소산지 일별 보관 스냅샷 개수
+      --secondary-keep-weekly <N>     2차 소산지 주별 보관 스냅샷 개수
+      --secondary-keep-monthly <N>    2차 소산지 월별 보관 스냅샷 개수
+
+  2차 SFTP 백엔드 옵션:
+      --secondary-host <IP/도메인>    2차 SFTP 서버 접속 호스트 주소
+      --secondary-port <포트>        2차 SFTP 서버 접속 SSH 포트 (기본값: 22)
+      --secondary-user <사용자명>     2차 SFTP 서버 접속 계정명
+
+  2차 S3 백엔드 옵션:
+      --secondary-endpoint <URL>     2차 S3 호환 엔드포인트 주소 (HTTPS 또는 HTTP URL)
+      --secondary-bucket <버킷명>     2차 S3 버킷 이름
+      --secondary-access-key <키>     2차 AWS Access Key ID
+      --secondary-secret-key <키>     2차 AWS Secret Access Key
 
 글로벌 플래그 (Global Flags):
-  -v, --verbose                 디버깅용 상세 로그 출력
-  -h, --help                    도움말 출력
+  -v, --verbose                       디버깅용 상세 로그 출력
+  -h, --help                          도움말 출력
 EOF
 }
+
 
 help_init() {
   cat <<'EOF'

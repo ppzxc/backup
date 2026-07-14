@@ -62,3 +62,12 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == "$expected_version" ]]
 }
+
+@test "help_setting prints secondary option details in Cobra style" {
+  run main setting --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--secondary-backend"* ]]
+  [[ "$output" == *"--secondary-password"* ]]
+  [[ "$output" == *"--secondary-endpoint"* ]]
+}
+
