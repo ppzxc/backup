@@ -97,6 +97,116 @@ $ sudo ./backup.sh run
 
 ---
 
+## 🔔 백업 성공/실패 알림 설정 (Notifications)
+
+백업 완료 시 Slack, Discord 또는 커스텀 웹훅으로 백업 성공/실패 알림을 전송할 수 있습니다. 알림 설정은 `/etc/restic/backup.env` 파일에 정의하며, `backup.sh config` 또는 `backup.sh setting` 명령 시 CLI 플래그로도 지정할 수 있습니다.
+
+### 1. 주요 설정 변수 (`backup.env`)
+
+| 환경 변수 | CLI 플래그 | 설명 | 허용값 |
+| :--- | :--- | :--- | :--- |
+| **`BACKUP_NOTIFICATION_URL`** | `--notification-url` | 알림을 전송할 웹훅 URL 주소 | `http://` 또는 `https://` 로 시작하는 URL |
+| **`BACKUP_NOTIFICATION_TYPE`** | `--notification-type` | 웹훅 대상 메신저/알림 서비스 타입 | `slack`, `discord`, `custom` |
+| **`BACKUP_NOTIFICATION_ON`** | `--notification-on` | 알림을 전송할 트리거 조건 | `both` (기본값), `failure` (실패만), `success` (성공만) |
+| **`BACKUP_NOTIFICATION_METHOD`** | - | `custom` 타입 웹훅 시 사용할 HTTP 메소드 | `POST` (기본값), `PUT` 등 |
+| **`BACKUP_NOTIFICATION_HEADERS`**| - | `custom` 타입 웹훅 시 전송할 HTTP 헤더 목록 (쉼표 구분) | 예: `Content-Type: application/json, X-Token: secret` |
+| **`BACKUP_NOTIFICATION_BODY_SUCCESS`** | - | `custom` 타입 백업 성공 시 전송할 JSON 페이로드 구조 | 예: `'{"status":"ok","msg":"백업 성공"}'` |
+| **`BACKUP_NOTIFICATION_BODY_FAILURE`** | - | `custom` 타입 백업 실패 시 전송할 JSON 페이로드 구조 | 예: `'{"status":"error","msg":"${ERROR}"}'` |
+
+---
+
+### 2. 알림 웹훅 구성 예시
+
+#### A. Slack 알림 설정
+Slack 웹훅 URL로 백업 성공 및 실패 알림을 모두 받습니다. (페이로드 구성 자동)
+```bash
+export BACKUP_NOTIFICATION_URL="https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+export BACKUP_NOTIFICATION_TYPE="slack"
+export BACKUP_NOTIFICATION_ON="both"
+```
+
+#### B. Discord 알림 설정
+Discord 웹훅 URL로 백업 실패 알림만 받아봅니다. (페이로드 구성 자동)
+```bash
+export BACKUP_NOTIFICATION_URL="https://discord.com/api/webhooks/YOUR/WEBHOOK/URL"
+export BACKUP_NOTIFICATION_TYPE="discord"
+export BACKUP_NOTIFICATION_ON="failure"
+```
+
+#### C. 사내 시스템 또는 MS Teams 연동 (`custom` 타입)
+HTTP Header 및 JSON Body 구조를 완전히 마음대로 설정하여 연동합니다.
+```bash
+export BACKUP_NOTIFICATION_URL="https://my-monitoring.internal/alerts"
+export BACKUP_NOTIFICATION_TYPE="custom"
+export BACKUP_NOTIFICATION_ON="both"
+export BACKUP_NOTIFICATION_METHOD="POST"
+export BACKUP_NOTIFICATION_HEADERS="Content-Type: application/json, Authorization: Bearer TOKEN123"
+export BACKUP_NOTIFICATION_BODY_SUCCESS='{"event":"backup_ok","profile":"${PROFILE_NAME}"}'
+export BACKUP_NOTIFICATION_BODY_FAILURE='{"event":"backup_fail","profile":"${PROFILE_NAME}","err":"${ERROR}"}'
+```
+
+---
+
+### 3. 알림 웹훅에서 지원하는 변수 치환 문구
+
+웹훅 본문(JSON)이나 URL에는 다음 변수를 포함할 수 있으며, `resticprofile`이 런타임에 이를 실제 값으로 동적 치환하여 발송합니다:
+
+* **`${PROFILE_NAME}`**: 현재 작동 중인 백업 프로파일 명칭 (예: `web01`)
+* **`${PROFILE_COMMAND}`**: 실행된 명령어 (예: `backup`, `check` 등)
+* **`${HOSTNAME}`**: 시스템 호스트명 (스크립트가 `profiles.yaml` 내에 자동 주입)
+* **`${ERROR}`**: 백업 최종 실패 시 발생한 오류 메시지 (실패 훅에서만 사용 가능)
+* **`${ERROR_COMMANDLINE}`**: 백업 실패 시 실행되었던 restic 명령어 (실패 훅에서만 사용 가능)
+* **`${ERROR_EXIT_CODE}`**: 백업 실패 시 종료 코드 (실패 훅에서만 사용 가능)
+* **`${ERROR_STDERR}`**: 백업 실패 시 표준 에러(Stderr) 출력 내용 (실패 훅에서만 사용 가능)
+
+---
+
+### 4. 알림 설정 방법 (How to Configure)
+
+알림 웹훅 설정은 다음 세 가지 방법 중 하나를 선택해 구성할 수 있습니다:
+
+#### A. 기존 설정 파일 직접 수정 (추천)
+이미 백업이 구성되어 작동 중인 환경에서 가장 간단하게 알림을 연동하는 방법입니다.
+
+1. root 권한으로 백업 설정 파일(`/etc/restic/backup.env`)을 엽니다.
+   ```bash
+   $ sudo vi /etc/restic/backup.env
+   ```
+2. 최하단으로 이동해 알림 관련 변수 주석을 해제하고 설정 정보를 입력합니다. (예: Slack 연동)
+   ```bash
+   export BACKUP_NOTIFICATION_URL='https://hooks.slack.com/services/YOUR/WEBHOOK/URL'
+   export BACKUP_NOTIFICATION_TYPE='slack'
+   export BACKUP_NOTIFICATION_ON='both'
+   ```
+3. 저장을 완료한 뒤, 변경된 내용을 systemd 및 resticprofile 구성 파일에 반영하기 위해 설정 리로드를 실행합니다.
+   ```bash
+   $ sudo backup.sh config
+   ```
+
+#### B. CLI 명령어로 부분 수정 (`config`)
+설정 파일을 직접 편집하지 않고, CLI 명령 플래그를 이용해 바로 설정을 반영 및 동기화할 수 있습니다.
+```bash
+$ sudo backup.sh config \
+    --notification-url "https://hooks.slack.com/services/YOUR/WEBHOOK/URL" \
+    --notification-type "slack" \
+    --notification-on "both"
+```
+
+#### C. 초기 백업 환경 등록 시 함께 지정 (`setting`)
+서버 최초 구성 시점부터 알림 웹훅을 함께 묶어 일괄 등록할 수 있습니다.
+```bash
+$ sudo backup.sh setting \
+    --backend sftp \
+    --host 192.168.1.100 \
+    --user backupuser \
+    --password 'your-repo-password' \
+    --targets /etc,/var/log \
+    --notification-url "https://hooks.slack.com/services/YOUR/WEBHOOK/URL" \
+    --notification-type "slack"
+```
+
+---
+
 ## 🔄 백엔드 마이그레이션 (`migrate`)
 
 기존에 가동 중이던 백업 저장소(SFTP 또는 S3)의 모든 백업 데이터(전체 스냅샷 이력)를 새로운 목적지 저장소로 안전하게 복사하고, 현재 `backup.sh`가 돌아가고 있는 호스트 서버(클라이언트)의 백업 설정(`backup.env`), 프로필 및 `systemd` 스케줄러를 새 저장소 정보로 **완전히 전환**해 주는 고성능 마이그레이션 도구입니다.

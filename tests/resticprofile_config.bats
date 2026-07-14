@@ -76,3 +76,74 @@ setup() {
   [[ "$output" == *"ISMS Compliance"* ]]
   [[ "$output" == *'{{ range .OnCalendar -}}'* ]]
 }
+
+@test "render_resticprofile_config renders slack notifications correctly" {
+  export RESTIC_REPOSITORY="s3:https://s3.example.com/my-bucket/host1"
+  export RESTIC_PASSWORD="super-secret"
+  export BACKUP_TARGETS="/var/log"
+  export KEEP_DAILY="7"
+  export KEEP_WEEKLY="4"
+  export KEEP_MONTHLY="12"
+  export BACKUP_NOTIFICATION_URL="https://hooks.slack.com/services/test"
+  export BACKUP_NOTIFICATION_TYPE="slack"
+  export BACKUP_NOTIFICATION_ON="both"
+
+  run render_resticprofile_config "web01" "*-*-* 02:00:00"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"HOSTNAME: "* ]]
+  [[ "$output" == *"send-after:"* ]]
+  [[ "$output" == *"send-after-fail:"* ]]
+  [[ "$output" == *"https://hooks.slack.com/services/test"* ]]
+  [[ "$output" == *"Content-Type"* ]]
+  [[ "$output" == *"application/json"* ]]
+  [[ "$output" == *"restic 백업 성공"* ]]
+  [[ "$output" == *"restic 백업 실패"* ]]
+}
+
+@test "render_resticprofile_config renders discord notifications correctly" {
+  export RESTIC_REPOSITORY="s3:https://s3.example.com/my-bucket/host1"
+  export RESTIC_PASSWORD="super-secret"
+  export BACKUP_TARGETS="/var/log"
+  export KEEP_DAILY="7"
+  export KEEP_WEEKLY="4"
+  export KEEP_MONTHLY="12"
+  export BACKUP_NOTIFICATION_URL="https://discord.com/api/webhooks/test"
+  export BACKUP_NOTIFICATION_TYPE="discord"
+  export BACKUP_NOTIFICATION_ON="failure"
+
+  run render_resticprofile_config "web01" "*-*-* 02:00:00"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"HOSTNAME: "* ]]
+  [[ "$output" != *"send-after:"* ]]
+  [[ "$output" == *"send-after-fail:"* ]]
+  [[ "$output" == *"https://discord.com/api/webhooks/test"* ]]
+  [[ "$output" == *'"content":'* ]]
+}
+
+@test "render_resticprofile_config renders custom notifications correctly" {
+  export RESTIC_REPOSITORY="s3:https://s3.example.com/my-bucket/host1"
+  export RESTIC_PASSWORD="super-secret"
+  export BACKUP_TARGETS="/var/log"
+  export KEEP_DAILY="7"
+  export KEEP_WEEKLY="4"
+  export KEEP_MONTHLY="12"
+  export BACKUP_NOTIFICATION_URL="https://my.webhook.internal/alerts"
+  export BACKUP_NOTIFICATION_TYPE="custom"
+  export BACKUP_NOTIFICATION_ON="both"
+  export BACKUP_NOTIFICATION_METHOD="PUT"
+  export BACKUP_NOTIFICATION_HEADERS="X-Alert-Key: secret123, Content-Type: application/json"
+  export BACKUP_NOTIFICATION_BODY_SUCCESS='{"status":"ok","msg":"done"}'
+  export BACKUP_NOTIFICATION_BODY_FAILURE='{"status":"error","msg":"${ERROR}"}'
+
+  run render_resticprofile_config "web01" "*-*-* 02:00:00"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"send-after:"* ]]
+  [[ "$output" == *"method: \"PUT\""* ]]
+  [[ "$output" == *"url: \"https://my.webhook.internal/alerts\""* ]]
+  [[ "$output" == *"body: '{\"status\":\"ok\",\"msg\":\"done\"}'"* ]]
+  [[ "$output" == *"X-Alert-Key"* ]]
+  [[ "$output" == *"secret123"* ]]
+  [[ "$output" == *"send-after-fail:"* ]]
+  [[ "$output" == *"body: '{\"status\":\"error\",\"msg\":\"\${ERROR}\"}'"* ]]
+}
+

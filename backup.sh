@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.9"
+BACKUP_SCRIPT_VERSION="0.0.10"
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -160,6 +160,7 @@ resolve_and_validate_config() {
 
   # Sourcing current configuration from file
   local file_targets="" file_keep_daily="" file_keep_weekly="" file_keep_monthly="" file_excludes="" file_profile_name="" file_password=""
+  local file_notification_url="" file_notification_type="" file_notification_on="" file_notification_method="" file_notification_headers="" file_notification_body_success="" file_notification_body_failure=""
   if [[ -f "${BACKUP_ENV_FILE:-}" ]]; then
     # Sourcing in a subshell to isolate variables
     local env_data
@@ -173,6 +174,13 @@ resolve_and_validate_config() {
       printf '%s\n' "excludes=${BACKUP_EXCLUDES:-}"
       printf '%s\n' "profile_name=${BACKUP_PROFILE_NAME:-}"
       printf '%s\n' "password=${RESTIC_PASSWORD:-}"
+      printf '%s\n' "notification_url=${BACKUP_NOTIFICATION_URL:-}"
+      printf '%s\n' "notification_type=${BACKUP_NOTIFICATION_TYPE:-}"
+      printf '%s\n' "notification_on=${BACKUP_NOTIFICATION_ON:-}"
+      printf '%s\n' "notification_method=${BACKUP_NOTIFICATION_METHOD:-}"
+      printf 'notification_headers=%s\n' "$(echo -n "${BACKUP_NOTIFICATION_HEADERS:-}" | base64 | tr -d '\n')"
+      printf 'notification_body_success=%s\n' "$(echo -n "${BACKUP_NOTIFICATION_BODY_SUCCESS:-}" | base64 | tr -d '\n')"
+      printf 'notification_body_failure=%s\n' "$(echo -n "${BACKUP_NOTIFICATION_BODY_FAILURE:-}" | base64 | tr -d '\n')"
     )
     local line key val
     while IFS= read -r line; do
@@ -187,6 +195,13 @@ resolve_and_validate_config() {
         excludes) file_excludes="$val" ;;
         profile_name) file_profile_name="$val" ;;
         password) file_password="$val" ;;
+        notification_url) file_notification_url="$val" ;;
+        notification_type) file_notification_type="$val" ;;
+        notification_on) file_notification_on="$val" ;;
+        notification_method) file_notification_method="$val" ;;
+        notification_headers) file_notification_headers="$(echo -n "$val" | base64 -d 2>/dev/null || echo -n "$val" | base64 --decode 2>/dev/null)" ;;
+        notification_body_success) file_notification_body_success="$(echo -n "$val" | base64 -d 2>/dev/null || echo -n "$val" | base64 --decode 2>/dev/null)" ;;
+        notification_body_failure) file_notification_body_failure="$(echo -n "$val" | base64 -d 2>/dev/null || echo -n "$val" | base64 --decode 2>/dev/null)" ;;
       esac
     done <<< "$env_data"
   fi
@@ -198,6 +213,9 @@ resolve_and_validate_config() {
   local env_keep_monthly="${KEEP_MONTHLY:-}"
   local env_password="${BACKUP_PASSWORD:-}"
   local env_profile_name="${BACKUP_PROFILE_NAME:-}"
+  local env_notification_url="${BACKUP_NOTIFICATION_URL:-}"
+  local env_notification_type="${BACKUP_NOTIFICATION_TYPE:-}"
+  local env_notification_on="${BACKUP_NOTIFICATION_ON:-}"
 
   # Resolve values with priority: CLI option > Env variable > Config file > Default value
   local cli_targets="${_opts[targets]:-}"
@@ -222,6 +240,32 @@ resolve_and_validate_config() {
   local cli_exclude="${_opts[exclude]:-}"
   _resolved[excludes_csv]=$(resolve_value "$cli_exclude" "" "$file_excludes" "${DEFAULT_EXCLUDES:-}")
 
+  # Resolve Notifications
+  local cli_notification_url="${_opts[notification-url]:-}"
+  # resolved는 nameref 연관 배열이며 키 이름이 변수로 오인되는 것을 방지한다.
+  # shellcheck disable=SC2154
+  _resolved[notification_url]=$(resolve_value "$cli_notification_url" "$env_notification_url" "$file_notification_url" "" || true)
+
+  local cli_notification_type="${_opts[notification-type]:-}"
+  # resolved는 nameref 연관 배열이며 키 이름이 변수로 오인되는 것을 방지한다.
+  # shellcheck disable=SC2154
+  _resolved[notification_type]=$(resolve_value "$cli_notification_type" "$env_notification_type" "$file_notification_type" "" || true)
+
+  local cli_notification_on="${_opts[notification-on]:-}"
+  # resolved는 nameref 연관 배열이며 키 이름이 변수로 오인되는 것을 방지한다.
+  # shellcheck disable=SC2154
+  _resolved[notification_on]=$(resolve_value "$cli_notification_on" "$env_notification_on" "$file_notification_on" "both" || true)
+
+  # resolved는 nameref 연관 배열이며 키 이름이 변수로 오인되는 것을 방지한다.
+  # shellcheck disable=SC2154
+  _resolved[notification_method]=$(resolve_value "" "${BACKUP_NOTIFICATION_METHOD:-}" "$file_notification_method" "POST" || true)
+  # shellcheck disable=SC2154
+  _resolved[notification_headers]=$(resolve_value "" "${BACKUP_NOTIFICATION_HEADERS:-}" "$file_notification_headers" "" || true)
+  # shellcheck disable=SC2154
+  _resolved[notification_body_success]=$(resolve_value "" "${BACKUP_NOTIFICATION_BODY_SUCCESS:-}" "$file_notification_body_success" "" || true)
+  # shellcheck disable=SC2154
+  _resolved[notification_body_failure]=$(resolve_value "" "${BACKUP_NOTIFICATION_BODY_FAILURE:-}" "$file_notification_body_failure" "" || true)
+
   # Global Validation
   if [[ -z "${_resolved[targets]:-}" ]]; then
     _errors+=("백업 대상 경로(--targets 또는 BACKUP_TARGETS)가 필요합니다.")
@@ -243,6 +287,37 @@ resolve_and_validate_config() {
   fi
   if ! err=$(validate_profile_name "${_resolved[profile_name]}"); then
     _errors+=("$err")
+  fi
+
+  # Strict Validation for Notifications
+  local url="${_resolved[notification_url]}"
+  local type="${_resolved[notification_type]}"
+  local on="${_resolved[notification_on]}"
+
+  if [[ -n "$url" || -n "$type" ]]; then
+    if [[ -z "$url" ]]; then
+      _errors+=("알람 URL이 비어 있습니다. 알람 타입을 설정한 경우 URL(--notification-url 또는 BACKUP_NOTIFICATION_URL)을 지정해야 합니다.")
+    elif [[ -z "$type" ]]; then
+      _errors+=("알람 타입이 비어 있습니다. 알람 URL을 설정한 경우 타입(--notification-type 또는 BACKUP_NOTIFICATION_TYPE)을 지정해야 합니다.")
+    fi
+
+    if [[ -n "$url" ]]; then
+      if [[ ! "$url" =~ ^https?:// ]]; then
+        _errors+=("알람 URL 형식은 http:// 또는 https://로 시작해야 합니다: ${url}")
+      fi
+    fi
+
+    if [[ -n "$type" ]]; then
+      if [[ "$type" != "slack" && "$type" != "discord" && "$type" != "custom" ]]; then
+        _errors+=("지원하지 않는 알람 타입입니다: ${type} (slack, discord, custom 중 하나여야 합니다.)")
+      fi
+    fi
+
+    if [[ -n "$on" ]]; then
+      if [[ "$on" != "failure" && "$on" != "success" && "$on" != "both" ]]; then
+        _errors+=("지원하지 않는 알람 발생 조건(ON)입니다: ${on} (failure, success, both 중 하나여야 합니다.)")
+      fi
+    fi
   fi
 
   # Delegate backend-specific validation if backend is specified
@@ -517,6 +592,113 @@ resticprofile_timer_unit_name() {
   printf 'resticprofile-backup@profile-%s.timer' "$1"
 }
 
+escape_single_quotes() {
+  echo -n "$1" | sed "s/'/'\\\\''/g"
+}
+
+render_notification_env_block() {
+  local -n _res="$1"
+  cat <<EOF
+
+# ==========================================
+# 백업 성공/실패 알림 설정 (Slack, Discord, Custom)
+# ==========================================
+export BACKUP_NOTIFICATION_URL='$(escape_single_quotes "${_res[notification_url]:-}")'
+export BACKUP_NOTIFICATION_TYPE='$(escape_single_quotes "${_res[notification_type]:-}")'
+export BACKUP_NOTIFICATION_ON='$(escape_single_quotes "${_res[notification_on]:-both}")'
+export BACKUP_NOTIFICATION_METHOD='$(escape_single_quotes "${_res[notification_method]:-POST}")'
+export BACKUP_NOTIFICATION_HEADERS='$(escape_single_quotes "${_res[notification_headers]:-}")'
+export BACKUP_NOTIFICATION_BODY_SUCCESS='$(escape_single_quotes "${_res[notification_body_success]:-}")'
+export BACKUP_NOTIFICATION_BODY_FAILURE='$(escape_single_quotes "${_res[notification_body_failure]:-}")'
+EOF
+}
+
+render_resticprofile_notifications() {
+  local notify_url="${BACKUP_NOTIFICATION_URL:-}"
+  local notify_type="${BACKUP_NOTIFICATION_TYPE:-}"
+  local notify_on="${BACKUP_NOTIFICATION_ON:-both}"
+
+  if [[ -z "$notify_url" ]]; then
+    return 0
+  fi
+
+  local method="POST"
+  local -a headers=()
+  local success_body=""
+  local failure_body=""
+
+  # resticprofile이 런타임에 직접 환경변수 및 에러 변수를 치환하도록 작은따옴표를 유지한다.
+  # shellcheck disable=SC2016
+  if [[ "$notify_type" == "slack" ]]; then
+    method="POST"
+    headers=("Content-Type" "application/json")
+    success_body='{"text":"✅ [${HOSTNAME}] restic 백업 성공 (프로파일: ${PROFILE_NAME})"}'
+    failure_body='{"text":"❌ [${HOSTNAME}] restic 백업 실패 (프로파일: ${PROFILE_NAME})\n오류: ${ERROR}"}'
+  elif [[ "$notify_type" == "discord" ]]; then
+    method="POST"
+    headers=("Content-Type" "application/json")
+    success_body='{"content":"✅ [${HOSTNAME}] restic 백업 성공 (프로파일: ${PROFILE_NAME})"}'
+    failure_body='{"content":"❌ [${HOSTNAME}] restic 백업 실패 (프로파일: ${PROFILE_NAME})\n오류: ${ERROR}"}'
+  elif [[ "$notify_type" == "custom" ]]; then
+    method="${BACKUP_NOTIFICATION_METHOD:-POST}"
+    success_body="${BACKUP_NOTIFICATION_BODY_SUCCESS:-}"
+    failure_body="${BACKUP_NOTIFICATION_BODY_FAILURE:-}"
+
+    if [[ -n "${BACKUP_NOTIFICATION_HEADERS:-}" ]]; then
+      local -a headers_arr=()
+      IFS=',' read -ra headers_arr <<< "$BACKUP_NOTIFICATION_HEADERS"
+      local h
+      for h in "${headers_arr[@]}"; do
+        h=$(echo "$h" | xargs)
+        if [[ "$h" =~ ^([^:]+):(.*)$ ]]; then
+          local name="${BASH_REMATCH[1]}"
+          local value="${BASH_REMATCH[2]}"
+          name=$(echo "$name" | xargs)
+          value=$(echo "$value" | xargs)
+          headers+=("$name" "$value")
+        fi
+      done
+    else
+      headers=("Content-Type" "application/json")
+    fi
+  else
+    return 0
+  fi
+
+  print_http_hook() {
+    local hook_name="$1"
+    local h_body="$2"
+    printf '    %s:\n' "$hook_name"
+    printf '      - method: "%s"\n' "$method"
+    printf '        url: "%s"\n' "$notify_url"
+    if [[ -n "$h_body" ]]; then
+      local escaped_body
+      escaped_body=$(echo -n "$h_body" | sed "s/'/''/g")
+      printf '        body: '\''%s'\''\n' "$escaped_body"
+    fi
+    if [[ ${#headers[@]} -gt 0 ]]; then
+      printf '        headers:\n'
+      local -i idx
+      for ((idx=0; idx<${#headers[@]}; idx+=2)); do
+        printf '          - name: "%s"\n' "${headers[idx]}"
+        printf '            value: "%s"\n' "${headers[idx+1]}"
+      done
+    fi
+  }
+
+  if [[ "$notify_on" == "both" || "$notify_on" == "success" ]]; then
+    if [[ -n "$success_body" || "$notify_type" != "custom" ]]; then
+      print_http_hook "send-after" "$success_body"
+    fi
+  fi
+
+  if [[ "$notify_on" == "both" || "$notify_on" == "failure" ]]; then
+    if [[ -n "$failure_body" || "$notify_type" != "custom" ]]; then
+      print_http_hook "send-after-fail" "$failure_body"
+    fi
+  fi
+}
+
 write_resticprofile_assets() {
   local profile_name="$1" on_calendar="$2"
   write_secure_file "$RESTICPROFILE_UNIT_TEMPLATE" 644 "$(render_resticprofile_unit_template)"
@@ -549,6 +731,7 @@ render_resticprofile_config() {
   printf '  force-inactive-lock: true\n'
   printf '  env:\n'
   printf '    RESTIC_PASSWORD: "%s"\n' "${RESTIC_PASSWORD:-}"
+  printf '    HOSTNAME: "%s"\n' "$(hostname)"
   if [[ -n "${AWS_ACCESS_KEY_ID:-}" ]]; then
     printf '    AWS_ACCESS_KEY_ID: "%s"\n' "$AWS_ACCESS_KEY_ID"
     printf '    AWS_SECRET_ACCESS_KEY: "%s"\n' "${AWS_SECRET_ACCESS_KEY:-}"
@@ -584,6 +767,7 @@ render_resticprofile_config() {
       printf '      - "%s"\n' "$e"
     done
   fi
+  render_resticprofile_notifications
 }
 
 install_binary() {
@@ -982,6 +1166,7 @@ export KEEP_MONTHLY="${_resolved[keep_monthly]}"
 export BACKUP_PROFILE_NAME="${_resolved[profile_name]}"
 EOF
 )
+  _out_env+="$(render_notification_env_block _resolved)"
 
   # Render Notice
   _out_notice=$(cat <<EOF
@@ -1034,6 +1219,7 @@ export KEEP_MONTHLY="${_resolved[keep_monthly]}"
 export BACKUP_PROFILE_NAME="${_resolved[profile_name]}"
 EOF
 )
+  _out_env+="$(render_notification_env_block _resolved)"
 
   # Render Notice
   _out_notice=$(cat <<EOF
@@ -2186,7 +2372,7 @@ cmd_config() {
 
   # 2. 옵션 파싱
   local -A opts=()
-  parse_opts_into opts "targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: on-calendar: dry-run" -- "$@"
+  parse_opts_into opts "targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: on-calendar: notification-url: notification-type: notification-on: dry-run" -- "$@"
 
   opts[backend]="$backend"
   local dry_run="${opts[dry-run]:-0}"
@@ -2258,7 +2444,7 @@ cmd_setting() {
   fi
   require_root
   local -A opts=()
-  parse_opts_into opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: force dry-run" -- "$@"
+  parse_opts_into opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: notification-url: notification-type: notification-on: force dry-run" -- "$@"
 
   local backend="${opts[backend]:-}"
   local force="${opts[force]:-0}"

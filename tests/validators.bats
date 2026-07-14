@@ -256,5 +256,106 @@ setup() {
   [ "${resolved[user]}" = "backup_user" ]
 }
 
+@test "resolve_and_validate_config fails when notification URL is set but type is missing" {
+  local -A opts=()
+  opts[targets]="/etc"
+  opts[password]="mypassword"
+  opts[notification-url]="https://hooks.slack.com/services/test"
+  opts[notification-type]=""
+
+  local -A resolved=()
+  local -a errors=()
+  local res=0
+  resolve_and_validate_config opts resolved errors || res=$?
+  [ "$res" -eq 1 ]
+  [ ${#errors[@]} -gt 0 ]
+  [[ "${errors[0]}" == *"알람 타입이 비어 있습니다"* ]]
+}
+
+@test "resolve_and_validate_config fails when notification type is set but URL is missing" {
+  local -A opts=()
+  opts[targets]="/etc"
+  opts[password]="mypassword"
+  opts[notification-url]=""
+  opts[notification-type]="slack"
+
+  local -A resolved=()
+  local -a errors=()
+  local res=0
+  resolve_and_validate_config opts resolved errors || res=$?
+  [ "$res" -eq 1 ]
+  [ ${#errors[@]} -gt 0 ]
+  [[ "${errors[0]}" == *"알람 URL이 비어 있습니다"* ]]
+}
+
+@test "resolve_and_validate_config fails with invalid notification URL format" {
+  local -A opts=()
+  opts[targets]="/etc"
+  opts[password]="mypassword"
+  opts[notification-url]="ftp://hooks.slack.com/services/test"
+  opts[notification-type]="slack"
+
+  local -A resolved=()
+  local -a errors=()
+  local res=0
+  resolve_and_validate_config opts resolved errors || res=$?
+  [ "$res" -eq 1 ]
+  [ ${#errors[@]} -gt 0 ]
+  [[ "${errors[0]}" == *"알람 URL 형식은 http:// 또는 https://로 시작해야 합니다"* ]]
+}
+
+@test "resolve_and_validate_config fails with unsupported notification type" {
+  local -A opts=()
+  opts[targets]="/etc"
+  opts[password]="mypassword"
+  opts[notification-url]="https://hooks.slack.com/services/test"
+  opts[notification-type]="telegram"
+
+  local -A resolved=()
+  local -a errors=()
+  local res=0
+  resolve_and_validate_config opts resolved errors || res=$?
+  [ "$res" -eq 1 ]
+  [ ${#errors[@]} -gt 0 ]
+  [[ "${errors[0]}" == *"지원하지 않는 알람 타입입니다"* ]]
+}
+
+@test "resolve_and_validate_config fails with unsupported notification trigger" {
+  local -A opts=()
+  opts[targets]="/etc"
+  opts[password]="mypassword"
+  opts[notification-url]="https://hooks.slack.com/services/test"
+  opts[notification-type]="slack"
+  opts[notification-on]="always"
+
+  local -A resolved=()
+  local -a errors=()
+  local res=0
+  resolve_and_validate_config opts resolved errors || res=$?
+  [ "$res" -eq 1 ]
+  [ ${#errors[@]} -gt 0 ]
+  [[ "${errors[0]}" == *"지원하지 않는 알람 발생 조건"* ]]
+}
+
+@test "resolve_and_validate_config succeeds with valid notification parameters" {
+  local -A opts=()
+  opts[targets]="/etc"
+  opts[password]="mypassword"
+  opts[notification-url]="https://hooks.slack.com/services/test"
+  opts[notification-type]="slack"
+  opts[notification-on]="both"
+
+  local -A resolved=()
+  local -a errors=()
+  local res=0
+  resolve_and_validate_config opts resolved errors || res=$?
+  [ "$res" -eq 0 ]
+  [ ${#errors[@]} -eq 0 ]
+  [ "${resolved[notification_url]}" = "https://hooks.slack.com/services/test" ]
+  [ "${resolved[notification_type]}" = "slack" ]
+  [ "${resolved[notification_on]}" = "both" ]
+}
+
+
 
 
