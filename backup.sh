@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.8"
+BACKUP_SCRIPT_VERSION="0.0.9"
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -733,6 +733,10 @@ EOF
 }
 
 cmd_install() {
+  if has_help_flag "$@"; then
+    help_install
+    return 0
+  fi
   require_root
   local -A opts=()
   parse_opts_into opts "force dry-run" -- "$@"
@@ -1052,6 +1056,10 @@ restic_is_initialized() {
 }
 
 cmd_init() {
+  if has_help_flag "$@"; then
+    help_init
+    return 0
+  fi
   require_root
   require_backup_env
 
@@ -1112,6 +1120,10 @@ systemd_disable_timer() {
 }
 
 cmd_schedule() {
+  if has_help_flag "$@"; then
+    help_schedule
+    return 0
+  fi
   require_root
   local action="${1:-}"
   shift || true
@@ -1140,6 +1152,10 @@ cmd_schedule() {
 }
 
 cmd_run() {
+  if has_help_flag "$@"; then
+    help_run
+    return 0
+  fi
   require_backup_env
   local profile_name; profile_name=$(resolve_profile_name)
 
@@ -1195,6 +1211,10 @@ except Exception as e:
 }
 
 cmd_status() {
+  if has_help_flag "$@"; then
+    help_status
+    return 0
+  fi
   require_backup_env
 
   local profile_name; profile_name=$(resolve_profile_name)
@@ -1446,6 +1466,10 @@ EOF
 }
 
 cmd_audit() {
+  if has_help_flag "$@"; then
+    help_audit
+    return 0
+  fi
   require_backup_env
 
   local -A opts=()
@@ -1525,6 +1549,10 @@ cmd_audit() {
 }
 
 cmd_uninstall() {
+  if has_help_flag "$@"; then
+    help_uninstall
+    return 0
+  fi
   require_root
   local -A opts=()
   parse_opts_into opts "purge" -- "$@"
@@ -1599,6 +1627,10 @@ build_dest_config() {
 # nameref로 인자를 받거나 다른 함수로 동적 연관 배열을 전달하여 사용하지 않는 것으로 오인받는 변수가 있으므로 우회
 # shellcheck disable=SC2034
 cmd_migrate() {
+  if has_help_flag "$@"; then
+    help_migrate
+    return 0
+  fi
   require_root
   require_backup_env
 
@@ -1948,6 +1980,10 @@ prompt_backend_choice() {
 }
 
 cmd_wizard() {
+  if has_help_flag "$@"; then
+    help_wizard
+    return 0
+  fi
   require_root
 
   if ! command -v restic >/dev/null 2>&1 || ! command -v rclone >/dev/null 2>&1 \
@@ -2133,6 +2169,10 @@ cmd_wizard() {
 }
 
 cmd_config() {
+  if has_help_flag "$@"; then
+    help_config
+    return 0
+  fi
   require_root
   if [[ ! -f "$BACKUP_ENV_FILE" ]]; then
     die "설정 파일이 존재하지 않습니다: ${BACKUP_ENV_FILE} (먼저 wizard나 setting을 실행하세요)"
@@ -2212,6 +2252,10 @@ cmd_config() {
 }
 
 cmd_setting() {
+  if has_help_flag "$@"; then
+    help_setting
+    return 0
+  fi
   require_root
   local -A opts=()
   parse_opts_into opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: force dry-run" -- "$@"
@@ -2258,30 +2302,339 @@ cmd_setting() {
   log_info "setting(${backend}) 완료"
 }
 
-render_help() {
-  printf 'Restic Backup Script v%s\n\n' "$BACKUP_SCRIPT_VERSION"
+has_help_flag() {
+  local arg
+  for arg in "$@"; do
+    if [[ "$arg" == "-h" || "$arg" == "--help" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+help_install() {
   cat <<'EOF'
-backup.sh - restic 기반 백업 설치/운영 스크립트
+의존성 패키지(restic, rclone, resticprofile) 및 스크립트 자체를 로컬 시스템에 설치합니다.
 
 사용법:
-  backup.sh install [--force] [--dry-run]
-  backup.sh setting --backend <s3|sftp> [옵션...] [--force] [--dry-run]
-  backup.sh init
-  backup.sh schedule enable [--on-calendar "<OnCalendar식>"]
-  backup.sh schedule disable
-  backup.sh run
-  backup.sh status
-  backup.sh audit [--report] [--report-file <경로>]
-  backup.sh uninstall [--purge]
-  backup.sh migrate --backend <s3|sftp> [옵션...] [--new-password <새비밀번호>] [--skip-check] [--force]
-  backup.sh config [옵션...]
-  backup.sh wizard
-  backup.sh -h | --help
-  backup.sh -V | --version
+  backup.sh install [flags]
 
-  모든 하위 명령에 -v/--verbose를 추가하면(위치 무관) SFTP 연결 점검 실패 시
-  rclone 자체의 진단 메시지를, init/run 실행 시 restic/resticprofile의 상세
-  로그를 함께 보여줍니다.
+사용법 예시:
+  # 기본 권장 버전으로 모든 필수 바이너리 설치
+  backup.sh install
+
+  # 기존 설치된 바이너리가 있더라도 덮어쓰고 강제 재설치
+  backup.sh install --force
+
+  # 실제 설치하지 않고 작업 예정사항만 확인
+  backup.sh install --dry-run
+
+플래그 (Flags):
+      --force       기존 바이너리가 존재해도 무시하고 새로 다운로드하여 설치합니다.
+      --dry-run     실제 바이너리 설치 및 파일 복사를 수행하지 않고 시뮬레이션 정보만 보여줍니다.
+
+글로벌 플래그 (Global Flags):
+  -v, --verbose     디버깅용 상세 로그 출력
+  -h, --help        도움말 출력
+EOF
+}
+
+help_setting() {
+  cat <<'EOF'
+초기 백업 환경 설정(/etc/restic/backup.env)을 수동으로 등록하고 보안 강화를 위한 안전한 파일 권한(600)을 강제합니다.
+
+사용법:
+  backup.sh setting --backend <s3|sftp> [옵션...]
+
+사용법 예시:
+  # SFTP(시놀로지 NAS 등) 백엔드 설정 생성
+  backup.sh setting --backend sftp --host 192.168.1.100 --port 22 --user backupuser --password 'my-secret-pass' --targets /etc,/var/log
+
+  # S3 호환 오브젝트 스토리지 백엔드 설정 생성
+  backup.sh setting --backend s3 --endpoint https://s3.ap-northeast-2.amazonaws.com --bucket my-backup-bucket --access-key ACCESSKEY123 --secret-key SECRETKEY456 --password 'my-secret-pass' --targets /etc
+
+플래그 (Flags):
+      --backend <s3|sftp>       백업 데이터를 보낼 백엔드 유형 (필수)
+      --targets <경로,...>      백업할 로컬 디렉터리 또는 파일 경로 목록 (쉼표 구분) (필수)
+      --password <비밀번호>      백업 데이터를 암호화/복호화할 restic 저장소 비밀번호 (필수)
+      --exclude <패턴>          백업에서 제외할 파일/디렉터리 패턴 (여러 번 지정 시 쉼표로 병합)
+      --keep-daily <N>          일별 보관할 스냅샷 개수
+      --keep-weekly <N>         주별 보관할 스냅샷 개수
+      --keep-monthly <N>        월별 보관할 스냅샷 개수
+      --profile-name <이름>     resticprofile 프로파일 이름 (기본값: 호스트명)
+      --force                   이미 백업 설정 파일이 존재할 때 경고 없이 덮어씁니다.
+      --dry-run                 실제 설정을 저장하지 않고 화면에 시뮬레이션 예정만 표시합니다.
+
+  SFTP 백엔드 전용 옵션:
+      --host <IP/도메인>        SFTP 서버 접속 호스트 주소 (필수)
+      --port <포트>            SFTP 서버 접속 SSH 포트 (기본값: 22)
+      --user <사용자명>         SFTP 서버 접속 계정명 (필수)
+
+  S3 백엔드 전용 옵션:
+      --endpoint <URL>         S3 호환 엔드포인트 주소 (HTTPS 또는 HTTP URL) (필수)
+      --bucket <버킷명>         S3 버킷 이름 (필수)
+      --access-key <키>         AWS Access Key ID (필수)
+      --secret-key <키>         AWS Secret Access Key (필수)
+
+글로벌 플래그 (Global Flags):
+  -v, --verbose                 디버깅용 상세 로그 출력
+  -h, --help                    도움말 출력
+EOF
+}
+
+help_init() {
+  cat <<'EOF'
+등록된 백업 설정을 기반으로 원격 저장소 리소스 연결성을 테스트하고, 최초 1회 restic 저장소 초기화(restic init)를 수행합니다.
+
+사용법:
+  backup.sh init
+
+사용법 예시:
+  # 백업 저장소 연결 점검 및 초기화
+  backup.sh init
+
+글로벌 플래그 (Global Flags):
+  -v, --verbose     원격 연결 및 초기화 시 상세 로그 출력
+  -h, --help        도움말 출력
+EOF
+}
+
+help_schedule() {
+  cat <<'EOF'
+주기적 정기 백업 수행을 위한 systemd timer를 활성화(schedule)하거나 비활성화(unschedule)합니다.
+
+사용법:
+  backup.sh schedule <enable|disable> [옵션...]
+
+사용법 예시:
+  # 기본 일정(매일 새벽 2시)으로 정기 백업 활성화
+  backup.sh schedule enable
+
+  # 특정 시간 일정(매일 새벽 3시 30분)으로 정기 백업 활성화
+  backup.sh schedule enable --on-calendar "*-*-* 03:30:00"
+
+  # 등록된 정기 백업 스케줄 비활성화 및 타이머 정지
+  backup.sh schedule disable
+
+플래그 (Flags):
+      --on-calendar <OnCalendar식>  systemd timer OnCalendar 형식의 스케줄 지정 (예: "daily", "*-*-* 02:00:00")
+
+글로벌 플래그 (Global Flags):
+  -v, --verbose                     디버깅용 상세 로그 출력
+  -h, --help                        도움말 출력
+EOF
+}
+
+help_run() {
+  cat <<'EOF'
+스케줄 주기와 무관하게 즉시 백업을 실행합니다. 내부 보존 정책(Retention)과 정리(Prune) 작업도 함께 트리거됩니다.
+
+사용법:
+  backup.sh run
+
+사용법 예시:
+  # 수동 즉시 백업 실행
+  backup.sh run
+
+글로벌 플래그 (Global Flags):
+  -v, --verbose     백업 과정의 restic 및 resticprofile 상세 출력 활성화
+  -h, --help        도움말 출력
+EOF
+}
+
+help_status() {
+  cat <<'EOF'
+현재 설정 상태, 백업 대상 디렉터리, systemd 타이머 상태, 주요 디렉터리 및 설정 파일 접근 권한 검사 결과와 원격 저장소에 존재하는 최근 백업 스냅샷 목록을 조회합니다.
+
+사용법:
+  backup.sh status
+
+사용법 예시:
+  # 현재 백업 설정 및 최근 스냅샷 이력 조회
+  backup.sh status
+
+글로벌 플래그 (Global Flags):
+  -v, --verbose     스냅샷 조회 오류 시 디버그 로그 활성화
+  -h, --help        도움말 출력
+EOF
+}
+
+help_audit() {
+  cat <<'EOF'
+ISMS 및 ISO 27001 등 보안 컴플라이언스 대응을 위한 종합 백업 보고서를 화면에 출력하고 파일로 동시 보존합니다.
+
+사용법:
+  backup.sh audit [flags]
+
+사용법 예시:
+  # 감사용 보고서를 터미널 화면에 즉시 출력
+  backup.sh audit
+
+  # 화면에 출력하면서 지정된 기본 경로에 보고서 파일 동시 저장
+  # (텍스트: /var/log/restic-backup/audit_report.txt, JSON: /var/log/restic-backup/audit_report.json)
+  backup.sh audit --report
+
+  # 보고서가 저장될 파일 경로를 지정하여 저장
+  backup.sh audit --report --report-file /root/isms_audit.txt
+
+플래그 (Flags):
+      --report              보고서 파일 생성 여부를 지정합니다.
+      --report-file <경로>   생성될 텍스트 보고서 파일의 경로를 직접 지정합니다. (자동으로 확장자를 .json으로 변환한 보고서도 생성됨)
+
+글로벌 플래그 (Global Flags):
+  -v, --verbose             디버깅용 상세 로그 출력
+  -h, --help                도움말 출력
+EOF
+}
+
+help_uninstall() {
+  cat <<'EOF'
+정기 백업 스케줄 타이머를 제거하고, 시스템에 복사된 backup.sh 및 바이너리(restic 등)들을 시스템에서 안전하게 언인스톨합니다.
+
+사용법:
+  backup.sh uninstall [flags]
+
+사용법 예시:
+  # 정기 백업 스케줄을 비활성화하고 설치된 스크립트 및 바이너리만 삭제 (설정은 보존)
+  backup.sh uninstall
+
+  # 관련 설정 파일(/etc/restic), 사용자 캐시, 바이너리 전체를 삭제하여 데이터를 완전 초기화
+  backup.sh uninstall --purge
+
+플래그 (Flags):
+      --purge       설정 디렉터리 및 캐시 디렉터리를 포함해 관련된 모든 데이터를 영구 완전 제거합니다.
+
+글로벌 플래그 (Global Flags):
+  -v, --verbose     삭제 과정 상세 출력 활성화
+  -h, --help        도움말 출력
+EOF
+}
+
+help_migrate() {
+  cat <<'EOF'
+기존 원격 백업 저장소(Source)의 스냅샷 데이터를 새로운 대상 원격 저장소(Destination)로 안전하게 복제(restic copy)하고, 로컬 환경 설정(backup.env) 및 systemd 스케줄을 새 저장소 정보로 자동 이관합니다.
+
+사용법:
+  backup.sh migrate --backend <s3|sftp> [옵션...]
+
+사용법 예시:
+  # 기존 저장소 데이터를 새로운 S3 버킷으로 이관
+  backup.sh migrate --backend s3 --endpoint https://s3.ap-northeast-2.amazonaws.com --bucket new-backup-bucket --access-key ACCESSKEY123 --secret-key SECRETKEY456 --new-password 'new-safe-pass'
+
+  # 기존 저장소 데이터를 새로운 SFTP 서버로 정합성 검증 단계를 건너뛰고 강제 이관
+  backup.sh migrate --backend sftp --host 192.168.1.200 --port 22 --user newbackup --new-password 'same-or-new-pass' --skip-check
+
+플래그 (Flags):
+      --backend <s3|sftp>       마이그레이션 대상 저장소 백엔드 유형 (필수)
+      --new-password <비밀번호>  이관될 새 저장소에 적용할 비밀번호 (기본값: 기존 저장소 비밀번호 유지)
+      --skip-check              스냅샷 데이터 이관 완료 후 restic check 정합성 무결성 검증 단계를 생략합니다.
+      --force                   유효성 및 상태 오류 발생 시 강제 진행을 수행합니다.
+
+  SFTP 목적지 전용 옵션:
+      --host <IP/도메인>        대상 SFTP 서버 접속 호스트 주소 (대화식 입력 가능)
+      --port <포트>            대상 SFTP 서버 접속 SSH 포트 (기본값: 22)
+      --user <사용자명>         대상 SFTP 서버 접속 계정명 (대화식 입력 가능)
+
+  S3 목적지 전용 옵션:
+      --endpoint <URL>         대상 S3 엔드포인트 주소 (대화식 입력 가능)
+      --bucket <버킷명>         대상 S3 버킷 이름 (대화식 입력 가능)
+      --access-key <키>         대상 S3 Access Key ID (대화식 입력 가능)
+      --secret-key <키>         대상 S3 Secret Access Key (대화식 입력 가능)
+
+글로벌 플래그 (Global Flags):
+  -v, --verbose                 마이그레이션 도중 발생하는 복사 및 검증 과정을 상세히 출력
+  -h, --help                    도움말 출력
+EOF
+}
+
+help_config() {
+  cat <<'EOF'
+기존 생성되어 있는 백업 설정(/etc/restic/backup.env)을 부분 수정하거나 최신화합니다. 백엔드(S3/SFTP) 구성을 자동 판단하며, 변경 완료 후 스케줄에 따른 systemd 타이머 설정 및 resticprofile 설정을 실시간 자동 동기화합니다.
+
+사용법:
+  backup.sh config [옵션...]
+
+사용법 예시:
+  # 백업 대상 경로를 새로 갱신
+  backup.sh config --targets /home/user,/var/log
+
+  # systemd timer의 백업 반복 스케줄 주기를 매일 새벽 3시로 변경
+  backup.sh config --on-calendar "*-*-* 03:00:00"
+
+  # 변경될 내용을 실제 저장하지 않고 시뮬레이션 예정만 확인
+  backup.sh config --exclude "*.tmp" --dry-run
+
+플래그 (Flags):
+      --targets <경로,...>      백업할 로컬 디렉터리 또는 파일 경로 목록 (쉼표 구분)
+      --exclude <패턴>          백업에서 제외할 파일/디렉터리 패턴 (여러 번 지정 시 쉼표로 병합)
+      --password <비밀번호>      백업 데이터를 암호화/복호화할 restic 저장소 비밀번호
+      --keep-daily <N>          일별 보관할 스냅샷 개수
+      --keep-weekly <N>         주별 보관할 스냅샷 개수
+      --keep-monthly <N>        월별 보관할 스냅샷 개수
+      --profile-name <이름>     resticprofile 프로파일 이름 (기본값: 호스트명)
+      --on-calendar <식>        정기 백업을 위한 systemd OnCalendar 포맷 주기 (예: "daily", "*-*-* 03:00:00")
+      --dry-run                 실제 설정을 변경해 저장하지 않고 예정 사항을 시뮬레이션하여 보여줍니다.
+
+  SFTP 백엔드 전용 변경 옵션:
+      --host <IP/도메인>        SFTP 서버 접속 호스트 주소
+      --port <포트>            SFTP 서버 접속 SSH 포트 (기본값: 22)
+      --user <사용자명>         SFTP 서버 접속 계정명
+
+  S3 백엔드 전용 변경 옵션:
+      --endpoint <URL>         S3 호환 엔드포인트 주소
+      --bucket <버킷명>         S3 버킷 이름
+      --access-key <키>         AWS Access Key ID
+      --secret-key <키>         AWS Secret Access Key
+
+글로벌 플래그 (Global Flags):
+  -v, --verbose                 갱신 과정 상세 로그 출력
+  -h, --help                    도움말 출력
+EOF
+}
+
+help_wizard() {
+  cat <<'EOF'
+CLI 설정이 낯선 사용자를 위한 대화형 단계별 설정 마법사입니다. 
+백업 대상 선택, 스토리지 연동, 비밀번호 등록 및 정기 스케줄 등록까지의 과정을 친절하게 안내하며 원스톱으로 구성합니다.
+
+사용법:
+  backup.sh wizard
+
+사용법 예시:
+  # 대화식 마법사 가이드 시작
+  backup.sh wizard
+
+글로벌 플래그 (Global Flags):
+  -h, --help        도움말 출력
+EOF
+}
+
+render_help() {
+  cat <<EOF
+restic 기반 백업 설치, 운영, 모니터링 및 감사 관리를 자동화하는 스크립트입니다.
+
+사용법:
+  backup.sh [command] [flags]
+
+사용 가능한 명령 (Available Commands):
+  install     의존성 패키지(restic, rclone, resticprofile) 및 스크립트 자체 설치
+  setting     초기 백업 환경 설정(backup.env) 명시적 등록
+  init        연동된 원격 백업 저장소 초기화 (restic init)
+  schedule    정기 자동 백업 스케줄 설정 및 활성화/비활성화 (systemd timer)
+  run         수동 백업 즉시 실행 (resticprofile backup)
+  status      저장소 연결성, 보안 권한 상태 및 최근 백업 스냅샷 요약 조회
+  audit       ISMS/ISO 27001 컴플라이언스 감사 대응용 보고서 출력 및 저장
+  uninstall   정기 스케줄 제거 및 설치된 바이너리/스크립트 삭제
+  migrate     기존 저장소 백업 데이터를 새로운 스토리지 백엔드로 데이터 복제 및 설정 이관
+  config      기존 백업 설정(backup.env) 수정 및 관련 자산 동기화
+  wizard      단계별 설정을 위한 대화형 CLI 설정 마법사 실행
+
+글로벌 플래그 (Global Flags):
+  -h, --help     도움말 출력
+  -V, --version  버전 정보 출력
+  -v, --verbose  디버깅 및 연동 명령어 상세 로깅 활성화
+
+상세한 하위 명령 정보는 'backup.sh [command] --help'를 참고하세요.
 EOF
 }
 
