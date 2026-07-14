@@ -195,34 +195,54 @@ ENV
   local date_suffix; date_suffix=$(date +%Y%m%d)
   local r_file="${TEST_ROOT}/var/log/restic-backup/daily_backup_audit_report_${date_suffix}.txt"
   local j_file="${TEST_ROOT}/var/log/restic-backup/daily_backup_audit_report_${date_suffix}.json"
+  local h_file="${TEST_ROOT}/var/log/restic-backup/daily_backup_audit_report_${date_suffix}.html"
   
   run cmd_audit --daily --report --report-file "$r_file"
   [ "$status" -eq 0 ]
   [ -f "$r_file" ]
   [ -f "$j_file" ]
+  [ -f "$h_file" ]
+  
+  # Check permissions (600)
+  local h_perm; h_perm=$(stat -c "%a" "$h_file")
+  [ "$h_perm" = "600" ]
   
   run cat "$r_file"
   [[ "$output" == *"[보안 감사 증적] 일일 백업 수행 결과"* ]]
   
   run cat "$j_file"
   [[ "$output" == *"daily_backup_review"* ]]
+  
+  run cat "$h_file"
+  [[ "$output" == *"<!DOCTYPE html>"* ]]
+  [[ "$output" == *"일일 백업 감사 결과"* ]]
 }
 
 @test "cmd_audit --restore-drill --report writes date-stamped reports" {
   local date_suffix; date_suffix=$(date +%Y%m%d)
   local r_file="${TEST_ROOT}/var/log/restic-backup/restore_drill_report_${date_suffix}.txt"
   local j_file="${TEST_ROOT}/var/log/restic-backup/restore_drill_report_${date_suffix}.json"
+  local h_file="${TEST_ROOT}/var/log/restic-backup/restore_drill_report_${date_suffix}.html"
   
   run cmd_audit --restore-drill --report --report-file "$r_file"
   [ "$status" -eq 0 ]
   [ -f "$r_file" ]
   [ -f "$j_file" ]
+  [ -f "$h_file" ]
+  
+  # Check permissions (600)
+  local h_perm; h_perm=$(stat -c "%a" "$h_file")
+  [ "$h_perm" = "600" ]
   
   run cat "$r_file"
   [[ "$output" == *"[보안 감사 증적] 백업 데이터 복구"* ]]
   
   run cat "$j_file"
   [[ "$output" == *"restore_drill"* ]]
+  
+  run cat "$h_file"
+  [[ "$output" == *"<!DOCTYPE html>"* ]]
+  [[ "$output" == *"백업 데이터 복구 및 정합성 테스트 결과 보고서"* ]]
 }
 
 @test "cmd_audit resolves tester, ciso, and rto from backup.env" {

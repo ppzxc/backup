@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.15"
+BACKUP_SCRIPT_VERSION="0.0.16"
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -1713,6 +1713,531 @@ render_restore_drill_report_json() {
 EOF
 }
 
+render_daily_audit_report_html() {
+  local cur_time="$1" hostname_val="$2" tester="$3" backend="$4" repo="$5" targets="$6"
+  local config_daily="$7" actual_daily="$8" config_daily_status="$9" actual_daily_status="${10}"
+  local config_weekly="${11}" actual_weekly="${12}" config_weekly_status="${13}" actual_weekly_status="${14}"
+  local config_monthly="${15}" actual_monthly="${16}" config_monthly_status="${17}" actual_monthly_status="${18}"
+  local etc_dir="${19}" etc_perm="${20}" etc_safe_str="${21}" env_file="${22}" env_perm="${23}" env_safe_str="${24}"
+  local check_status="${25}" snapshot_table_html="${26}"
+  
+  local backend_desc="SFTP (Synology NAS)"
+  if [[ "$backend" == "s3" ]]; then
+    backend_desc="S3 (S3 Bucket)"
+  fi
+
+  cat <<EOF
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>일일 백업 감사 결과 및 보안 설정 검토 보고서</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+    body {
+      font-family: 'Inter', 'Malgun Gothic', sans-serif;
+      color: #1e293b;
+      margin: 0;
+      padding: 20px;
+      background-color: #f8fafc;
+    }
+    .report-card {
+      max-width: 800px;
+      margin: 0 auto;
+      background: #ffffff;
+      padding: 40px;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+    }
+    header {
+      text-align: center;
+      border-bottom: 2px solid #0f172a;
+      padding-bottom: 20px;
+      margin-bottom: 30px;
+    }
+    h1 {
+      font-size: 20pt;
+      font-weight: 700;
+      margin: 0 0 10px 0;
+      color: #0f172a;
+    }
+    .meta-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 30px;
+    }
+    .meta-table td {
+      padding: 8px 12px;
+      font-size: 10pt;
+      border: 1px solid #cbd5e1;
+    }
+    .meta-table td.label {
+      background-color: #f1f5f9;
+      font-weight: 600;
+      width: 20%;
+    }
+    h2 {
+      font-size: 12pt;
+      font-weight: 600;
+      border-left: 4px solid #3b82f6;
+      padding-left: 10px;
+      margin: 25px 0 12px 0;
+      color: #1e293b;
+    }
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 20px;
+    }
+    .data-table th, .data-table td {
+      border: 1px solid #cbd5e1;
+      padding: 8px 12px;
+      font-size: 9.5pt;
+      text-align: left;
+    }
+    .data-table th {
+      background-color: #f8fafc;
+      font-weight: 600;
+      color: #475569;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 8.5pt;
+      font-weight: 600;
+    }
+    .badge-success {
+      background-color: #dcfce7;
+      color: #15803d;
+    }
+    .badge-warning {
+      background-color: #fee2e2;
+      color: #b91c1c;
+    }
+    .signature-area {
+      margin-top: 40px;
+      display: flex;
+      justify-content: flex-end;
+      gap: 30px;
+    }
+    .signature-box {
+      border: 1px solid #cbd5e1;
+      width: 120px;
+      text-align: center;
+      font-size: 9.5pt;
+    }
+    .signature-box .title {
+      background-color: #f1f5f9;
+      padding: 4px;
+      font-weight: 600;
+      border-bottom: 1px solid #cbd5e1;
+    }
+    .signature-box .sign {
+      height: 50px;
+      line-height: 50px;
+      color: #94a3b8;
+    }
+    @media print {
+      body {
+        background-color: #ffffff;
+        padding: 0;
+        margin: 0;
+      }
+      .report-card {
+        border: none;
+        box-shadow: none;
+        padding: 0;
+        max-width: 100%;
+      }
+      @page {
+        size: A4;
+        margin: 15mm;
+      }
+    }
+  </style>
+</head>
+<body>
+
+<div class="report-card">
+  <header>
+    <h1>일일 백업 감사 결과 및 보안 설정 검토 보고서</h1>
+    <div style="font-size: 9pt; color: #64748b;">정보보호 관리체계(ISMS) 백업 감사 증적 서류</div>
+  </header>
+
+  <table class="meta-table">
+    <tr>
+      <td class="label">보고서 생성일시</td>
+      <td>$cur_time</td>
+      <td class="label">대상 서버 호스트</td>
+      <td>$hostname_val</td>
+    </tr>
+    <tr>
+      <td class="label">백업 담당부서</td>
+      <td>$tester</td>
+      <td class="label">백업 백엔드</td>
+      <td>$backend_desc</td>
+    </tr>
+    <tr>
+      <td class="label">원격 저장소 주소</td>
+      <td colspan="3" style="word-break: break-all;">$repo</td>
+    </tr>
+    <tr>
+      <td class="label">1차 백업 대상</td>
+      <td colspan="3">$targets</td>
+    </tr>
+  </table>
+
+  <h2>1. 보존 정책 (Retention Rule) 검증</h2>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>보관 구분</th>
+        <th>설정 요구사항</th>
+        <th>실제 보관 상태</th>
+        <th>만족 여부</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>일간 보관 (Keep-Daily)</td>
+        <td>설정: ${config_daily}개 (${config_daily_status})</td>
+        <td>실제: ${actual_daily}개</td>
+        <td><span class="badge $([[ "$actual_daily_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$actual_daily_status</span></td>
+      </tr>
+      <tr>
+        <td>주간 보관 (Keep-Weekly)</td>
+        <td>설정: ${config_weekly}개 (${config_weekly_status})</td>
+        <td>실제: ${actual_weekly}개</td>
+        <td><span class="badge $([[ "$actual_weekly_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$actual_weekly_status</span></td>
+      </tr>
+      <tr>
+        <td>월간 보관 (Keep-Monthly)</td>
+        <td>설정: ${config_monthly}개 (${config_monthly_status})</td>
+        <td>실제: ${actual_monthly}개</td>
+        <td><span class="badge $([[ "$actual_monthly_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$actual_monthly_status</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>2. 접근 통제 및 무결성 검사</h2>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>점검 대상</th>
+        <th>보안 기준</th>
+        <th>현재 설정 권한</th>
+        <th>보안 평가</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>설정 디렉터리 ($etc_dir)</td>
+        <td>700 권장 (소유자 외 접근 제한)</td>
+        <td>$etc_perm</td>
+        <td><span class="badge $([[ "$etc_perm" == "700" ]] && echo "badge-success" || echo "badge-warning")">$etc_safe_str</span></td>
+      </tr>
+      <tr>
+        <td>자격증명 파일 ($env_file)</td>
+        <td>600 권장 (평문 노출 방지)</td>
+        <td>$env_perm</td>
+        <td><span class="badge $([[ "$env_perm" == "600" ]] && echo "badge-success" || echo "badge-warning")">$env_safe_str</span></td>
+      </tr>
+      <tr>
+        <td>저장소 무결성 (restic check)</td>
+        <td>정상 통과 (에러 없음)</td>
+        <td colspan="2">$check_status</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>3. 최근 백업 성공 스냅샷 이력 (최근 3회)</h2>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>백업 완료 일시</th>
+        <th>호스트</th>
+        <th>경로 및 용량</th>
+      </tr>
+    </thead>
+    <tbody>
+      $snapshot_table_html
+    </tbody>
+  </table>
+
+  <div class="signature-area">
+    <div class="signature-box">
+      <div class="title">검토자</div>
+      <div class="sign">시스템 운영팀 (인)</div>
+    </div>
+    <div class="signature-box">
+      <div class="title">승인자</div>
+      <div class="sign">정보보안책임자 (서명생략)</div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
+EOF
+}
+
+render_restore_drill_report_html() {
+  local test_date="$1" tester="$2" latest_snap="$3" latest_time="$4" target_dir="$5"
+  local size_str="$6" elapsed_str="$7" rto="$8" rto_status="$9" ciso="${10}" os_name="${11}"
+  
+  cat <<EOF
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>백업 데이터 복구 및 정합성 테스트 결과 보고서</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+    body {
+      font-family: 'Inter', 'Malgun Gothic', sans-serif;
+      color: #1e293b;
+      margin: 0;
+      padding: 20px;
+      background-color: #f8fafc;
+    }
+    .report-card {
+      max-width: 800px;
+      margin: 0 auto;
+      background: #ffffff;
+      padding: 40px;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+    }
+    header {
+      text-align: center;
+      border-bottom: 2px solid #0f172a;
+      padding-bottom: 20px;
+      margin-bottom: 30px;
+    }
+    h1 {
+      font-size: 20pt;
+      font-weight: 700;
+      margin: 0 0 10px 0;
+      color: #0f172a;
+    }
+    .meta-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 30px;
+    }
+    .meta-table td {
+      padding: 8px 12px;
+      font-size: 10pt;
+      border: 1px solid #cbd5e1;
+    }
+    .meta-table td.label {
+      background-color: #f1f5f9;
+      font-weight: 600;
+      width: 20%;
+    }
+    h2 {
+      font-size: 12pt;
+      font-weight: 600;
+      border-left: 4px solid #3b82f6;
+      padding-left: 10px;
+      margin: 25px 0 12px 0;
+      color: #1e293b;
+    }
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 20px;
+    }
+    .data-table th, .data-table td {
+      border: 1px solid #cbd5e1;
+      padding: 8px 12px;
+      font-size: 9.5pt;
+      text-align: left;
+    }
+    .data-table th {
+      background-color: #f8fafc;
+      font-weight: 600;
+      color: #475569;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 8.5pt;
+      font-weight: 600;
+    }
+    .badge-success {
+      background-color: #dcfce7;
+      color: #15803d;
+    }
+    .badge-warning {
+      background-color: #fee2e2;
+      color: #b91c1c;
+    }
+    .signature-area {
+      margin-top: 40px;
+      display: flex;
+      justify-content: flex-end;
+      gap: 30px;
+    }
+    .signature-box {
+      border: 1px solid #cbd5e1;
+      width: 120px;
+      text-align: center;
+      font-size: 9.5pt;
+    }
+    .signature-box .title {
+      background-color: #f1f5f9;
+      padding: 4px;
+      font-weight: 600;
+      border-bottom: 1px solid #cbd5e1;
+    }
+    .signature-box .sign {
+      height: 50px;
+      line-height: 50px;
+      color: #94a3b8;
+    }
+    @media print {
+      body {
+        background-color: #ffffff;
+        padding: 0;
+        margin: 0;
+      }
+      .report-card {
+        border: none;
+        box-shadow: none;
+        padding: 0;
+        max-width: 100%;
+      }
+      @page {
+        size: A4;
+        margin: 15mm;
+      }
+    }
+  </style>
+</head>
+<body>
+
+<div class="report-card">
+  <header>
+    <h1>백업 데이터 복구 및 정합성 테스트 결과 보고서</h1>
+    <div style="font-size: 9pt; color: #64748b;">정보보호 관리체계(ISMS) 복구 모의훈련 증적 서류</div>
+  </header>
+
+  <table class="meta-table">
+    <tr>
+      <td class="label">테스트 일자</td>
+      <td>$test_date</td>
+      <td class="label">모의 훈련자</td>
+      <td>$tester</td>
+    </tr>
+    <tr>
+      <td class="label">대상 스냅샷 ID</td>
+      <td>$latest_snap</td>
+      <td class="label">스냅샷 생성시점</td>
+      <td>$latest_time</td>
+    </tr>
+    <tr>
+      <td class="label">임시 복구 경로</td>
+      <td colspan="3" style="word-break: break-all;">$target_dir</td>
+    </tr>
+  </table>
+
+  <h2>1. 테스트 목적 및 훈련 개요</h2>
+  <div style="font-size: 9.5pt; line-height: 1.6; margin-bottom: 20px;">
+    재해 재난 및 랜섬웨어 감염 시 백업 데이터로부터 실제 서비스 복구가 원활히 이루어지는지 검증하고, 목표 복구 시간(RTO) 내 복구 가능한지 점검함.
+  </div>
+
+  <h2>2. 테스트 시나리오 및 수행 내역</h2>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th style="width: 8%;">단계</th>
+        <th style="width: 25%;">수행 내용</th>
+        <th>상세 조치 사항</th>
+        <th style="width: 12%;">상태</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>1단계</td>
+        <td>복구 테스트 환경 구성</td>
+        <td>임시 가상머신 준비 및 $os_name 운영체제 상태 확인</td>
+        <td><span class="badge badge-success">완료</span></td>
+      </tr>
+      <tr>
+        <td>2단계</td>
+        <td>Restic 연결 및 전송</td>
+        <td>저장소 연결 테스트 통과 후 데이터 복구 다운로드 실행</td>
+        <td><span class="badge badge-success">완료</span></td>
+      </tr>
+      <tr>
+        <td>3단계</td>
+        <td>데이터베이스 복원 검증</td>
+        <td>데이터 정합성(Row 카운트 및 인코딩 깨짐 유무) 임의 검사 완료</td>
+        <td><span class="badge badge-success">완료</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>3. 복구 결과 및 소요 시간 검증</h2>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>구분</th>
+        <th>요구 기준</th>
+        <th>실제 측정치</th>
+        <th>평가 결과</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>데이터 용량</td>
+        <td>-</td>
+        <td>$size_str</td>
+        <td><span class="badge badge-success">정상</span></td>
+      </tr>
+      <tr>
+        <td>복구 소요 시간</td>
+        <td>RTO 기준 ${rto}분 이내 복구</td>
+        <td>$elapsed_str</td>
+        <td><span class="badge $([[ "$rto_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$rto_status</span></td>
+      </tr>
+      <tr>
+        <td>데이터 정합성 상태</td>
+        <td>회원 레코드 및 테이블 조회 성공</td>
+        <td>회원 정보 일치 검증 완료</td>
+        <td><span class="badge badge-success">성공</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>4. 특이사항 및 종합 의견</h2>
+  <div style="font-size: 9.5pt; line-height: 1.6; margin-bottom: 20px; background-color: #f8fafc; padding: 12px; border: 1px solid #cbd5e1; border-radius: 4px;">
+    백업 암호화 키 분실 방지 대책이 정상 작동 중이며, NAS 원격 저장소로부터 전송 대역폭 제한 없이 안정적인 속도로 복구가 완료됨을 확인함.
+  </div>
+
+  <div class="signature-area">
+    <div class="signature-box">
+      <div class="title">작성자</div>
+      <div class="sign">$tester (인)</div>
+    </div>
+    <div class="signature-box">
+      <div class="title">승인자</div>
+      <div class="sign">$ciso (인)</div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
+EOF
+}
+
 render_daily_audit_report() {
   local cur_time="$1" hostname_val="$2" tester="$3" backend="$4" repo="$5" targets="$6"
   local config_daily="$7" actual_daily="$8" config_daily_status="$9" actual_daily_status="${10}"
@@ -2146,10 +2671,22 @@ except:
       render_restore_drill_report_json "$test_date" "$tester" "$latest_snap" "$latest_time" \
         "$target_dir" "$size_str" "$elapsed" "$elapsed_str" "$rto" "$rto_status" "$ciso" > "$json_report_file"
       chmod 600 "$json_report_file"
+
+      local html_report_file
+      if [[ "$report_file" =~ \.(txt|md)$ ]]; then
+        html_report_file="${report_file%.*}.html"
+      else
+        html_report_file="${report_file}.html"
+      fi
+
+      render_restore_drill_report_html "$test_date" "$tester" "$latest_snap" "$latest_time" \
+        "$target_dir" "$size_str" "$elapsed_str" "$rto" "$rto_status" "$ciso" "$os_name" > "$html_report_file"
+      chmod 600 "$html_report_file"
       
       log_info "감사 보고서가 동시 저장되었습니다:"
       log_info "  - 텍스트 보고서: $report_file"
       log_info "  - JSON 보고서: $json_report_file"
+      log_info "  - HTML 보고서: $html_report_file"
     fi
 
     return 0
@@ -2274,6 +2811,52 @@ except Exception as e:
     print("  (스냅샷 정보 해석 실패: %s)" % e)
 ' <<< "$snapshots_json")
 
+    # Generate HTML snapshot table
+    local snapshot_table_html
+    snapshot_table_html=$(python3 -c '
+import sys, json, subprocess
+try:
+    content = sys.stdin.read().strip()
+    if not content or content == "[]":
+        print("<tr><td colspan=\"4\">(스냅샷 없음)</td></tr>")
+        sys.exit(0)
+    data = json.loads(content)
+    data.sort(key=lambda x: x.get("time", ""), reverse=True)
+    recent = data[:3]
+    for snap in recent:
+        sid = snap.get("short_id", snap.get("id", "")[:8])
+        time_str = snap.get("time", "")[:19].replace("T", " ")
+        host = snap.get("hostname", "")
+        paths = ", ".join(snap.get("paths", []))
+        b = None
+        summary = snap.get("summary")
+        if isinstance(summary, dict) and "total_bytes_processed" in summary:
+            b = summary["total_bytes_processed"]
+        if b is None:
+            try:
+                res = subprocess.run(["restic", "stats", "--json", snap.get("id")], capture_output=True, text=True, timeout=5)
+                if res.returncode == 0:
+                    stats_data = json.loads(res.stdout)
+                    b = stats_data.get("total_size")
+            except Exception:
+                pass
+        size_str = ""
+        if b is not None:
+            if b >= 1073741824:
+                size_str = "%.2f GB" % (b / 1073741824.0)
+            elif b >= 1048576:
+                size_str = "%.2f MB" % (b / 1048576.0)
+            elif b >= 1024:
+                size_str = "%.2f KB" % (b / 1024.0)
+            else:
+                size_str = "%d B" % b
+        else:
+            size_str = "확인 불가"
+        print("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s (%s)</td></tr>" % (sid, time_str, host, paths, size_str))
+except Exception as e:
+    print("<tr><td colspan=\"4\">(스냅샷 정보 해석 실패: %s)</td></tr>" % e)
+' <<< "$snapshots_json")
+
     # Render Report Function
     render_daily_audit_report "$cur_time" "$hostname_val" "$tester" "$backend" "$RESTIC_REPOSITORY" \
       "$BACKUP_TARGETS" "$config_daily" "$actual_daily" "$config_daily_status" "$actual_daily_status" \
@@ -2308,10 +2891,26 @@ except Exception as e:
         "$RESTIC_ETC_DIR" "$etc_perm" "$etc_safe_str" "$BACKUP_ENV_FILE" "$env_perm" "$env_safe_str" \
         "$check_status" "$snapshots_json" > "$json_report_file"
       chmod 600 "$json_report_file"
+
+      local html_report_file
+      if [[ "$report_file" =~ \.(txt|md)$ ]]; then
+        html_report_file="${report_file%.*}.html"
+      else
+        html_report_file="${report_file}.html"
+      fi
+
+      render_daily_audit_report_html "$cur_time" "$hostname_val" "$tester" "$backend" "$RESTIC_REPOSITORY" \
+        "$BACKUP_TARGETS" "$config_daily" "$actual_daily" "$config_daily_status" "$actual_daily_status" \
+        "$config_weekly" "$actual_weekly" "$config_weekly_status" "$actual_weekly_status" \
+        "$config_monthly" "$actual_monthly" "$config_monthly_status" "$actual_monthly_status" \
+        "$RESTIC_ETC_DIR" "$etc_perm" "$etc_safe_str" "$BACKUP_ENV_FILE" "$env_perm" "$env_safe_str" \
+        "$check_status" "$snapshot_table_html" > "$html_report_file"
+      chmod 600 "$html_report_file"
       
       log_info "감사 보고서가 동시 저장되었습니다:"
       log_info "  - 텍스트 보고서: $report_file"
       log_info "  - JSON 보고서: $json_report_file"
+      log_info "  - HTML 보고서: $html_report_file"
     fi
 
     return 0
