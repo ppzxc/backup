@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.10"
+BACKUP_SCRIPT_VERSION="0.0.11"
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -672,9 +672,11 @@ render_resticprofile_notifications() {
     printf '      - method: "%s"\n' "$method"
     printf '        url: "%s"\n' "$notify_url"
     if [[ -n "$h_body" ]]; then
-      local escaped_body
-      escaped_body=$(echo -n "$h_body" | sed "s/'/''/g")
-      printf '        body: '\''%s'\''\n' "$escaped_body"
+      printf '        body: |\n'
+      local line
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        printf '          %s\n' "$line"
+      done <<< "$h_body"
     fi
     if [[ ${#headers[@]} -gt 0 ]]; then
       printf '        headers:\n'
