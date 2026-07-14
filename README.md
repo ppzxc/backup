@@ -235,6 +235,57 @@ $ sudo backup.sh setting \
 
 ---
 
+### 3. 다중 프로필(Multi-Profile) 기반 보관 주기 개별 격리 적용
+일반적으로 보안 감사 로그(최소 1~2년 보존)와 데이터베이스 백업(개인정보 파기 정책에 의거 3개월 내 단기 순환)은 요구되는 보존 수명이 다릅니다. 하나의 호스트 서버 내에서 백업 정책을 독립적으로 이원화하여 기동시키려면 환경 변수를 재정의하는 방식으로 다중 프로필을 운용할 수 있습니다.
+
+#### ① DB 백업 프로필 등록 (3개월 보존 주기)
+```bash
+$ sudo BACKUP_ENV_FILE=/etc/restic/db.env \
+       RESTICPROFILE_CONFIG_FILE=/etc/restic/db_profiles.yaml \
+       backup.sh setting \
+         --backend sftp \
+         --host 192.168.1.100 \
+         --user backupuser \
+         --password 'your-repo-password' \
+         --targets "/var/backup/db" \
+         --keep-daily 7 \
+         --keep-weekly 4 \
+         --keep-monthly 3 \
+         --profile-name "db-backup"
+```
+
+#### ② 로그 백업 프로필 등록 (2년/24개월 보존 주기)
+```bash
+$ sudo BACKUP_ENV_FILE=/etc/restic/log.env \
+       RESTICPROFILE_CONFIG_FILE=/etc/restic/log_profiles.yaml \
+       backup.sh setting \
+         --backend sftp \
+         --host 192.168.1.100 \
+         --user backupuser \
+         --password 'your-repo-password' \
+         --targets "/var/log" \
+         --keep-daily 7 \
+         --keep-weekly 4 \
+         --keep-monthly 24 \
+         --profile-name "log-backup"
+```
+
+#### ③ 스케줄러 개별 활성화
+```bash
+# DB 백업 활성화 (매일 새벽 3시)
+$ sudo BACKUP_ENV_FILE=/etc/restic/db.env \
+       RESTICPROFILE_CONFIG_FILE=/etc/restic/db_profiles.yaml \
+       backup.sh schedule enable --on-calendar "*-*-* 03:00:00"
+
+# 로그 백업 활성화 (매일 새벽 4시)
+$ sudo BACKUP_ENV_FILE=/etc/restic/log.env \
+       RESTICPROFILE_CONFIG_FILE=/etc/restic/log_profiles.yaml \
+       backup.sh schedule enable --on-calendar "*-*-* 04:00:00"
+```
+이렇게 설정하면 systemd timer 가 독립적으로 데몬에 등록되어(`restic-backup@db-backup.timer`, `restic-backup@log-backup.timer`), 각각 다른 주기와 경로로 백업 파이프라인이 자동 실행됩니다.
+
+---
+
 ## 🔄 백엔드 마이그레이션 (`migrate`)
 
 기존에 가동 중이던 백업 저장소(SFTP 또는 S3)의 모든 백업 데이터(전체 스냅샷 이력)를 새로운 목적지 저장소로 안전하게 복사하고, 현재 `backup.sh`가 돌아가고 있는 호스트 서버(클라이언트)의 백업 설정(`backup.env`), 프로필 및 `systemd` 스케줄러를 새 저장소 정보로 **완전히 전환**해 주는 고성능 마이그레이션 도구입니다.
