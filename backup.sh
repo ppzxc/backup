@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.17"
+BACKUP_SCRIPT_VERSION="0.0.18"
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -4208,6 +4208,9 @@ help_setting() {
       --keep-weekly <N>         주별 보관할 스냅샷 개수
       --keep-monthly <N>        월별 보관할 스냅샷 개수
       --profile-name <이름>     resticprofile 프로파일 이름 (기본값: 호스트명)
+      --audit-tester <이름>     일일 백업 감사 및 복구 테스트를 수행할 담당자 이름
+      --audit-ciso <이름>       보고서를 최종 승인할 정보보안책임자(CISO) 이름
+      --audit-rto <분>          복구 목표 시간(RTO, 분 단위)
       --force                   이미 백업 설정 파일이 존재할 때 경고 없이 덮어씁니다.
       --dry-run                 실제 설정을 저장하지 않고 화면에 시뮬레이션 예정만 표시합니다.
 
@@ -4247,23 +4250,25 @@ EOF
 
 help_schedule() {
   cat <<'EOF'
-주기적 정기 백업 수행을 위한 systemd timer를 활성화(schedule)하거나 비활성화(unschedule)합니다.
+주기적 정기 백업 수행 및 보안 감사 결과 보고 작성을 위한 systemd timer를 활성화(schedule)하거나 비활성화(unschedule)합니다.
 
 사용법:
   backup.sh schedule <enable|disable> [옵션...]
 
 사용법 예시:
-  # 기본 일정(매일 새벽 2시)으로 정기 백업 활성화
+  # 기본 일정으로 정기 백업 및 보안 감사 타이머 전체 활성화
   backup.sh schedule enable
 
-  # 특정 시간 일정(매일 새벽 3시 30분)으로 정기 백업 활성화
+  # 특정 시간 일정으로 정기 백업 활성화
   backup.sh schedule enable --on-calendar "*-*-* 03:30:00"
 
-  # 등록된 정기 백업 스케줄 비활성화 및 타이머 정지
+  # 등록된 모든 정기 백업 및 보안 감사 타이머 비활성화
   backup.sh schedule disable
 
 플래그 (Flags):
-      --on-calendar <OnCalendar식>  systemd timer OnCalendar 형식의 스케줄 지정 (예: "daily", "*-*-* 02:00:00")
+      --on-calendar <OnCalendar식>        정기 백업(resticprofile) 스케줄 주기 지정 (기본값: "*-*-* 02:00:00")
+      --on-calendar-daily <OnCalendar식>  일일 백업 감사 보고서 자동 생성을 위한 스케줄 주기 지정 (기본값: "*-*-* 01:00:00")
+      --on-calendar-drill <OnCalendar식>  복구 모의훈련 보고서 자동 생성을 위한 스케줄 주기 지정 (기본값: "*-*--01 01:00:00", 매월 1일)
 
 글로벌 플래그 (Global Flags):
   -v, --verbose                     디버깅용 상세 로그 출력
@@ -4307,25 +4312,34 @@ EOF
 
 help_audit() {
   cat <<'EOF'
-ISMS 및 ISO 27001 등 보안 컴플라이언스 대응을 위한 종합 백업 보고서를 화면에 출력하고 파일로 동시 보존합니다.
+ISMS 및 ISO 27001 등 보안 컴플라이언스 대응을 위한 종합 백업 보고서 및 복구 모의훈련 결과보고서를 화면에 출력하고 파일로 동시 보존합니다.
 
 사용법:
   backup.sh audit [flags]
 
 사용법 예시:
-  # 감사용 보고서를 터미널 화면에 즉시 출력
+  # 감사용 종합 보고서를 터미널 화면에 즉시 출력
   backup.sh audit
 
   # 화면에 출력하면서 지정된 기본 경로에 보고서 파일 동시 저장
-  # (텍스트: /var/log/restic-backup/audit_report.txt, JSON: /var/log/restic-backup/audit_report.json)
+  # (텍스트: /var/log/restic-backup/audit_report.txt, JSON: /var/log/restic-backup/audit_report.json, HTML: /var/log/restic-backup/audit_report.html)
   backup.sh audit --report
 
-  # 보고서가 저장될 파일 경로를 지정하여 저장
-  backup.sh audit --report --report-file /root/isms_audit.txt
+  # 일일 백업 감사 결과 보고서를 자동으로 생성 및 저장
+  backup.sh audit --daily --report
+
+  # 복구 모의훈련 수행 및 결과보고서를 자동 생성 및 저장
+  backup.sh audit --restore-drill --report
 
 플래그 (Flags):
-      --report              보고서 파일 생성 여부를 지정합니다.
-      --report-file <경로>   생성될 텍스트 보고서 파일의 경로를 직접 지정합니다. (자동으로 확장자를 .json으로 변환한 보고서도 생성됨)
+      --report              보고서 파일 생성 여부를 지정합니다. (자동으로 확장자를 .json, .html로 변환한 보고서도 함께 동시 저장됩니다)
+      --report-file <경로>   생성될 텍스트 보고서 파일의 경로를 직접 지정합니다.
+      --daily               일일 백업 검토 보고서 모드로 실행합니다.
+      --restore-drill       복구 모의훈련 보고서 모드로 실행합니다. (실제 복구 다운로드 수행 및 정합성 쿼리 테스트 트리거)
+      --tester <이름>        일일 백업 검토 및 복구 모의훈련 담당자 이름 (설정 파일값 무시하고 임시 지정)
+      --ciso <이름>          보고서 최종 승인 정보보안책임자 이름 (설정 파일값 무시하고 임시 지정)
+      --rto <분>             복구 목표 시간(RTO, 분 단위) (설정 파일값 무시하고 임시 지정)
+      --target <경로>        복구 모의훈련 시 임시 다운로드 및 쿼리 테스트를 수행할 임시 디렉터리 경로 (기본값: /tmp/restore_test)
 
 글로벌 플래그 (Global Flags):
   -v, --verbose             디버깅용 상세 로그 출력
@@ -4419,6 +4433,9 @@ help_config() {
       --keep-monthly <N>        월별 보관할 스냅샷 개수
       --profile-name <이름>     resticprofile 프로파일 이름 (기본값: 호스트명)
       --on-calendar <식>        정기 백업을 위한 systemd OnCalendar 포맷 주기 (예: "daily", "*-*-* 03:00:00")
+      --audit-tester <이름>     일일 백업 감사 및 복구 테스트를 수행할 담당자 이름
+      --audit-ciso <이름>       보고서를 최종 승인할 정보보안책임자(CISO) 이름
+      --audit-rto <분>          복구 목표 시간(RTO, 분 단위)
       --dry-run                 실제 설정을 변경해 저장하지 않고 예정 사항을 시뮬레이션하여 보여줍니다.
 
   SFTP 백엔드 전용 변경 옵션:
