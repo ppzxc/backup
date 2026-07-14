@@ -31,8 +31,12 @@ ENV
   [[ "$output" != *"super-secret"* ]]
   [[ "$output" == *"700"* ]]
   [[ "$output" == *"600"* ]]
+  [[ "$output" == *"일일 검토 타이머:"* ]]
+  [[ "$output" == *"복구 테스트 타이머:"* ]]
   run cat "${STUB_BIN}/systemctl.calls"
   [[ "$output" == *"is-active resticprofile-backup@profile-host1.timer"* ]]
+  [[ "$output" == *"is-active restic-audit-daily.timer"* ]]
+  [[ "$output" == *"is-active restic-audit-restore-drill.timer"* ]]
 }
 
 @test "cmd_status reports 'inactive' correctly when systemctl is-active exits nonzero (realistic stub)" {

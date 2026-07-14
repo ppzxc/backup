@@ -27,7 +27,25 @@ ENV
   '
   stub_command "restic" '
     case "$1" in
-      snapshots) echo "ID   Time  Host  Tags  Paths"; echo "abc123 2026-07-15 host  -    /var/log"; exit 0 ;;
+      snapshots)
+        if [[ "$*" == *"--json"* ]]; then
+          echo "[{\"id\":\"abc123456789\",\"short_id\":\"abc12345\",\"time\":\"2026-07-15T02:00:00Z\",\"hostname\":\"host\",\"paths\":[\"/var/log\"]}]"
+        else
+          echo "ID   Time  Host  Tags  Paths"
+          echo "abc123 2026-07-15 host  -    /var/log"
+        fi
+        exit 0
+        ;;
+      stats)
+        echo "{\"total_size\":4561234567,\"total_file_count\":1234}"
+        exit 0
+        ;;
+      check)
+        exit 0
+        ;;
+      restore)
+        exit 0
+        ;;
     esac
   '
 }
@@ -132,3 +150,79 @@ ENV
   [[ "$output" == *"\"backend\": \"sftp\""* ]]
   [[ "$output" == *"\"keep_daily\": 7"* ]]
 }
+
+@test "cmd_audit fails when both --daily and --restore-drill are passed" {
+  run cmd_audit --daily --restore-drill
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--daily와 --restore-drill 옵션은 동시에 사용할 수 없습니다"* ]]
+}
+
+@test "cmd_audit --daily outputs a compliant daily review report" {
+  run cmd_audit --daily
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[보안 감사 증적] 일일 백업 수행 결과 및 보안 설정 검토 보고서"* ]]
+  [[ "$output" == *"1. 백업 정책 및 백엔드 정보"* ]]
+  [[ "$output" == *"2. 보존 정책 (Retention Rule) 검증"* ]]
+  [[ "$output" == *"3. 접근 통제 및 무결성 검사"* ]]
+  [[ "$output" == *"4. 최근 백업 성공 스냅샷 이력"* ]]
+  [[ "$output" == *"설정 디렉터리"* ]]
+}
+
+@test "cmd_audit --restore-drill performs restore and outputs drill report" {
+  run cmd_audit --restore-drill --tester "테스터" --ciso "보안책임자" --rto 60
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[보안 감사 증적] 백업 데이터 복구 및 정합성 테스트 결과 보고서"* ]]
+  [[ "$output" == *"테스터: 테스터"* ]]
+  [[ "$output" == *"승인자: 보안책임자"* ]]
+  [[ "$output" == *"복구 소요 시간"* ]]
+}
+
+@test "cmd_schedule enable registers backup and audit reports timers" {
+  stub_command "resticprofile" 'echo "resticprofile $*" >> "'"${STUB_BIN}"'/resticprofile.calls"; exit 0'
+  stub_command "systemctl" 'echo "systemctl $*" >> "'"${STUB_BIN}"'/systemctl.calls"; exit 0'
+  
+  run cmd_schedule enable
+  [ "$status" -eq 0 ]
+  [ -f "${SYSTEMD_UNIT_DIR}/restic-audit-daily.timer" ]
+  [ -f "${SYSTEMD_UNIT_DIR}/restic-audit-restore-drill.timer" ]
+  
+  run cat "${STUB_BIN}/systemctl.calls"
+  [[ "$output" == *"enable --now restic-audit-daily.timer"* ]]
+  [[ "$output" == *"enable --now restic-audit-restore-drill.timer"* ]]
+}
+
+@test "cmd_audit --daily --report writes date-stamped reports" {
+  local date_suffix; date_suffix=$(date +%Y%m%d)
+  local r_file="${TEST_ROOT}/var/log/restic-backup/daily_backup_audit_report_${date_suffix}.txt"
+  local j_file="${TEST_ROOT}/var/log/restic-backup/daily_backup_audit_report_${date_suffix}.json"
+  
+  run cmd_audit --daily --report --report-file "$r_file"
+  [ "$status" -eq 0 ]
+  [ -f "$r_file" ]
+  [ -f "$j_file" ]
+  
+  run cat "$r_file"
+  [[ "$output" == *"[보안 감사 증적] 일일 백업 수행 결과"* ]]
+  
+  run cat "$j_file"
+  [[ "$output" == *"daily_backup_review"* ]]
+}
+
+@test "cmd_audit --restore-drill --report writes date-stamped reports" {
+  local date_suffix; date_suffix=$(date +%Y%m%d)
+  local r_file="${TEST_ROOT}/var/log/restic-backup/restore_drill_report_${date_suffix}.txt"
+  local j_file="${TEST_ROOT}/var/log/restic-backup/restore_drill_report_${date_suffix}.json"
+  
+  run cmd_audit --restore-drill --report --report-file "$r_file"
+  [ "$status" -eq 0 ]
+  [ -f "$r_file" ]
+  [ -f "$j_file" ]
+  
+  run cat "$r_file"
+  [[ "$output" == *"[보안 감사 증적] 백업 데이터 복구"* ]]
+  
+  run cat "$j_file"
+  [[ "$output" == *"restore_drill"* ]]
+}
+
+

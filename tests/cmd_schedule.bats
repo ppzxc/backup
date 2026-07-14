@@ -16,6 +16,7 @@ export KEEP_MONTHLY="12"
 export BACKUP_PROFILE_NAME="web01"
 ENV
   stub_command "resticprofile" 'echo "resticprofile $*" >> "'"${STUB_BIN}"'/resticprofile.calls"'
+  stub_command "systemctl" 'echo "systemctl $*" >> "'"${STUB_BIN}"'/systemctl.calls"; exit 0'
 }
 
 @test "cmd_schedule enable renders profiles.yaml and delegates to resticprofile schedule" {

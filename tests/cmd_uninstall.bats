@@ -5,6 +5,7 @@ load test_helper.bash
 setup() {
   setup_backup_sh_env
   stub_command "resticprofile" 'echo "resticprofile $*" >> "'"${STUB_BIN}"'/resticprofile.calls"'
+  stub_command "systemctl" 'echo "systemctl $*" >> "'"${STUB_BIN}"'/systemctl.calls"; exit 0'
   mkdir -p "$RESTIC_ETC_DIR"
   cat > "$BACKUP_ENV_FILE" <<'ENV'
 export RESTIC_PASSWORD=secret
