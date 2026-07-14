@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.11"
+BACKUP_SCRIPT_VERSION="0.0.12"
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -673,10 +673,15 @@ render_resticprofile_notifications() {
     printf '        url: "%s"\n' "$notify_url"
     if [[ -n "$h_body" ]]; then
       printf '        body: |\n'
+      local processed_body="$h_body"
+      # JSON 객체가 아닌 경우(일반 텍스트), \n 문자 코드를 실제 개행 문자로 치환하여 개행을 보존한다.
+      if [[ ! "$h_body" =~ ^[[:space:]]*\{ ]]; then
+        processed_body=$(printf '%b' "$h_body")
+      fi
       local line
       while IFS= read -r line || [[ -n "$line" ]]; do
         printf '          %s\n' "$line"
-      done <<< "$h_body"
+      done <<< "$processed_body"
     fi
     if [[ ${#headers[@]} -gt 0 ]]; then
       printf '        headers:\n'
