@@ -2,7 +2,8 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.22"
+BACKUP_SCRIPT_VERSION="0.0.23"
+
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -286,21 +287,23 @@ resolve_and_validate_config() {
   _resolved[profile_name]=$(resolve_value "$cli_profile_name" "$env_profile_name" "$file_profile_name" "$(hostname)")
 
   local cli_sec_backend="${_opts[secondary-backend]:-}"
-  _resolved[secondary_backend]=$(resolve_value "$cli_sec_backend" "$env_secondary_backend" "$file_secondary_backend" "")
+  _resolved["secondary_backend"]=$(resolve_value "$cli_sec_backend" "$env_secondary_backend" "$file_secondary_backend" "" || true)
 
   if [[ -n "${_resolved[secondary_backend]:-}" ]]; then
     local cli_sec_password="${_opts[secondary-password]:-}"
-    _resolved[secondary_password]=$(resolve_value "$cli_sec_password" "$env_secondary_password" "$file_secondary_password" "${_resolved[password]:-}")
+    _resolved["secondary_password"]=$(resolve_value "$cli_sec_password" "$env_secondary_password" "$file_secondary_password" "${_resolved[password]:-}" || true)
 
     local cli_sec_keep_daily="${_opts[secondary-keep-daily]:-}"
-    _resolved[secondary_keep_daily]=$(resolve_value "$cli_sec_keep_daily" "$env_secondary_keep_daily" "$file_secondary_keep_daily" "${_resolved[keep_daily]:-}")
+    _resolved["secondary_keep_daily"]=$(resolve_value "$cli_sec_keep_daily" "$env_secondary_keep_daily" "$file_secondary_keep_daily" "${_resolved[keep_daily]:-}" || true)
 
     local cli_sec_keep_weekly="${_opts[secondary-keep-weekly]:-}"
-    _resolved[secondary_keep_weekly]=$(resolve_value "$cli_sec_keep_weekly" "$env_secondary_keep_weekly" "$file_secondary_keep_weekly" "${_resolved[keep_weekly]:-}")
+    _resolved["secondary_keep_weekly"]=$(resolve_value "$cli_sec_keep_weekly" "$env_secondary_keep_weekly" "$file_secondary_keep_weekly" "${_resolved[keep_weekly]:-}" || true)
 
     local cli_sec_keep_monthly="${_opts[secondary-keep-monthly]:-}"
-    _resolved[secondary_keep_monthly]=$(resolve_value "$cli_sec_keep_monthly" "$env_secondary_keep_monthly" "$file_secondary_keep_monthly" "${_resolved[keep_monthly]:-}")
+    _resolved["secondary_keep_monthly"]=$(resolve_value "$cli_sec_keep_monthly" "$env_secondary_keep_monthly" "$file_secondary_keep_monthly" "${_resolved[keep_monthly]:-}" || true)
   fi
+
+
 
 
   # Resolve Exclude
@@ -1480,7 +1483,8 @@ append_secondary_config_and_notice() {
     local sec_notice=""
     if [[ "${__res_sec_ref[secondary_backend]}" == "s3" ]]; then
       sec_notice="[2차 소산지 S3] 최소권한 버킷 정책을 적용하세요:
-\$(render_s3_bucket_policy "${__res_sec_ref[secondary_bucket]}")"
+\$(render_s3_bucket_policy \"${__res_sec_ref[secondary_bucket]}\")"
+
     elif [[ "${__res_sec_ref[secondary_backend]}" == "sftp" ]]; then
       generate_ssh_key_if_missing
       local pubkey; pubkey="$(cat "${BACKUP_SSH_KEY}.pub")"
@@ -4550,6 +4554,72 @@ prompt_backend_choice() {
   done
 }
 
+cmd_upgrade_config() {
+  if has_help_flag "$@"; then
+    help_upgrade_config
+    return 0
+  fi
+  require_root
+
+  if [[ ! -f "$BACKUP_ENV_FILE" ]]; then
+    die "설정 파일이 존재하지 않습니다: ${BACKUP_ENV_FILE} (먼저 wizard나 setting을 실행하세요)"
+  fi
+
+  local -A opts=()
+  parse_opts_into opts "legacy-dir:" -- "$@"
+  
+  local legacy_dir="${opts[legacy-dir]:-/var/restic-local}"
+
+  if [[ ! -d "$legacy_dir" || ! -f "${legacy_dir}/config" ]]; then
+    log_info "이관할 로컬 데이터가 없습니다. (레거시 경로: ${legacy_dir} 미존재)"
+    return 0
+  fi
+
+  log_info "레거시 로컬 백업 저장소(${legacy_dir})를 발견했습니다. 원격지로 데이터 이관을 시작합니다..."
+  
+  # shellcheck source=/dev/null
+  source "$BACKUP_ENV_FILE"
+
+  local legacy_password="${RESTIC_PASSWORD}"
+
+  local copy_status=0
+  (
+    export RESTIC_REPOSITORY="${RESTIC_REPOSITORY}"
+    export RESTIC_PASSWORD="${RESTIC_PASSWORD}"
+    restic copy --from-repo "$legacy_dir" --from-password-file <(echo -n "$legacy_password") || exit 1
+  ) || copy_status=1
+
+  if (( copy_status )); then
+    die "로컬 백업 데이터를 원격지로 이관하는 도중 오류가 발생했습니다."
+  fi
+
+  log_info "데이터 이관이 완료되었습니다."
+  log_info "로컬 백업 데이터(${legacy_dir})를 삭제하여 디스크 공간을 정리하는 것을 권장합니다: rm -rf ${legacy_dir}"
+}
+
+help_upgrade_config() {
+  cat <<'EOF'
+기존의 1차 로컬 백업 데이터를 새로운 1차 원격 백업 저장소로 안전하게 마이그레이션(이관)하고,
+디스크 정리를 위한 가이드를 제공합니다.
+
+사용법:
+  backup.sh upgrade-config [flags]
+
+사용법 예시:
+  # 기본 경로(/var/restic-local)에 존재하는 로컬 데이터를 원격지로 이관
+  backup.sh upgrade-config
+
+  # 특정 경로에 있는 로컬 데이터를 원격지로 이관
+  backup.sh upgrade-config --legacy-dir /data/backup
+
+플래그 (Flags):
+      --legacy-dir <경로>     이관할 기존 로컬 restic 저장소 디렉터리 경로 (기본값: /var/restic-local)
+
+글로벌 플래그 (Global Flags):
+  -h, --help                  도움말 출력
+EOF
+}
+
 cmd_wizard() {
   if has_help_flag "$@"; then
     help_wizard
@@ -4727,7 +4797,7 @@ cmd_wizard() {
   else
     printf '위 안내(공개키 등록 또는 버킷 정책 적용)를 완료하셨으면 Enter를 누르세요: '
   fi
-  local _ack; read -r _ack
+  local _ack; read -r _ack || true
 
   cmd_init
 
@@ -4736,7 +4806,8 @@ cmd_wizard() {
   else
     printf '지금 정기 백업 스케줄을 등록할까요? 기본값은 매일 새벽 2시입니다. [Y/n]: '
   fi
-  local schedule_choice; read -r schedule_choice
+  local schedule_choice; read -r schedule_choice || true
+
   local schedule_enabled=0
   if [[ -z "$schedule_choice" || "$schedule_choice" =~ ^[Yy]$ ]]; then
     cmd_schedule enable
@@ -5281,17 +5352,18 @@ restic 기반 백업 설치, 운영, 모니터링 및 감사 관리를 자동화
   backup.sh [command] [flags]
 
 사용 가능한 명령 (Available Commands):
-  install     의존성 패키지(restic, rclone, resticprofile) 및 스크립트 자체 설치
-  setting     초기 백업 환경 설정(backup.env) 명시적 등록
-  init        연동된 원격 백업 저장소 초기화 (restic init)
-  schedule    정기 자동 백업 스케줄 설정 및 활성화/비활성화 (systemd timer)
-  run         수동 백업 즉시 실행 (resticprofile backup)
-  status      저장소 연결성, 보안 권한 상태 및 최근 백업 스냅샷 요약 조회
-  audit       ISMS/ISO 27001 컴플라이언스 감사 대응용 보고서 출력 및 저장
-  uninstall   정기 스케줄 제거 및 설치된 바이너리/스크립트 삭제
-  migrate     기존 저장소 백업 데이터를 새로운 스토리지 백엔드로 데이터 복제 및 설정 이관
-  config      기존 백업 설정(backup.env) 수정 및 관련 자산 동기화
-  wizard      단계별 설정을 위한 대화형 CLI 설정 마법사 실행
+  install        의존성 패키지(restic, rclone, resticprofile) 및 스크립트 자체 설치
+  setting        초기 백업 환경 설정(backup.env) 명시적 등록
+  init           연동된 원격 백업 저장소 초기화 (restic init)
+  schedule       정기 자동 백업 스케줄 설정 및 활성화/비활성화 (systemd timer)
+  run            수동 백업 즉시 실행 (resticprofile backup)
+  status         저장소 연결성, 보안 권한 상태 및 최근 백업 스냅샷 요약 조회
+  audit          ISMS/ISO 27001 컴플라이언스 감사 대응용 보고서 출력 및 저장
+  uninstall      정기 스케줄 제거 및 설치된 바이너리/스크립트 삭제
+  migrate        기존 저장소 백업 데이터를 새로운 스토리지 백엔드로 데이터 복제 및 설정 이관
+  config         기존 백업 설정(backup.env) 수정 및 관련 자산 동기화
+  wizard         단계별 설정을 위한 대화형 CLI 설정 마법사 실행
+  upgrade-config 기존 1차 로컬 백업 데이터를 새로운 1차 원격 저장소로 이관 및 환경 정리
 
 글로벌 플래그 (Global Flags):
   -h, --help     도움말 출력
@@ -5380,6 +5452,11 @@ main() {
     wizard)
       shift
       cmd_wizard "$@"
+      return $?
+      ;;
+    upgrade-config)
+      shift
+      cmd_upgrade_config "$@"
       return $?
       ;;
     *)

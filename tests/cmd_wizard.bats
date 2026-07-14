@@ -40,12 +40,19 @@ setup() {
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
     printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\ny\n" | cmd_wizard
   '
+  echo "WIZARD_STATUS: $status"
+  echo "WIZARD_OUTPUT: $output"
   [ "$status" -eq 0 ]
   [ -f "$BACKUP_ENV_FILE" ]
   grep -q 'RCLONE_CONFIG_SYNO_BACKUP_HOST="1.2.3.4"' "$BACKUP_ENV_FILE"
   [[ "$output" == *"ssh-ed25519"* ]]
   [[ "$output" == *"저장소 위치:"* ]]
 }
+
+
+
+
+
 
 @test "wizard's sftp prompts stay in sync with backend_sftp_resolve's field set" {
   local -A cli=() env=() file=() fields=()
