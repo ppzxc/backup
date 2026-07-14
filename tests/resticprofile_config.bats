@@ -148,3 +148,27 @@ setup() {
   [[ "$output" == *"{\"status\":\"error\",\"msg\":\"\${ERROR}\"}"* ]]
 }
 
+@test "render_resticprofile_config expands \\n in custom plain text notifications" {
+  export RESTIC_REPOSITORY="s3:https://s3.example.com/my-bucket/host1"
+  export RESTIC_PASSWORD="super-secret"
+  export BACKUP_TARGETS="/var/log"
+  export KEEP_DAILY="7"
+  export KEEP_WEEKLY="4"
+  export KEEP_MONTHLY="12"
+  export BACKUP_NOTIFICATION_URL="https://my.webhook.internal/alerts"
+  export BACKUP_NOTIFICATION_TYPE="custom"
+  export BACKUP_NOTIFICATION_ON="both"
+  export BACKUP_NOTIFICATION_METHOD="POST"
+  export BACKUP_NOTIFICATION_HEADERS="Content-Type: text/plain"
+  export BACKUP_NOTIFICATION_BODY_SUCCESS='🔔 SUCCESS\n- Host: ${HOSTNAME}'
+  export BACKUP_NOTIFICATION_BODY_FAILURE='🚨 FAILURE\n- Host: ${HOSTNAME}'
+
+  run render_resticprofile_config "web01" "*-*-* 02:00:00"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"body: |"* ]]
+  [[ "$output" == *"🔔 SUCCESS"* ]]
+  [[ "$output" == *"- Host: \${HOSTNAME}"* ]]
+  # Verify that literal \n was expanded to a physical newline and is not literal \n characters
+  [[ "$output" != *"🔔 SUCCESS\n"* ]]
+}
+
