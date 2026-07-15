@@ -62,21 +62,25 @@ setup() {
 
 @test "cmd_setting sftp reuses existing --exclude from backup.env on --force re-run" {
   cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --exclude '/custom/exclude/*'
-  grep -q "export BACKUP_EXCLUDES='/custom/exclude/\*'" "$BACKUP_ENV_FILE"
+  run config_get "excludes_csv" "$BACKUP_ENV_FILE"
+  [ "$output" = "/custom/exclude/*" ]
 
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --force
   [ "$status" -eq 0 ]
-  grep -q "export BACKUP_EXCLUDES='/custom/exclude/\*'" "$BACKUP_ENV_FILE"
+  run config_get "excludes_csv" "$BACKUP_ENV_FILE"
+  [ "$output" = "/custom/exclude/*" ]
 }
 
 @test "cmd_setting sftp defaults profile-name to hostname and honors --profile-name override" {
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret
   [ "$status" -eq 0 ]
-  grep -q "export BACKUP_PROFILE_NAME='$(hostname)'" "$BACKUP_ENV_FILE"
+  run config_get "profile_name" "$BACKUP_ENV_FILE"
+  [ "$output" = "$(hostname)" ]
 
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --profile-name web01 --force
   [ "$status" -eq 0 ]
-  grep -q "export BACKUP_PROFILE_NAME='web01'" "$BACKUP_ENV_FILE"
+  run config_get "profile_name" "$BACKUP_ENV_FILE"
+  [ "$output" = "web01" ]
 }
 
 @test "cmd_setting rejects an invalid --profile-name" {
@@ -89,27 +93,32 @@ setup() {
   stub_command "hostname" 'echo "funa1.nanoit.kr"'
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret
   [ "$status" -eq 0 ]
-  grep -q "export BACKUP_PROFILE_NAME='funa1.nanoit.kr'" "$BACKUP_ENV_FILE"
+  run config_get "profile_name" "$BACKUP_ENV_FILE"
+  [ "$output" = "funa1.nanoit.kr" ]
 }
 
 @test "cmd_setting sftp accepts --db-type and writes BACKUP_DB_TYPE to backup.env" {
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --db-type mysql
   [ "$status" -eq 0 ]
-  grep -q "export BACKUP_DB_TYPE='mysql'" "$BACKUP_ENV_FILE"
+  run config_get "db_type" "$BACKUP_ENV_FILE"
+  [ "$output" = "mysql" ]
 }
 
 @test "cmd_setting sftp auto-fills default dump commands based on --db-type" {
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --db-type mysql --force
   [ "$status" -eq 0 ]
-  grep -q "export BACKUP_DB_COMMAND='mysqldump --all-databases --single-transaction --quick --order-by-primary'" "$BACKUP_ENV_FILE"
+  run config_get "db_command" "$BACKUP_ENV_FILE"
+  [ "$output" = "mysqldump --all-databases --single-transaction --quick --order-by-primary" ]
 
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --db-type mariadb --force
   [ "$status" -eq 0 ]
-  grep -q "export BACKUP_DB_COMMAND='mariadb-dump --all-databases --single-transaction --quick --order-by-primary'" "$BACKUP_ENV_FILE"
+  run config_get "db_command" "$BACKUP_ENV_FILE"
+  [ "$output" = "mariadb-dump --all-databases --single-transaction --quick --order-by-primary" ]
 
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --db-type postgres --force
   [ "$status" -eq 0 ]
-  grep -q "export BACKUP_DB_COMMAND='pg_dumpall -U postgres'" "$BACKUP_ENV_FILE"
+  run config_get "db_command" "$BACKUP_ENV_FILE"
+  [ "$output" = "pg_dumpall -U postgres" ]
 }
 
 @test "cmd_setting sftp configuration with double quotes in password and user" {

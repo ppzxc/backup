@@ -2,7 +2,31 @@
 
 # Setup helper for executing commands in the 'app' container
 dexec() {
-  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T app bash -c "$1"
+  local cmd="$1"
+  if [[ "$cmd" == *"source /etc/restic/backup.env"* ]]; then
+    local subcmd="${cmd#*source /etc/restic/backup.env && }"
+    docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T app bash -c "
+      if [[ -f /etc/restic/backup.env ]]; then
+        while IFS= read -r line || [[ -n \"\$line\" ]]; do
+          [[ \"\$line\" =~ ^[[:space:]]*# ]] && continue
+          [[ \"\$line\" =~ ^[[:space:]]*\$ ]] && continue
+          if [[ \"\$line\" =~ ^([A-Za-z_][A-Za-z0-9_]*)=\'(.*)\'\$ ]]; then
+            k=\"\${BASH_REMATCH[1]}\"
+            v=\"\${BASH_REMATCH[2]}\"
+            v=\"\${v//\\'\\'/\\'}\"
+            export \"\$k\"=\"\$v\"
+          elif [[ \"\$line\" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)\$ ]]; then
+            k=\"\${BASH_REMATCH[1]}\"
+            v=\"\${BASH_REMATCH[2]}\"
+            export \"\$k\"=\"\$v\"
+          fi
+        done < /etc/restic/backup.env
+      fi
+      $subcmd
+    "
+  else
+    docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T app bash -c "$cmd"
+  fi
 }
 
 # General helper for running docker compose commands in the integration folder
@@ -412,3 +436,40 @@ seed_databases() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"/tmp/legacy_file.txt"* ]]
 }
+
+# 11. Migration: SFTP to S3 preserving secondary S3 backend
+@test "Migration: SFTP to S3 preserving secondary S3 backend" {
+  dc_exec exec -T minio mc mb -p local/restic-test-primary-migrate || true
+  dc_exec exec -T minio mc mb -p local/restic-test-secondary-migrate || true
+  dc_exec exec -T sftp sh -c 'rm -rf /home/backup_restic/backup/*'
+
+  dexec "bash backup.sh setting --backend sftp \
+    --host sftp --port 22 --user backup_restic \
+    --password test-repo-password \
+    --secondary-backend s3 \
+    --secondary-endpoint http://minio:9000 --secondary-bucket restic-test-secondary-migrate \
+    --secondary-access-key AKIAIOSFODNN7EXAMPLE --secondary-secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --secondary-password test-sec-password --force"
+
+  register_sftp_keys "backup_restic"
+
+  dexec "bash backup.sh init"
+  dexec "bash backup.sh run"
+
+  dexec "bash backup.sh migrate --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test-primary-migrate \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --new-password pass-migrated-primary --force"
+
+  run dexec "source /etc/restic/backup.env && restic snapshots --json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostname"* ]]
+
+  run dexec "grep -q 'SECONDARY_BACKEND='''s3'''' /etc/restic/backup.env"
+  [ "$status" -eq 0 ]
+  run dexec "grep -q 'SECONDARY_RESTIC_REPOSITORY='''s3:http://minio:9000/restic-test-secondary-migrate' /etc/restic/backup.env"
+  [ "$status" -eq 0 ]
+  run dexec "grep -q 'SECONDARY_AWS_ACCESS_KEY_ID='''AKIAIOSFODNN7EXAMPLE'''' /etc/restic/backup.env"
+  [ "$status" -eq 0 ]
+}
+
