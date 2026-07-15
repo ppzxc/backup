@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.30"
+BACKUP_SCRIPT_VERSION="0.0.31"
 
 
 
@@ -1704,19 +1704,19 @@ backend_sftp_render_env() {
   # shellcheck disable=SC2178
   local -n fields_ref="$2" policy_ref="$3"
   cat <<EOF
-export RESTIC_REPOSITORY="rclone:syno_backup:/backup/${hostname_tag}"
-export RCLONE_CONFIG_SYNO_BACKUP_TYPE="sftp"
-export RCLONE_CONFIG_SYNO_BACKUP_HOST="${fields_ref[host]}"
-export RCLONE_CONFIG_SYNO_BACKUP_USER="${fields_ref[user]}"
-export RCLONE_CONFIG_SYNO_BACKUP_PORT="${fields_ref[port]}"
-export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="${BACKUP_SSH_KEY}"
-export RESTIC_PASSWORD="${policy_ref[password]}"
-export BACKUP_TARGETS="${policy_ref[targets]}"
-export BACKUP_EXCLUDES="${policy_ref[excludes_csv]}"
-export KEEP_DAILY="${policy_ref[keep_daily]}"
-export KEEP_WEEKLY="${policy_ref[keep_weekly]}"
-export KEEP_MONTHLY="${policy_ref[keep_monthly]}"
-export BACKUP_PROFILE_NAME="${policy_ref[profile_name]}"
+export RESTIC_REPOSITORY='rclone:syno_backup:/backup/$(escape_single_quotes "${hostname_tag}")'
+export RCLONE_CONFIG_SYNO_BACKUP_TYPE='sftp'
+export RCLONE_CONFIG_SYNO_BACKUP_HOST='$(escape_single_quotes "${fields_ref[host]}")'
+export RCLONE_CONFIG_SYNO_BACKUP_USER='$(escape_single_quotes "${fields_ref[user]}")'
+export RCLONE_CONFIG_SYNO_BACKUP_PORT='$(escape_single_quotes "${fields_ref[port]}")'
+export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE='$(escape_single_quotes "${BACKUP_SSH_KEY}")'
+export RESTIC_PASSWORD='$(escape_single_quotes "${policy_ref[password]}")'
+export BACKUP_TARGETS='$(escape_single_quotes "${policy_ref[targets]}")'
+export BACKUP_EXCLUDES='$(escape_single_quotes "${policy_ref[excludes_csv]:-}")'
+export KEEP_DAILY='$(escape_single_quotes "${policy_ref[keep_daily]}")'
+export KEEP_WEEKLY='$(escape_single_quotes "${policy_ref[keep_weekly]}")'
+export KEEP_MONTHLY='$(escape_single_quotes "${policy_ref[keep_monthly]}")'
+export BACKUP_PROFILE_NAME='$(escape_single_quotes "${policy_ref[profile_name]}")'
 EOF
 }
 
@@ -1805,16 +1805,16 @@ backend_s3_render_env() {
   local hostname_tag="$1"
   local -n fields_ref="$2" policy_ref="$3"
   cat <<EOF
-export RESTIC_REPOSITORY="s3:${fields_ref[endpoint]}/${fields_ref[bucket]}/${hostname_tag}"
-export AWS_ACCESS_KEY_ID="${fields_ref[access_key]}"
-export AWS_SECRET_ACCESS_KEY="${fields_ref[secret_key]}"
-export RESTIC_PASSWORD="${policy_ref[password]}"
-export BACKUP_TARGETS="${policy_ref[targets]}"
-export BACKUP_EXCLUDES="${policy_ref[excludes_csv]}"
-export KEEP_DAILY="${policy_ref[keep_daily]}"
-export KEEP_WEEKLY="${policy_ref[keep_weekly]}"
-export KEEP_MONTHLY="${policy_ref[keep_monthly]}"
-export BACKUP_PROFILE_NAME="${policy_ref[profile_name]}"
+export RESTIC_REPOSITORY='s3:$(escape_single_quotes "${fields_ref[endpoint]}")/$(escape_single_quotes "${fields_ref[bucket]}")/$(escape_single_quotes "${hostname_tag}")'
+export AWS_ACCESS_KEY_ID='$(escape_single_quotes "${fields_ref[access_key]}")'
+export AWS_SECRET_ACCESS_KEY='$(escape_single_quotes "${fields_ref[secret_key]}")'
+export RESTIC_PASSWORD='$(escape_single_quotes "${policy_ref[password]}")'
+export BACKUP_TARGETS='$(escape_single_quotes "${policy_ref[targets]}")'
+export BACKUP_EXCLUDES='$(escape_single_quotes "${policy_ref[excludes_csv]:-}")'
+export KEEP_DAILY='$(escape_single_quotes "${policy_ref[keep_daily]}")'
+export KEEP_WEEKLY='$(escape_single_quotes "${policy_ref[keep_weekly]}")'
+export KEEP_MONTHLY='$(escape_single_quotes "${policy_ref[keep_monthly]}")'
+export BACKUP_PROFILE_NAME='$(escape_single_quotes "${policy_ref[profile_name]}")'
 EOF
 }
 
@@ -1931,19 +1931,19 @@ backend_sftp_configure() {
 
   # Render Env
   _out_env=$(cat <<EOF
-export RESTIC_REPOSITORY="rclone:syno_backup:/backup/${_resolved[profile_name]:-$(hostname)}"
-export RCLONE_CONFIG_SYNO_BACKUP_TYPE="sftp"
-export RCLONE_CONFIG_SYNO_BACKUP_HOST="${_resolved[host]}"
-export RCLONE_CONFIG_SYNO_BACKUP_USER="${_resolved[user]}"
-export RCLONE_CONFIG_SYNO_BACKUP_PORT="${_resolved[port]}"
-export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="${BACKUP_SSH_KEY}"
-export RESTIC_PASSWORD="${_resolved[password]}"
-export BACKUP_TARGETS="${_resolved[targets]}"
-export BACKUP_EXCLUDES="${_resolved[excludes_csv]:-}"
-export KEEP_DAILY="${_resolved[keep_daily]}"
-export KEEP_WEEKLY="${_resolved[keep_weekly]}"
-export KEEP_MONTHLY="${_resolved[keep_monthly]}"
-export BACKUP_PROFILE_NAME="${_resolved[profile_name]}"
+export RESTIC_REPOSITORY='rclone:syno_backup:/backup/$(escape_single_quotes "${_resolved[profile_name]:-$(hostname)}")'
+export RCLONE_CONFIG_SYNO_BACKUP_TYPE='sftp'
+export RCLONE_CONFIG_SYNO_BACKUP_HOST='$(escape_single_quotes "${_resolved[host]}")'
+export RCLONE_CONFIG_SYNO_BACKUP_USER='$(escape_single_quotes "${_resolved[user]}")'
+export RCLONE_CONFIG_SYNO_BACKUP_PORT='$(escape_single_quotes "${_resolved[port]}")'
+export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE='$(escape_single_quotes "${BACKUP_SSH_KEY}")'
+export RESTIC_PASSWORD='$(escape_single_quotes "${_resolved[password]}")'
+export BACKUP_TARGETS='$(escape_single_quotes "${_resolved[targets]}")'
+export BACKUP_EXCLUDES='$(escape_single_quotes "${_resolved[excludes_csv]:-}")'
+export KEEP_DAILY='$(escape_single_quotes "${_resolved[keep_daily]}")'
+export KEEP_WEEKLY='$(escape_single_quotes "${_resolved[keep_weekly]}")'
+export KEEP_MONTHLY='$(escape_single_quotes "${_resolved[keep_monthly]}")'
+export BACKUP_PROFILE_NAME='$(escape_single_quotes "${_resolved[profile_name]}")'
 EOF
 )
   _out_env+="$(render_notification_env_block _resolved)"
@@ -1989,16 +1989,16 @@ backend_s3_configure() {
 
   # Render Env
   _out_env=$(cat <<EOF
-export RESTIC_REPOSITORY="s3:${_resolved[endpoint]}/${_resolved[bucket]}/${_resolved[profile_name]:-$(hostname)}"
-export AWS_ACCESS_KEY_ID="${_resolved[access_key]}"
-export AWS_SECRET_ACCESS_KEY="${_resolved[secret_key]}"
-export RESTIC_PASSWORD="${_resolved[password]}"
-export BACKUP_TARGETS="${_resolved[targets]}"
-export BACKUP_EXCLUDES="${_resolved[excludes_csv]:-}"
-export KEEP_DAILY="${_resolved[keep_daily]}"
-export KEEP_WEEKLY="${_resolved[keep_weekly]}"
-export KEEP_MONTHLY="${_resolved[keep_monthly]}"
-export BACKUP_PROFILE_NAME="${_resolved[profile_name]}"
+export RESTIC_REPOSITORY='s3:$(escape_single_quotes "${_resolved[endpoint]}")/$(escape_single_quotes "${_resolved[bucket]}")/$(escape_single_quotes "${_resolved[profile_name]:-$(hostname)}")'
+export AWS_ACCESS_KEY_ID='$(escape_single_quotes "${_resolved[access_key]}")'
+export AWS_SECRET_ACCESS_KEY='$(escape_single_quotes "${_resolved[secret_key]}")'
+export RESTIC_PASSWORD='$(escape_single_quotes "${_resolved[password]}")'
+export BACKUP_TARGETS='$(escape_single_quotes "${_resolved[targets]}")'
+export BACKUP_EXCLUDES='$(escape_single_quotes "${_resolved[excludes_csv]:-}")'
+export KEEP_DAILY='$(escape_single_quotes "${_resolved[keep_daily]}")'
+export KEEP_WEEKLY='$(escape_single_quotes "${_resolved[keep_weekly]}")'
+export KEEP_MONTHLY='$(escape_single_quotes "${_resolved[keep_monthly]}")'
+export BACKUP_PROFILE_NAME='$(escape_single_quotes "${_resolved[profile_name]}")'
 EOF
 )
   _out_env+="$(render_notification_env_block _resolved)"

@@ -96,10 +96,10 @@ ENV
   echo "--- ACTUAL backup.env CONTENT: ---" >&2
   echo "$output" >&2
   echo "----------------------------------" >&2
-  [[ "$output" == *"RESTIC_REPOSITORY=\"s3:http://new-s3/new-bucket/host1\""* ]]
-  [[ "$output" == *"RESTIC_PASSWORD=\"newsecret\""* ]]
-  [[ "$output" == *"AWS_ACCESS_KEY_ID=\"key\""* ]]
-  [[ "$output" == *"AWS_SECRET_ACCESS_KEY=\"sec\""* ]]
+  [[ "$output" == *"RESTIC_REPOSITORY='s3:http://new-s3/new-bucket/host1'"* ]]
+  [[ "$output" == *"RESTIC_PASSWORD='newsecret'"* ]]
+  [[ "$output" == *"AWS_ACCESS_KEY_ID='key'"* ]]
+  [[ "$output" == *"AWS_SECRET_ACCESS_KEY='sec'"* ]]
   [[ "$output" != *"RCLONE_CONFIG_SYNO_BACKUP_HOST"* ]] # Old SFTP config should be removed
 
   # Verify restic calls
@@ -154,7 +154,7 @@ ENV
 
   run cat "$BACKUP_ENV_FILE"
   # Should retain old password "oldsecret"
-  [[ "$output" == *"RESTIC_PASSWORD=\"oldsecret\""* ]]
+  [[ "$output" == *"RESTIC_PASSWORD='oldsecret'"* ]]
 
   run cat "${STUB_BIN}/restic.calls"
   # Should not have check command because --skip-check was specified

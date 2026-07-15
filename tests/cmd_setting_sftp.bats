@@ -62,21 +62,21 @@ setup() {
 
 @test "cmd_setting sftp reuses existing --exclude from backup.env on --force re-run" {
   cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --exclude '/custom/exclude/*'
-  grep -q 'export BACKUP_EXCLUDES="/custom/exclude/\*"' "$BACKUP_ENV_FILE"
+  grep -q "export BACKUP_EXCLUDES='/custom/exclude/\*'" "$BACKUP_ENV_FILE"
 
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --force
   [ "$status" -eq 0 ]
-  grep -q 'export BACKUP_EXCLUDES="/custom/exclude/\*"' "$BACKUP_ENV_FILE"
+  grep -q "export BACKUP_EXCLUDES='/custom/exclude/\*'" "$BACKUP_ENV_FILE"
 }
 
 @test "cmd_setting sftp defaults profile-name to hostname and honors --profile-name override" {
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret
   [ "$status" -eq 0 ]
-  grep -q "export BACKUP_PROFILE_NAME=\"$(hostname)\"" "$BACKUP_ENV_FILE"
+  grep -q "export BACKUP_PROFILE_NAME='$(hostname)'" "$BACKUP_ENV_FILE"
 
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --profile-name web01 --force
   [ "$status" -eq 0 ]
-  grep -q 'export BACKUP_PROFILE_NAME="web01"' "$BACKUP_ENV_FILE"
+  grep -q "export BACKUP_PROFILE_NAME='web01'" "$BACKUP_ENV_FILE"
 }
 
 @test "cmd_setting rejects an invalid --profile-name" {
@@ -89,7 +89,7 @@ setup() {
   stub_command "hostname" 'echo "funa1.nanoit.kr"'
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret
   [ "$status" -eq 0 ]
-  grep -qF 'export BACKUP_PROFILE_NAME="funa1.nanoit.kr"' "$BACKUP_ENV_FILE"
+  grep -q "export BACKUP_PROFILE_NAME='funa1.nanoit.kr'" "$BACKUP_ENV_FILE"
 }
 
 @test "cmd_setting sftp accepts --db-type and writes BACKUP_DB_TYPE to backup.env" {
@@ -110,6 +110,17 @@ setup() {
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --db-type postgres --force
   [ "$status" -eq 0 ]
   grep -q "export BACKUP_DB_COMMAND='pg_dumpall -U postgres'" "$BACKUP_ENV_FILE"
+}
+
+@test "cmd_setting sftp configuration with double quotes in password and user" {
+  run cmd_setting --backend sftp --host "1.2.3.4" --port 22 --user 'user"with"quotes' --password 'pass"with"quotes'
+  [ "$status" -eq 0 ]
+  [ -f "$BACKUP_ENV_FILE" ]
+
+  run bash -c "source $BACKUP_ENV_FILE && echo \"user=\$RCLONE_CONFIG_SYNO_BACKUP_USER\" && echo \"pass=\$RESTIC_PASSWORD\""
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"user=user\"with\"quotes"* ]]
+  [[ "$output" == *"pass=pass\"with\"quotes"* ]]
 }
 
 
