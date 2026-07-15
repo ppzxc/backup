@@ -443,6 +443,88 @@ $ bats tests/integration/integration.bats
 | **`cmd_*.bats` (13종)** | 단위 테스트 | `install`, `setting`, `init`, `run`, `schedule`, `status`, `audit`, `uninstall`, `migrate` 등 각 서브커맨드의 호출 흐름 및 Mocking 실행 검증 |
 | **`help.bats`** | 단위 테스트 | 도움말(`--help`) 명령어별 사용법 텍스트 출력 포맷 검증 |
 
+<details>
+<summary><b>🔍 Bats 단위 테스트 케이스 상세 명세 (총 140여 개) - 클릭하여 펼치기</b></summary>
+
+##### 1. [validators.bats](file:///home/ppzxc/projects/backup/tests/validators.bats) (입력 유효성 검증)
+* `validate_backend`: `s3`, `sftp` 유효한 백엔드 종류 수락 및 정의되지 않은 백엔드 예외 반환 검증
+* `validate_port`: `22` 및 `65535`와 같은 유효 범위 포트 수락, `0` 및 `65536`과 비숫자, 비정상 8진수 형식 포트 거부 검증
+* `validate_positive_int`: 올바른 양의 정수 형식 수락, `0` 및 비숫자 거부, 선행 0(leading-zero)을 10진수로 정상 해석하는지 검증
+* `validate_profile_name`: 호스트명 문자/숫자/언더바/하이픈/FQDN 도메인 형식 수락, 슬래시/공백/빈값 거부 검증
+* `check_targets_size_warning`: 백업 대상 디렉터리(`etc`, `var/log` 등) 중 1GB 초과 디렉터리가 복수 개 존재할 때의 디스크 경고 작동성 검증
+* `resolve_and_validate_config`: 백업 설정 해석 시 글로벌 설정 우선순위 해석 및 누적된 포괄적 에러 반환 검증, 백엔드별 세부 속성 검증, 웹훅 알림(Slack, Discord, Custom) 매개변수 유효성 검증
+
+##### 2. [resolve_value.bats](file:///home/ppzxc/projects/backup/tests/resolve_value.bats) (설정 우선순위 해석)
+* `cli value wins over everything`: CLI 전달 인자가 최우선 순위로 결정됨을 검증
+* `env value wins when cli is empty`: CLI 인자가 비었을 때 환경 변수(`env`) 설정이 승리함을 검증
+* `file value wins when cli and env are empty`: CLI 및 env 둘 다 비었을 때 `backup.env` 파일 설정이 승리함을 검증
+* `default is used when everything else is empty`: 모든 설정이 부재할 때 시스템 기본 내장값으로 기본 수립됨을 검증
+* `returns 1 and prints nothing when all are empty`: 기본값마저 없는 필수값이 전체 부재할 경우 에러 코드(1) 반환을 검증
+
+##### 3. [parse_long_opts.bats](file:///home/ppzxc/projects/backup/tests/parse_long_opts.bats) (CLI 롱 옵션 파서)
+* `parses a single value flag with space form`: 공백 구분 형태의 단일 인자(`--flag value`) 파싱 검증
+* `parses a single value flag with equals form`: 등호 구분 형태의 단일 인자(`--flag=value`) 파싱 검증
+* `parses a boolean flag`: 단독 불리언 플래그 파싱 검증
+* `parses repeated value flags into multiple lines`: 동일 플래그 다중 지정 시 줄바꿈 문자로 취합 분할 파싱 검증
+* `parses mixed value and boolean flags`: 복합 옵션들이 혼재된 아규먼트 정밀 파싱 검증
+* `rejects unknown flag`: 파서 명세에 없는 미정의 플래그 전달 시 거부 검증
+* `rejects value flag missing its value`: 값을 동반해야 하는 플래그의 값이 누락되었을 시 에러 반환 검증
+* `rejects unexpected positional argument`: 예상치 못한 위치 인자가 입력되었을 시 파싱 거부 검증
+* `empty args with empty spec succeeds with no output`: 빈 인자 및 명세 시 무부하 성공 검증
+
+##### 4. [parse_opts_into.bats](file:///home/ppzxc/projects/backup/tests/parse_opts_into.bats) (연관 배열 데이터 바인딩)
+* `parse_opts_into fills an assoc array with value flags`: 파싱된 단일값을 연관 배열 키-값에 바인딩
+* `parse_opts_into fills boolean flags with 1`: 불리언 플래그 파싱 시 연관 배열 값을 `1`로 치환 바인딩
+* `parse_opts_into handles hyphenated flag names as keys`: 하이픈 플래그명을 언더스코어로 키 포맷팅 처리
+* `parse_opts_into joins repeated flags with commas`: 중복 지정된 파싱값을 콤마(`,`) 구분자로 연계 취합
+* `parse_opts_into leaves the array empty when no flags are given`: 무인자 전달 시 빈 배열 유지
+* `parse_opts_into dies with parse_long_opts's error message on an unknown flag`: 잘못된 플래그 유입 시 파서 에러 전파 후 프로세스 중단 검증
+
+##### 5. [render_hints.bats](file:///home/ppzxc/projects/backup/tests/render_hints.bats) (CLI 힌트 및 에러 메세지 렌더링)
+* `render_placeholder_or_value`: 값이 있을 때의 실제 값 반환 및 빈 값일 때의 플레이스홀더(`[PLACEHOLDER]`) 변환 검증
+* `render_setting_hint_sftp` / `render_setting_hint_s3`: 각 백엔드 설정 관련 필수 명령어 가이드 및 패스워드 등 보안 민감 정보의 안전한 마스킹 출력 검증
+* `render_missing_settings_message`: 필수 설정 누락 시 s3 및 sftp 각 명령어 템플릿 제안 검증
+
+##### 6. [resticprofile_config.bats](file:///home/ppzxc/projects/backup/tests/resticprofile_config.bats) (resticprofile 설정 생성기)
+* `render_resticprofile_config`: 백업 저장소 경로, 비밀 자격 증명, 데이터 보존 주기(retention), 스케줄링 설정의 YAML 파일 반영 검증
+* `render_resticprofile_config embeds s3 credentials when AWS_* is set`: AWS/S3 환경변수 입력 시 YAML에 적절히 임베딩 검증
+* `render_resticprofile_unit_template keeps the ISMS description and hardens the service`: systemd 서비스 유닛 파일의 ISMS 문구 명기 및 샌드박싱 하드닝 속성 검증
+* `render_resticprofile_unit_template never emits the .Environment block`: systemd 유닛에 민감한 백업 비밀번호(`RESTIC_PASSWORD`)가 평문 유출(644 권한 유닛)되지 않도록 `.Environment` 블록 생성 차단 검증
+* `render_resticprofile_config renders notifications`: Slack, Discord 웹훅 설정 렌더링 검증, Custom HTTP 헤더/메소드 템플릿 해석 및 특수 문자 개행(`\n`) 치환 렌더링 무결성 검증
+* `render_resticprofile_config renders secondary & db profile`: 다중 프로필 및 데이터베이스 전용 프로필 영역 설정 정상 분리 렌더링 검증
+
+##### 7. [scheduler.bats](file:///home/ppzxc/projects/backup/tests/scheduler.bats) (systemd 타이머 관리자)
+* `scheduler_register under systemd`: systemd 환경 하에서 타이머/서비스 유닛 파일 생성, 캘린더 포맷 검증 및 `systemctl enable` 동작 확인
+* `scheduler_unregister under systemd`: 등록된 systemd 타이머 서비스들을 안전하게 정지, 비활성화하고 유닛 파일을 삭제하여 캐시를 갱신(daemon-reload)하는지 검증
+* `scheduler_status under systemd`: systemd 타이머의 `active` / `inactive` 상태 조회를 위한 systemctl 상태 진단 검증
+
+##### 8. [backend_adapters.bats](file:///home/ppzxc/projects/backup/tests/backend_adapters.bats) (백엔드 어댑터)
+* `sftp_adapter`: SFTP 접속 정보 구성 및 로컬 권한 `600`이 보장된 비대칭 키쌍(SSH Key) 빌드 정합성 검증
+* `s3_adapter`: S3용 어댑터 파라미터 매핑 검증
+* `render_s3_bucket_policy`: 보안 감사 대비를 위한 AWS S3 버킷 리소스 및 권한 액션 최소 범위 지정 정책 JSON 렌더링 무결성 검증
+
+##### 9. [config_registry.bats](file:///home/ppzxc/projects/backup/tests/config_registry.bats) (환경 파일 레지스트리)
+* `load_and_validate_config`: 설정 파일을 읽어 우선순위 폴백에 의거 해석하고, 유효하지 않은 속성 유입 시 누적 에러 목록을 반환하는 과정 검증
+* `save_profile_config`: 설정 구성 저장 시 `/etc/restic` 디렉터리(`700`) 및 `backup.env` 파일(`600`)의 강력한 로컬 접근 통제 권한 강제 적용 검증
+
+##### 10. [cmd_*.bats](file:///home/ppzxc/projects/backup/tests/) (13종 서브커맨드 Mock 테스트)
+* **`cmd_install.bats`**: restic, rclone, resticprofile 바이너리 설치 시 체크섬(SHA-256) 불일치 대응, 다운로드 실패 핸들링, 로컬 이관 권한 부여 검증
+* **`cmd_setting_sftp.bats` / `cmd_setting_s3.bats`**: 백엔드 종류별 설정 초기 기입 및 CLI 파싱, 기존 파일 보존 조건에 따른 강제 재작성(--force) 및 민감 키 생성 무결성 검증
+* **`cmd_init.bats`**: 리포지토리 초기화 프로세스, 이미 초기화된 경우 기동 차단, SFTP 연결 불가 시 사전 접속 실패 에러 반환 검증
+* **`cmd_run.bats`**: 백업 수동 실행 명령이 resticprofile 바이너리에 실시간으로 위임되는 얇은 셸 구조 검증
+* **`cmd_schedule.bats`**: systemd 스케줄러 등록 및 개별 프로필 대상 설정 바인딩, 비활성화 흐름 검증
+* **`cmd_status.bats`**: 스냅샷 목록, DB 백업 스냅샷, systemd 타이머 기동 상태 확인 및 보안 민감 자격 증명 마스킹 검증
+* **`cmd_audit.bats`**: 보안 감사 및 재해 복구 훈련 시나리오 검증, 복원된 DB 백업 데이터 헤더(SQL 덤프 시그니처) 정합성 유효 검증, MD/JSON/HTML 형태 리포트 저장 검증
+* **`cmd_uninstall.bats`**: `--purge` 옵션 유무에 따른 systemd 타이머 등록 해제 및 `/etc/restic` 환경 캐시, 다운로드 바이너리 선택적 삭제 검증
+* **`cmd_migrate.bats`**: 소스/목적지 백엔드 인증 무결성 점검, 충돌 방지용 임시 rclone 환경변수 바인딩, 마이그레이션(restic copy) 및 성공 시 무결성 진단(restic check), systemd 스케줄러 갱신 흐름 검증
+* **`cmd_wizard.bats`**: 설정 마법사 구동 시의 텍스트 기반 대화형 사용자 입력, 에러 발생 시 반복 재질문 루프, 패키지 자동 조건부 다운로드 및 DB 스케줄 연동에 이르는 대화형 시나리오 검증
+
+##### 11. [help.bats](file:///home/ppzxc/projects/backup/tests/help.bats) (도움말 파서)
+* `render_help`: 도움말 플래그 호출 시 전체 서브커맨드 제안 및 세부 하위 옵션 가독성(Cobra 형식) 검증
+* `main strips --verbose`: verbose 플래그 유무와 위치에 따른 CLI 아규먼트 분할 전처리 검증
+</details>
+
+
 #### B. 통합 테스트 검증 항목 (Bats & Docker)
 
 `tests/integration/integration.bats` 테스트는 **Rocky Linux 9**를 기반으로 실행 컨테이너 환경을 모사하고, **MinIO(S3)**와 **atmoz/sftp(SFTP)** 컨테이너를 가상 백엔드로 삼아 아래 시나리오를 자동화 검증합니다.
