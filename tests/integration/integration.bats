@@ -2,7 +2,31 @@
 
 # Setup helper for executing commands in the 'app' container
 dexec() {
-  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T app bash -c "$1"
+  local cmd="$1"
+  if [[ "$cmd" == *"source /etc/restic/backup.env"* ]]; then
+    local subcmd="${cmd#*source /etc/restic/backup.env && }"
+    docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T app bash -c "
+      if [[ -f /etc/restic/backup.env ]]; then
+        while IFS= read -r line || [[ -n \"\$line\" ]]; do
+          [[ \"\$line\" =~ ^[[:space:]]*# ]] && continue
+          [[ \"\$line\" =~ ^[[:space:]]*\$ ]] && continue
+          if [[ \"\$line\" =~ ^([A-Za-z_][A-Za-z0-9_]*)=\'(.*)\'\$ ]]; then
+            k=\"\${BASH_REMATCH[1]}\"
+            v=\"\${BASH_REMATCH[2]}\"
+            v=\"\${v//\\'\\'/\\'}\"
+            export \"\$k\"=\"\$v\"
+          elif [[ \"\$line\" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)\$ ]]; then
+            k=\"\${BASH_REMATCH[1]}\"
+            v=\"\${BASH_REMATCH[2]}\"
+            export \"\$k\"=\"\$v\"
+          fi
+        done < /etc/restic/backup.env
+      fi
+      $subcmd
+    "
+  else
+    docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T app bash -c "$cmd"
+  fi
 }
 
 # General helper for running docker compose commands in the integration folder
