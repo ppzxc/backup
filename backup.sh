@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.31"
+BACKUP_SCRIPT_VERSION="0.0.32"
 
 
 
@@ -37,10 +37,20 @@ DEFAULT_SFTP_PORT=22
 BACKUP_VERBOSE="${BACKUP_VERBOSE:-0}"
 # --- Configuration Registry Schema ---
 CONFIG_FIELDS=()
+# shellcheck disable=SC2034
 declare -A CONFIG_ENV_MAP=()
+# shellcheck disable=SC2034
 declare -A CONFIG_DEFAULT_MAP=()
+# shellcheck disable=SC2034
 declare -A CONFIG_VALIDATOR_MAP=()
 
+# 캐싱 레이어 변수
+CONFIG_CACHE_FILE=""
+# shellcheck disable=SC2034
+declare -A CONFIG_CACHE_DATA=()
+
+# nameref 매개변수가 선언적으로만 등록되어 shellcheck 경고 발생 대응
+# shellcheck disable=SC2034
 register_config_field() {
   local internal_key="$1"
   local env_var="$2"
@@ -99,6 +109,8 @@ init_config_schema() {
 
 init_config_schema
 
+# nameref 매개변수 dest_array_ref 간접 수정에 따른 shellcheck 경고 발생 대응
+# shellcheck disable=SC2034
 load_backup_env_to_array() {
   local env_file="$1"
   local -n dest_array_ref="$2"
@@ -108,43 +120,65 @@ load_backup_env_to_array() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
     [[ -z "${line//[[:space:]]/}" ]] && continue
+    local key="" val="" raw_val=""
     if [[ "$line" =~ ^[[:space:]]*export[[:space:]]+([A-Za-z0-9_]+)=\'(.*)\'[[:space:]]*$ ]]; then
-      local key="${BASH_REMATCH[1]}"
-      local raw_val="${BASH_REMATCH[2]}"
-      local val="${raw_val//\'\\\'\'/\'}"
-      dest_array_ref["$key"]="$val"
+      key="${BASH_REMATCH[1]}"
+      raw_val="${BASH_REMATCH[2]}"
+      val="${raw_val//\'\\\'\'/\'}"
     elif [[ "$line" =~ ^[[:space:]]*export[[:space:]]+([A-Za-z0-9_]+)=\"(.*)\"[[:space:]]*$ ]]; then
-      local key="${BASH_REMATCH[1]}"
-      local val="${BASH_REMATCH[2]}"
-      dest_array_ref["$key"]="$val"
+      key="${BASH_REMATCH[1]}"
+      val="${BASH_REMATCH[2]}"
     elif [[ "$line" =~ ^[[:space:]]*export[[:space:]]+([A-Za-z0-9_]+)=(.*)$ ]]; then
-      local key="${BASH_REMATCH[1]}"
-      local val="${BASH_REMATCH[2]}"
+      key="${BASH_REMATCH[1]}"
+      val="${BASH_REMATCH[2]}"
+      # 따옴표가 없는 경우 뒤의 주석 및 공백 트리밍
+      val="${val%%#*}"
+      val="${val#[[:space:]]}"
+      val="${val%[[:space:]]}"
+    fi
+    if [[ -n "$key" ]]; then
       dest_array_ref["$key"]="$val"
     fi
   done < "$env_file"
   return 0
 }
 
+# 글로벌 연관 배열이 subshell 상속 시 소실되어, config_get 내부에서 lazy init 처리
 config_get() {
   local key="$1"
   local env_file="${2:-$BACKUP_ENV_FILE}"
   if ! declare -p CONFIG_ENV_MAP &>/dev/null; then
     CONFIG_FIELDS=()
+    # shellcheck disable=SC2034
     declare -g -A CONFIG_ENV_MAP=()
+    # shellcheck disable=SC2034
     declare -g -A CONFIG_DEFAULT_MAP=()
+    # shellcheck disable=SC2034
     declare -g -A CONFIG_VALIDATOR_MAP=()
     init_config_schema
   fi
-  local -A temp_env=()
-  if load_backup_env_to_array "$env_file" temp_env; then
-    local env_var="${CONFIG_ENV_MAP[$key]:-}"
-    if [[ -n "$env_var" ]]; then
-      echo "${temp_env[$env_var]:-}"
-    else
-      echo "${temp_env[$key]:-}"
-    fi
+  if ! declare -p CONFIG_CACHE_DATA &>/dev/null; then
+    CONFIG_CACHE_FILE=""
+    # shellcheck disable=SC2034
+    declare -g -A CONFIG_CACHE_DATA=()
   fi
+  if [[ "$CONFIG_CACHE_FILE" != "$env_file" || ${#CONFIG_CACHE_DATA[@]} -eq 0 ]]; then
+    CONFIG_CACHE_FILE="$env_file"
+    # shellcheck disable=SC2034
+    declare -g -A CONFIG_CACHE_DATA=()
+    load_backup_env_to_array "$env_file" CONFIG_CACHE_DATA || true
+  fi
+  local env_var="${CONFIG_ENV_MAP[$key]:-}"
+  local val=""
+  if [[ -n "$env_var" ]]; then
+    val="${CONFIG_CACHE_DATA[$env_var]:-}"
+  else
+    val="${CONFIG_CACHE_DATA[$key]:-}"
+  fi
+  if [[ -z "$val" ]]; then
+    val="${CONFIG_DEFAULT_MAP[$key]:-}"
+  fi
+  echo "$val"
 }
 
 C_RESET="" C_BOLD="" C_DIM="" C_RED="" C_GREEN="" C_YELLOW="" C_BLUE="" C_CYAN="" C_GRAY=""
