@@ -133,4 +133,13 @@ ENV
   [[ "$output" == *"초기화(init)되지 않았을 수 있습니다"* ]]
 }
 
+@test "cmd_run succeeds with warning when resticprofile exits with status 3" {
+  stub_command "resticprofile" 'exit 3'
+  
+  run cmd_run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING:"* ]]
+  [[ "$output" == *"일부 파일을 읽지 못했습니다"* ]]
+}
+
 
