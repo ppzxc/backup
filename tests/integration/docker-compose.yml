@@ -47,7 +47,7 @@ services:
       retries: 20
 
   app:
-    image: rockylinux:9
+    build: .
     depends_on:
       minio:
         condition: service_healthy
@@ -61,7 +61,6 @@ services:
         condition: service_healthy
     volumes:
       - ../../backup.sh:/workspace/backup.sh:ro
-      - ./run.sh:/workspace/run.sh:ro
     working_dir: /workspace
     entrypoint: ["sleep", "infinity"]
 

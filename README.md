@@ -432,8 +432,7 @@ $ bats tests/
 ### 통합 테스트 (Integration Tests)
 Docker Compose를 사용하여 실제 가상 환경(Rockylinux 9 컨테이너 + MinIO 오브젝트 스토리지 + SFTP 원격지 서버)을 띄우고 백업 파이프라인 전 단계를 실제 가동하여 엔드투엔드로 검증합니다:
 ```bash
-$ cd tests/integration
-$ ./run.sh
+$ bats tests/integration/integration.bats
 ```
 
 ---
