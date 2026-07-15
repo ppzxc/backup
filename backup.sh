@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.34"
+BACKUP_SCRIPT_VERSION="0.0.35"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -176,22 +176,50 @@ migrate_env_file_if_needed() {
     return 0
   fi
 
-  if ! grep -q -E '^[[:space:]]*export[[:space:]]+' "$env_file"; then
-    return 0
-  fi
-
-  log_info "기존 export 기반의 설정을 표준 데이터 포맷으로 자동 마이그레이션합니다."
-
   local temp_file
   temp_file=$(mktemp "${env_file}.tmp.XXXXXX")
   chmod 600 "$temp_file"
 
   local line
+  local in_multiline=0
+  local quote_char=""
   while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" =~ ^([[:space:]]*)export[[:space:]]+(.*)$ ]]; then
-      echo "${BASH_REMATCH[1]}${BASH_REMATCH[2]}" >> "$temp_file"
-    else
+    local trimmed
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+
+    if (( in_multiline )); then
       echo "$line" >> "$temp_file"
+      if [[ "$quote_char" == "'" ]]; then
+        if [[ "$trimmed" =~ \'$ ]]; then
+          in_multiline=0
+          quote_char=""
+        fi
+      elif [[ "$quote_char" == '"' ]]; then
+        if [[ "$trimmed" =~ \"$ ]]; then
+          in_multiline=0
+          quote_char=""
+        fi
+      fi
+      continue
+    fi
+
+    local modified_line="$line"
+    if [[ "$line" =~ ^([[:space:]]*)export[[:space:]]+(.*)$ ]]; then
+      modified_line="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+    fi
+    echo "$modified_line" >> "$temp_file"
+
+    local processed_trimmed
+    processed_trimmed="${modified_line#"${modified_line%%[![:space:]]*}"}"
+    processed_trimmed="${processed_trimmed%"${processed_trimmed##*[![:space:]]}"}"
+
+    if [[ "$processed_trimmed" =~ ^[A-Za-z0-9_]+=\' ]] && [[ ! "$processed_trimmed" =~ ^[A-Za-z0-9_]+=\'.*\'[[:space:]]*$ ]]; then
+      in_multiline=1
+      quote_char="'"
+    elif [[ "$processed_trimmed" =~ ^[A-Za-z0-9_]+=\" ]] && [[ ! "$processed_trimmed" =~ ^[A-Za-z0-9_]+=\".*\"[[:space:]]*$ ]]; then
+      in_multiline=1
+      quote_char='"'
     fi
   done < "$env_file"
 
@@ -222,37 +250,88 @@ load_backup_env_to_array() {
 
   local line_num=0
   local line
+  local in_multiline=0
+  local multiline_key=""
+  local multiline_val=""
+  local quote_char=""
+
   while IFS= read -r line || [[ -n "$line" ]]; do
     ((line_num++))
     
-    # Trim leading/trailing whitespace
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
+    if (( in_multiline )); then
+      if [[ "$quote_char" == "'" ]]; then
+        if [[ "$line" =~ ^(.*)\'[[:space:]]*$ ]]; then
+          local chunk="${BASH_REMATCH[1]}"
+          multiline_val+=$'\n'"$chunk"
+          local val="${multiline_val//\'\\\'\'/\'}"
+          __load_env_dest_ref["$multiline_key"]="$val"
+          in_multiline=0
+          multiline_key=""
+          multiline_val=""
+          quote_char=""
+          continue
+        else
+          multiline_val+=$'\n'"$line"
+          continue
+        fi
+      elif [[ "$quote_char" == '"' ]]; then
+        if [[ "$line" =~ ^(.*)\"[[:space:]]*$ ]]; then
+          local chunk="${BASH_REMATCH[1]}"
+          multiline_val+=$'\n'"$chunk"
+          __load_env_dest_ref["$multiline_key"]="$multiline_val"
+          in_multiline=0
+          multiline_key=""
+          multiline_val=""
+          quote_char=""
+          continue
+        else
+          multiline_val+=$'\n'"$line"
+          continue
+        fi
+      fi
+    fi
 
-    # Remove trailing comments outside quotes safely
-    if [[ "$line" =~ ^(.*=\'[^\']*\')[[:space:]]*#.*$ ]]; then
-      line="${BASH_REMATCH[1]}"
-    elif [[ "$line" =~ ^(.*=\"[^\"]*\")[[:space:]]*#.*$ ]]; then
-      line="${BASH_REMATCH[1]}"
-    elif [[ "$line" =~ ^([^\"\']*)[[:space:]]*#.*$ ]]; then
-      line="${BASH_REMATCH[1]}"
+    # Trim leading/trailing whitespace
+    local trimmed_line
+    trimmed_line="${line#"${line%%[![:space:]]*}"}"
+    trimmed_line="${trimmed_line%"${trimmed_line##*[![:space:]]}"}"
+
+    # Remove trailing comments safely
+    if [[ "$trimmed_line" =~ ^(.*=\'[^\']*\')[[:space:]]*#.*$ ]]; then
+      trimmed_line="${BASH_REMATCH[1]}"
+    elif [[ "$trimmed_line" =~ ^(.*=\"[^\"]*\")[[:space:]]*#.*$ ]]; then
+      trimmed_line="${BASH_REMATCH[1]}"
+    elif [[ "$trimmed_line" =~ ^([^\"\']*)[[:space:]]*#.*$ ]]; then
+      trimmed_line="${BASH_REMATCH[1]}"
     fi
 
     # Re-trim after comment removal
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
+    trimmed_line="${trimmed_line#"${trimmed_line%%[![:space:]]*}"}"
+    trimmed_line="${trimmed_line%"${trimmed_line##*[![:space:]]}"}"
 
-    [[ -z "$line" || "$line" =~ ^# ]] && continue
+    [[ -z "$trimmed_line" || "$trimmed_line" =~ ^# ]] && continue
 
     local key="" val="" raw_val=""
-    if [[ "$line" =~ ^(export[[:space:]]+)?([A-Za-z0-9_]+)=\'(.*)\'[[:space:]]*$ ]]; then
+    if [[ "$trimmed_line" =~ ^(export[[:space:]]+)?([A-Za-z0-9_]+)=\'(.*)\'[[:space:]]*$ ]]; then
       key="${BASH_REMATCH[2]}"
       raw_val="${BASH_REMATCH[3]}"
       val="${raw_val//\'\\\'\'/\'}"
-    elif [[ "$line" =~ ^(export[[:space:]]+)?([A-Za-z0-9_]+)=\"(.*)\"[[:space:]]*$ ]]; then
+      __load_env_dest_ref["$key"]="$val"
+    elif [[ "$trimmed_line" =~ ^(export[[:space:]]+)?([A-Za-z0-9_]+)=\'(.*)$ ]]; then
+      in_multiline=1
+      multiline_key="${BASH_REMATCH[2]}"
+      multiline_val="${BASH_REMATCH[3]}"
+      quote_char="'"
+    elif [[ "$trimmed_line" =~ ^(export[[:space:]]+)?([A-Za-z0-9_]+)=\"(.*)\"[[:space:]]*$ ]]; then
       key="${BASH_REMATCH[2]}"
       val="${BASH_REMATCH[3]}"
-    elif [[ "$line" =~ ^(export[[:space:]]+)?([A-Za-z0-9_]+)=(.*)$ ]]; then
+      __load_env_dest_ref["$key"]="$val"
+    elif [[ "$trimmed_line" =~ ^(export[[:space:]]+)?([A-Za-z0-9_]+)=\"(.*)$ ]]; then
+      in_multiline=1
+      multiline_key="${BASH_REMATCH[2]}"
+      multiline_val="${BASH_REMATCH[3]}"
+      quote_char='"'
+    elif [[ "$trimmed_line" =~ ^(export[[:space:]]+)?([A-Za-z0-9_]+)=(.*)$ ]]; then
       key="${BASH_REMATCH[2]}"
       val="${BASH_REMATCH[3]}"
       val="${val%%#*}"
@@ -5745,9 +5824,9 @@ prompt_backend_choice() {
   done
 }
 
-cmd_upgrade_config() {
+cmd_upgrade() {
   if has_help_flag "$@"; then
-    help_upgrade_config
+    help_upgrade
     return 0
   fi
   require_root
@@ -5784,20 +5863,20 @@ cmd_upgrade_config() {
   log_info "로컬 백업 데이터(${legacy_dir})를 삭제하여 디스크 공간을 정리하는 것을 권장합니다: rm -rf ${legacy_dir}"
 }
 
-help_upgrade_config() {
+help_upgrade() {
   cat <<'EOF'
 기존의 1차 로컬 백업 데이터를 새로운 1차 원격 백업 저장소로 안전하게 마이그레이션(이관)하고,
 디스크 정리를 위한 가이드를 제공합니다.
 
 사용법:
-  backup.sh upgrade-config [flags]
+  backup.sh upgrade [flags]
 
 사용법 예시:
   # 기본 경로(/var/restic-local)에 존재하는 로컬 데이터를 원격지로 이관
-  backup.sh upgrade-config
+  backup.sh upgrade
 
   # 특정 경로에 있는 로컬 데이터를 원격지로 이관
-  backup.sh upgrade-config --legacy-dir /data/backup
+  backup.sh upgrade --legacy-dir /data/backup
 
 플래그 (Flags):
       --legacy-dir <경로>     이관할 기존 로컬 restic 저장소 디렉터리 경로 (기본값: /var/restic-local)
@@ -6618,7 +6697,7 @@ restic 기반 백업 설치, 운영, 모니터링 및 감사 관리를 자동화
   migrate        기존 저장소 백업 데이터를 새로운 스토리지 백엔드로 데이터 복제 및 설정 이관
   config         기존 백업 설정(backup.env) 수정 및 관련 자산 동기화
   wizard         단계별 설정을 위한 대화형 CLI 설정 마법사 실행
-  upgrade-config 기존 1차 로컬 백업 데이터를 새로운 1차 원격 저장소로 이관 및 환경 정리
+  upgrade        기존 1차 로컬 백업 데이터를 새로운 1차 원격 저장소로 이관 및 환경 정리
 
 글로벌 플래그 (Global Flags):
   -h, --help     도움말 출력
@@ -6709,9 +6788,9 @@ main() {
       cmd_wizard "$@"
       return $?
       ;;
-    upgrade-config)
+    upgrade)
       shift
-      cmd_upgrade_config "$@"
+      cmd_upgrade "$@"
       return $?
       ;;
     *)
