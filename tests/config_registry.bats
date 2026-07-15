@@ -258,7 +258,7 @@ EOF
   [ "$output" = "/tmp/*" ]
 }
 
-@test "parse_env_file handles static KEY='VALUE' format and de-escapes single quotes correctly" {
+@test "load_backup_env_to_array handles static KEY='VALUE' format and de-escapes single quotes correctly" {
   mkdir -p "$RESTIC_ETC_DIR"
   chmod 700 "$RESTIC_ETC_DIR"
 
@@ -326,7 +326,7 @@ EOF
   [ "${resolved[password]}" = "testpassword" ]
 }
 
-@test "parse_env_file strictly fails on syntax errors" {
+@test "load_backup_env_to_array strictly fails on syntax errors" {
   mkdir -p "$RESTIC_ETC_DIR"
   chmod 700 "$RESTIC_ETC_DIR"
 

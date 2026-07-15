@@ -94,15 +94,19 @@ DEFAULT_SFTP_PORT=22
 BACKUP_VERBOSE="${BACKUP_VERBOSE:-0}"
 # --- Configuration Registry Schema ---
 CONFIG_FIELDS=()
+# 스키마 키-환경변수 매핑 테이블로, 동적 쿼리 및 유효성 검사 루프에서 참조되어 경고 예외 처리
 # shellcheck disable=SC2034
 declare -A CONFIG_ENV_MAP=()
+# 스키마 디폴트 값 테이블로, 동적 fallback 설정 확인 시 참조되어 경고 예외 처리
 # shellcheck disable=SC2034
 declare -A CONFIG_DEFAULT_MAP=()
+# 스키마 유효성 검증 함수 매핑 테이블로, 동적 검증 루프 실행 시 참조되어 경고 예외 처리
 # shellcheck disable=SC2034
 declare -A CONFIG_VALIDATOR_MAP=()
 
 # 캐싱 레이어 변수
 CONFIG_CACHE_FILE=""
+# 파싱된 설정값들이 로드되는 캐시 저장소로, config_get 쿼리 루틴에서 참조되어 경고 예외 처리
 # shellcheck disable=SC2034
 declare -A CONFIG_CACHE_DATA=()
 
@@ -225,6 +229,19 @@ load_backup_env_to_array() {
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
 
+    # Remove trailing comments outside quotes safely
+    if [[ "$line" =~ ^(.*=\'[^\']*\')[[:space:]]*#.*$ ]]; then
+      line="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^(.*=\"[^\"]*\")[[:space:]]*#.*$ ]]; then
+      line="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^([^\"\']*)[[:space:]]*#.*$ ]]; then
+      line="${BASH_REMATCH[1]}"
+    fi
+
+    # Re-trim after comment removal
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+
     [[ -z "$line" || "$line" =~ ^# ]] && continue
 
     local key="" val="" raw_val=""
@@ -241,8 +258,7 @@ load_backup_env_to_array() {
       val="${val%%#*}"
       val="${val#[[:space:]]}"
       val="${val%[[:space:]]}"
-    else
-      __load_env_errors_ref+=("라인 ${line_num}: 올바르지 않은 설정 형식입니다: '$line'")
+      __load_env_errors_ref+=("라인 ${line_num}: 올바르지 않은 설정 형식입니다 (KEY='VALUE' 규격 위반)")
       return 1
     fi
 
@@ -260,21 +276,26 @@ config_get() {
   local env_file="${2:-$BACKUP_ENV_FILE}"
   if ! declare -p CONFIG_ENV_MAP &>/dev/null; then
     CONFIG_FIELDS=()
+    # 전역 매핑 테이블 lazy-init 선언으로 경고 예외 처리
     # shellcheck disable=SC2034
     declare -g -A CONFIG_ENV_MAP=()
+    # 전역 디폴트 테이블 lazy-init 선언으로 경고 예외 처리
     # shellcheck disable=SC2034
     declare -g -A CONFIG_DEFAULT_MAP=()
+    # 전역 유효성 테이블 lazy-init 선언으로 경고 예외 처리
     # shellcheck disable=SC2034
     declare -g -A CONFIG_VALIDATOR_MAP=()
     init_config_schema
   fi
   if ! declare -p CONFIG_CACHE_DATA &>/dev/null; then
     CONFIG_CACHE_FILE=""
+    # 전역 캐시 저장소 lazy-init 선언으로 경고 예외 처리
     # shellcheck disable=SC2034
     declare -g -A CONFIG_CACHE_DATA=()
   fi
   if [[ "$CONFIG_CACHE_FILE" != "$env_file" || ${#CONFIG_CACHE_DATA[@]} -eq 0 ]]; then
     CONFIG_CACHE_FILE="$env_file"
+    # 전역 캐시 데이터 로드 선언으로 경고 예외 처리
     # shellcheck disable=SC2034
     declare -g -A CONFIG_CACHE_DATA=()
     if [[ -f "$env_file" ]]; then
