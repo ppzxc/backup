@@ -364,5 +364,21 @@ EOF
   [[ "$output" == *"RESTIC_REPOSITORY=local_test_repo"* ]]
 }
 
+@test "cmd_run fails on config with relative path targets" {
+  mkdir -p "$RESTIC_ETC_DIR"
+  cat > "$BACKUP_ENV_FILE" <<'EOF'
+RESTIC_REPOSITORY="s3:https://s3.amazonaws.com/my-bucket/host"
+RESTIC_PASSWORD="secret"
+BACKUP_TARGETS="/etc,y"
+EOF
+  chmod 600 "$BACKUP_ENV_FILE"
+
+  stub_command "resticprofile" "exit 0"
+
+  run cmd_run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"설정 정합성 검증에 실패했습니다"* ]]
+}
+
 
 

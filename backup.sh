@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.36"
+BACKUP_SCRIPT_VERSION="0.0.37"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -2786,6 +2786,22 @@ cmd_schedule() {
 
   case "$action" in
     enable)
+      # 스케줄 등록 전 백업 대상/제외 경로의 절대 경로 무결성 직접 검증
+      if [[ -n "${BACKUP_TARGETS:-}" ]]; then
+        local path_err
+        if ! path_err=$(validate_absolute_path "$BACKUP_TARGETS" "백업 대상 경로" 2>&1); then
+          log_error "$path_err"
+          die "스케줄 등록을 위한 설정 정합성 검증에 실패했습니다. 설정 파일(${BACKUP_ENV_FILE})을 점검하거나 'backup.sh config'를 통해 설정을 재조정하세요." 1
+        fi
+      fi
+      if [[ -n "${BACKUP_EXCLUDES:-}" ]]; then
+        local path_err
+        if ! path_err=$(validate_absolute_path "$BACKUP_EXCLUDES" "백업 제외 경로" 2>&1); then
+          log_error "$path_err"
+          die "스케줄 등록을 위한 설정 정합성 검증에 실패했습니다. 설정 파일(${BACKUP_ENV_FILE})을 점검하거나 'backup.sh config'를 통해 설정을 재조정하세요." 1
+        fi
+      fi
+
       local -A opts=()
       parse_opts_into opts "on-calendar: on-calendar-daily: on-calendar-drill: daily restore-drill" -- "$@"
       local on_calendar="${opts[on-calendar]:-$DEFAULT_ON_CALENDAR}"
@@ -2829,6 +2845,22 @@ cmd_run() {
   require_backup_env
   local profile_name; profile_name=$(resolve_profile_name)
 
+  # 수동 백업 기동 전 백업 대상/제외 경로의 절대 경로 무결성 직접 검증
+  if [[ -n "${BACKUP_TARGETS:-}" ]]; then
+    local path_err
+    if ! path_err=$(validate_absolute_path "$BACKUP_TARGETS" "백업 대상 경로" 2>&1); then
+      log_error "$path_err"
+      die "백업 실행을 위한 설정 정합성 검증에 실패했습니다. 설정 파일(${BACKUP_ENV_FILE})을 점검하거나 'backup.sh config'를 통해 설정을 재조정하세요." 1
+    fi
+  fi
+  if [[ -n "${BACKUP_EXCLUDES:-}" ]]; then
+    local path_err
+    if ! path_err=$(validate_absolute_path "$BACKUP_EXCLUDES" "백업 제외 경로" 2>&1); then
+      log_error "$path_err"
+      die "백업 실행을 위한 설정 정합성 검증에 실패했습니다. 설정 파일(${BACKUP_ENV_FILE})을 점검하거나 'backup.sh config'를 통해 설정을 재조정하세요." 1
+    fi
+  fi
+
   write_resticprofile_assets "$profile_name" "$DEFAULT_ON_CALENDAR"
 
   local -a resticprofile_args=(--config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" backup)
@@ -2841,6 +2873,8 @@ cmd_run() {
   resticprofile "${resticprofile_args[@]}" || run_status=$?
   if [[ $run_status -eq 0 ]]; then
     log_info "1차 파일 백업 성공"
+  elif [[ $run_status -eq 3 ]]; then
+    log_warn "1차 파일 백업 완료 (일부 파일을 읽지 못했습니다. Warning exit status 3)"
   else
     pipeline_err="1차 파일 백업 실패 (resticprofile backup error)"
     log_error "$pipeline_err"
