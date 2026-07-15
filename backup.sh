@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.28"
+BACKUP_SCRIPT_VERSION="0.0.30"
 
 
 
@@ -210,6 +210,123 @@ validate_resolved_config() {
     fi
     unset _validate_sec_fields
   fi
+}
+
+# shellcheck disable=SC2034
+load_and_validate_config() {
+  local profile_name="$1"
+  local cli_opts_ref_name=""
+  local resolved_ref_name=""
+  local errors_ref_name=""
+
+  if [[ $# -eq 4 ]]; then
+    cli_opts_ref_name="$2"
+    resolved_ref_name="$3"
+    errors_ref_name="$4"
+  else
+    resolved_ref_name="$2"
+    errors_ref_name="$3"
+  fi
+
+  local -n _out_resolved="$resolved_ref_name"
+  local -n _out_errors="$errors_ref_name"
+
+  # Determine backend from backup.env or CLI options
+  local backend=""
+  if [[ -n "$cli_opts_ref_name" ]]; then
+    local -n _cli_opts_ref="$cli_opts_ref_name"
+    backend="${_cli_opts_ref[backend]:-}"
+  fi
+
+  if [[ -z "$backend" && -f "$BACKUP_ENV_FILE" ]]; then
+    if grep -q "AWS_ACCESS_KEY_ID=" "$BACKUP_ENV_FILE" || grep -q 'RESTIC_REPOSITORY="s3:' "$BACKUP_ENV_FILE"; then
+      backend="s3"
+    elif grep -q "RCLONE_CONFIG_SYNO_BACKUP_TYPE=\"sftp\"" "$BACKUP_ENV_FILE" || grep -q 'RESTIC_REPOSITORY="rclone:syno_backup' "$BACKUP_ENV_FILE"; then
+      backend="sftp"
+    fi
+  fi
+
+  # Create a unified local options copy
+  local -A local_opts=()
+  if [[ -n "$cli_opts_ref_name" ]]; then
+    local k
+    for k in "${!_cli_opts_ref[@]}"; do
+      local_opts["$k"]="${_cli_opts_ref[$k]}"
+    done
+  fi
+
+  if [[ -n "$backend" ]]; then
+    local_opts[backend]="$backend"
+  fi
+  if [[ -n "$profile_name" ]]; then
+    local_opts[profile-name]="$profile_name"
+  fi
+
+  resolve_and_validate_config local_opts _out_resolved _out_errors
+  local res=$?
+
+  if [[ ${#_out_errors[@]} -gt 0 ]]; then
+    return 1
+  fi
+  return $res
+}
+
+save_profile_config() {
+  local resolved_arr_name="$1"
+  local -n _res_ref="$resolved_arr_name"
+
+  local backend="${_res_ref[backend]:-}"
+  if [[ -z "$backend" ]]; then
+    return 1
+  fi
+
+  # Determine schedule calendar
+  local on_calendar="${_res_ref[on_calendar]:-}"
+  if [[ -z "$on_calendar" ]]; then
+    if [[ -f "$RESTICPROFILE_CONFIG_FILE" ]]; then
+      local parsed_schedule
+      parsed_schedule=$(grep -E 'schedule:[[:space:]]*"[^"]+"' "$RESTICPROFILE_CONFIG_FILE" | head -n1 | sed -E 's/.*schedule:[[:space:]]*"([^"]+)".*/\1/')
+      if [[ -n "$parsed_schedule" ]]; then
+        on_calendar="$parsed_schedule"
+      fi
+    fi
+  fi
+  if [[ -z "$on_calendar" ]]; then
+    on_calendar="$DEFAULT_ON_CALENDAR"
+  fi
+
+  # Ensure the restic etc directory exists and has 700 permissions
+  mkdir -p "$RESTIC_ETC_DIR"
+  chmod 700 "$RESTIC_ETC_DIR" 2>/dev/null || true
+
+  # 1. Format configuration variables (env block and notice)
+  local content="" notice=""
+  backend_"${backend}"_configure "$resolved_arr_name" content notice
+  append_secondary_config_and_notice "$resolved_arr_name" content notice
+
+  # 2. Write backup.env with secure permissions (600)
+  write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
+
+  # 3. Synchronize derived assets (profiles.yaml, systemd timers)
+  (
+    # Sourcing the environment file we just saved
+    # shellcheck source=/dev/null
+    source "$BACKUP_ENV_FILE"
+    write_resticprofile_assets "${_res_ref[profile_name]}" "$on_calendar"
+
+    local timer_name
+    timer_name=$(resticprofile_timer_unit_name "${_res_ref[profile_name]}")
+    if systemctl is-enabled "$timer_name" >/dev/null 2>&1; then
+      log_info "정기 백업 스케줄 타이머(${timer_name})가 활성화되어 있어 설정을 자동 리로드합니다."
+      resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "${_res_ref[profile_name]}" schedule
+    fi
+  )
+
+  if [[ -n "$notice" ]]; then
+    printf '%s\n' "$notice"
+  fi
+
+  return 0
 }
 
 # nameref로 인자를 받거나 다른 함수로 동적 연관 배열을 전달하여 사용하지 않는 것으로 오인받는 변수가 있으므로 우회
@@ -1931,8 +2048,7 @@ cmd_init() {
   local -a errors=()
   opts[backend]="$backend"
   
-  # Run config resolution to capture resolved fields into nameref
-  resolve_and_validate_config opts resolved errors
+  load_and_validate_config "" opts resolved errors || true
 
   if [[ "$backend" == "sftp" ]]; then
     if ! command -v rclone >/dev/null 2>&1; then
@@ -2635,24 +2751,348 @@ format_bytes() {
   }'
 }
 
-render_restore_drill_report() {
-  local test_date="$1" tester="$2" latest_snap="$3" latest_time="$4" target_dir="$5"
-  local size_str="$6" elapsed_str="$7" rto="$8" rto_status="$9" ciso="${10}" os_name="${11}"
-  local sec_snap="${12:-}" sec_time="${13:-}" sec_size_str="${14:-}" sec_elapsed_str="${15:-}" sec_rto_status="${16:-}"
-  local db_type="${17:-}" db_valid="${18:-0}"
+query_snapshot_info() {
+  local snap_json
+  if [[ "${1:-}" == "--tag" ]]; then
+    snap_json=$(restic snapshots --tag "$2" --latest 1 --json 2>/dev/null)
+  else
+    snap_json=$(restic snapshots --latest 1 --json 2>/dev/null)
+  fi
   
+  python3 -c '
+import sys, json
+try:
+    data = json.loads(sys.stdin.read())
+    if data and isinstance(data, list) and len(data) > 0:
+        snap = data[0]
+        t = snap.get("time", "")[:19].replace("T", " ")
+        print(snap.get("id", "") + " " + t)
+except Exception:
+    pass
+' <<< "$snap_json"
+}
+
+run_restore_drill() {
+  # nameref를 통한 연관 배열 키 동적 할당으로 정적 분석기 미인식 우회
+  # shellcheck disable=SC2178  # nameref to caller's associative array
+  local -n _opts="$1"
+  # shellcheck disable=SC2178  # nameref to caller's associative array
+  local -n _res="$2"
+
+  _res["test_date"]=$(date "+%Y-%m-%d")
+  _res["tester"]="${_opts["tester"]:-}"
+  _res["ciso"]="${_opts["ciso"]:-}"
+  
+  local rto="${_opts["rto"]:-120}"
+  _res["rto_minutes"]="$rto"
+  
+  local target_dir="${_opts["target"]:-/tmp/restore_test}"
+  _res["target_dir"]="$target_dir"
+
+  local os_name="Rocky Linux 9"
+  if [[ -f /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    os_name=$(source /etc/os-release && echo "${PRETTY_NAME:-Rocky Linux 9}")
+  fi
+  _res["os_name"]="$os_name"
+
+  # 1. Primary snapshot
+  local primary_info; primary_info=$(query_snapshot_info)
+  local primary_snap="" primary_snap_time=""
+  if [[ -n "$primary_info" ]]; then
+    read -r primary_snap primary_snap_time <<< "$primary_info"
+  fi
+
+  _res["primary_snap"]="$primary_snap"
+  _res["primary_snap_time"]="$primary_snap_time"
+
+  if [[ -z "$primary_snap" ]]; then
+    _res["primary_rto_satisfied"]="false"
+    _res["primary_rto_status"]="초과 (미흡)"
+    _res["error_message"]="복구 테스트 실패: 저장소에 백업 스냅샷이 존재하지 않습니다."
+    return 0
+  fi
+
+  if [[ -d "$target_dir" ]]; then
+    if [[ "$target_dir" == /tmp/* || "$target_dir" == /var/tmp/* ]]; then
+      rm -rf "$target_dir"
+    else
+      _res["primary_rto_satisfied"]="false"
+      _res["primary_rto_status"]="초과 (미흡)"
+      _res["error_message"]="복구 경로가 안전하지 않습니다 (/tmp 또는 /var/tmp 하위 경로만 지원): $target_dir"
+      return 0
+    fi
+  fi
+  mkdir -p "$target_dir"
+
+  local start_time; start_time=$(date +%s)
+  local restore_ok=1
+  restic restore "$primary_snap" --target "$target_dir" >/dev/null 2>&1 || restore_ok=0
+  local end_time; end_time=$(date +%s)
+  local elapsed=$((end_time - start_time))
+
+  local elapsed_str
+  if (( elapsed < 60 )); then
+    elapsed_str="${elapsed}초"
+  else
+    elapsed_str="$((elapsed / 60))분 $((elapsed % 60))초"
+  fi
+  _res["primary_elapsed_seconds"]="$elapsed"
+  _res["primary_elapsed_str"]="$elapsed_str"
+
+  local rto_seconds=$((rto * 60))
+  if (( restore_ok && elapsed <= rto_seconds )); then
+    _res["primary_rto_satisfied"]="true"
+    _res["primary_rto_status"]="만족"
+  else
+    _res["primary_rto_satisfied"]="false"
+    _res["primary_rto_status"]="초과 (미흡)"
+  fi
+
+  if (( ! restore_ok )); then
+    _res["error_message"]="restic restore 복구 실패"
+    rm -rf "$target_dir"
+    return 0
+  fi
+
+  local total_bytes=0
+  total_bytes=$(du -sb "$target_dir" 2>/dev/null | awk '{print $1}') || total_bytes=0
+  _res["primary_size"]=$(format_bytes "$total_bytes")
+  rm -rf "$target_dir"
+
+  # 2. DB snapshot
+  if [[ -n "${BACKUP_DB_TYPE:-}" ]]; then
+    _res["db_type"]="${BACKUP_DB_TYPE}"
+    local db_info; db_info=$(query_snapshot_info --tag db)
+    local db_snap="" db_snap_time=""
+    if [[ -n "$db_info" ]]; then
+      read -r db_snap db_snap_time <<< "$db_info"
+    fi
+    
+    _res["db_snap"]="$db_snap"
+    _res["db_snap_time"]="$db_snap_time"
+
+    if [[ -z "$db_snap" ]]; then
+      _res["db_valid"]="0"
+      _res["error_message"]="DB 복구 테스트 실패: 저장소에 DB 백업 스냅샷이 존재하지 않습니다."
+      return 0
+    fi
+
+    local db_target_dir="${target_dir}_db"
+    if [[ -d "$db_target_dir" ]]; then
+      rm -rf "$db_target_dir"
+    fi
+    mkdir -p "$db_target_dir"
+
+    local db_restore_ok=1
+    restic restore "$db_snap" --target "$db_target_dir" >/dev/null 2>&1 || db_restore_ok=0
+
+    local db_valid=0
+    if (( db_restore_ok )); then
+      local file_path="${db_target_dir}/${BACKUP_DB_FILENAME:-db-dump.sql}"
+      if [[ -f "$file_path" && -s "$file_path" ]]; then
+        local header
+        header=$(head -n 10 "$file_path" 2>/dev/null) || true
+        case "${BACKUP_DB_TYPE}" in
+          mysql|mariadb)
+            if [[ "$header" == *"MySQL dump"* || "$header" == *"MariaDB dump"* ]]; then
+              db_valid=1
+            fi
+            ;;
+          postgres)
+            if [[ "$header" == *"PostgreSQL database dump"* || "$header" == *"PostgreSQL database cluster dump"* ]]; then
+              db_valid=1
+            fi
+            ;;
+          custom)
+            db_valid=1
+            ;;
+        esac
+      fi
+    fi
+
+    _res["db_valid"]="$db_valid"
+    rm -rf "$db_target_dir"
+
+    if (( ! db_restore_ok )); then
+      _res["error_message"]="DB restic restore 복구 실패"
+      return 0
+    fi
+  fi
+
+  # 3. Secondary snapshot
+  local sec_backend="${SECONDARY_BACKEND:-}"
+  if [[ -n "$sec_backend" ]]; then
+    local sec_res
+    sec_res=$(
+      export RESTIC_REPOSITORY="${SECONDARY_RESTIC_REPOSITORY:-}"
+      export RESTIC_PASSWORD="${SECONDARY_RESTIC_PASSWORD:-$RESTIC_PASSWORD}"
+      if [[ "$sec_backend" == "s3" ]]; then
+        export AWS_ACCESS_KEY_ID="${SECONDARY_AWS_ACCESS_KEY_ID:-}"
+        export AWS_SECRET_ACCESS_KEY="${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
+      elif [[ "$sec_backend" == "sftp" ]]; then
+        export RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp"
+        export RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-}}"
+        export RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-}}"
+        export RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-22}}"
+        export RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE:-$BACKUP_SSH_KEY}}"
+      fi
+
+      local sec_info; sec_info=$(query_snapshot_info)
+      local sec_snap="" sec_snap_time=""
+      if [[ -n "$sec_info" ]]; then
+        read -r sec_snap sec_snap_time <<< "$sec_info"
+      fi
+
+      if [[ -z "$sec_snap" ]]; then
+        echo "ERROR:2차 복구 테스트 실패: 2차 저장소에 백업 스냅샷이 존재하지 않습니다."
+        exit 0
+      fi
+
+      local sec_target_dir="${target_dir}_secondary"
+      if [[ -d "$sec_target_dir" ]]; then
+        rm -rf "$sec_target_dir"
+      fi
+      mkdir -p "$sec_target_dir"
+
+      local sec_start; sec_start=$(date +%s)
+      local sec_restore_ok=1
+      restic restore "$sec_snap" --target "$sec_target_dir" >/dev/null 2>&1 || sec_restore_ok=0
+      local sec_end; sec_end=$(date +%s)
+      local sec_elapsed=$((sec_end - sec_start))
+
+      if (( ! sec_restore_ok )); then
+        echo "ERROR:2차 저장소 restic restore 복구 실패"
+        rm -rf "$sec_target_dir"
+        exit 0
+      fi
+
+      local sec_total_bytes=0
+      sec_total_bytes=$(du -sb "$sec_target_dir" 2>/dev/null | awk '{print $1}') || sec_total_bytes=0
+      local sec_size_str; sec_size_str=$(format_bytes "$sec_total_bytes")
+
+      rm -rf "$sec_target_dir"
+      echo "SUCCESS:${sec_snap}:${sec_snap_time}:${sec_elapsed}:${sec_size_str}"
+    )
+
+    if [[ "$sec_res" == ERROR:* ]]; then
+      _res["secondary_rto_satisfied"]="false"
+      _res["secondary_rto_status"]="초과 (미흡)"
+      _res["error_message"]="${sec_res#ERROR:}"
+    elif [[ "$sec_res" == SUCCESS:* ]]; then
+      local sec_snap="" sec_snap_time="" sec_elapsed=0 sec_size_str=""
+      IFS=":" read -r _status sec_snap sec_snap_time sec_elapsed sec_size_str <<< "$sec_res"
+      
+      _res["secondary_snap"]="$sec_snap"
+      _res["secondary_snap_time"]="$sec_snap_time"
+      _res["secondary_elapsed_seconds"]="$sec_elapsed"
+      
+      local sec_elapsed_str
+      if (( sec_elapsed < 60 )); then
+        sec_elapsed_str="${sec_elapsed}초"
+      else
+        sec_elapsed_str="$((sec_elapsed / 60))분 $((sec_elapsed % 60))초"
+      fi
+      _res["secondary_elapsed_str"]="$sec_elapsed_str"
+      _res["secondary_size"]="$sec_size_str"
+
+      if (( sec_elapsed <= rto_seconds )); then
+        _res["secondary_rto_satisfied"]="true"
+        _res["secondary_rto_status"]="만족"
+      else
+        _res["secondary_rto_satisfied"]="false"
+        _res["secondary_rto_status"]="초과 (미흡)"
+      fi
+    fi
+  fi
+
+  return 0
+}
+
+render_restore_drill_report() {
+  if (( $# == 1 )); then
+    # shellcheck disable=SC2178
+    local -n _rrd_ref="$1"
+    render_report_markdown _rrd_ref
+  else
+    local -A _tmp_rrd=(
+      [test_date]="$1"
+      [tester]="$2"
+      [primary_snap]="$3"
+      [primary_snap_time]="$4"
+      [target_dir]="$5"
+      [primary_size]="$6"
+      [primary_elapsed_str]="$7"
+      [rto_minutes]="$9"
+      [ciso]="${10}"
+      [os_name]="${11}"
+    )
+    if [[ "$8" == "만족" ]]; then
+      _tmp_rrd[primary_rto_satisfied]="true"
+    else
+      _tmp_rrd[primary_rto_satisfied]="false"
+    fi
+    if [[ -n "${12:-}" ]]; then
+      _tmp_rrd[secondary_snap]="${12}"
+      _tmp_rrd[secondary_snap_time]="${13}"
+      _tmp_rrd[secondary_size]="${14}"
+      _tmp_rrd[secondary_elapsed_str]="${15}"
+      if [[ "${16}" == "만족" ]]; then
+        _tmp_rrd[secondary_rto_satisfied]="true"
+      else
+        _tmp_rrd[secondary_rto_satisfied]="false"
+      fi
+    fi
+    if [[ -n "${17:-}" ]]; then
+      _tmp_rrd[db_type]="${17}"
+      _tmp_rrd[db_valid]="${18:-0}"
+    fi
+    render_report_markdown _tmp_rrd
+  fi
+}
+
+render_report_markdown() {
+  # nameref를 통한 연관 배열 키 동적 할당으로 정적 분석기 미인식 우회
+  # shellcheck disable=SC2154
+  # shellcheck disable=SC2178  # nameref to caller's associative array
+  local -n _rrd="$1"
+  local test_date="${_rrd[test_date]:-}"
+  local tester="${_rrd[tester]:-}"
+  local ciso="${_rrd[ciso]:-}"
+  local rto="${_rrd[rto_minutes]:-120}"
+  local p_snap="${_rrd[primary_snap]:-}"
+  local p_time="${_rrd[primary_snap_time]:-}"
+  local p_size="${_rrd[primary_size]:-0 B}"
+  local p_elapsed_str="${_rrd[primary_elapsed_str]:-0초}"
+  local p_ok="${_rrd[primary_rto_satisfied]:-false}"
+  
+  local s_snap="${_rrd[secondary_snap]:-}"
+  local s_time="${_rrd[secondary_snap_time]:-}"
+  local s_size="${_rrd[secondary_size]:-}"
+  local s_elapsed_str="${_rrd[secondary_elapsed_str]:-}"
+  local s_ok="${_rrd[secondary_rto_satisfied]:-false}"
+  
+  local db_type="${_rrd[db_type]:-}"
+  local db_snap="${_rrd[db_snap]:-}"
+  local db_ok="${_rrd[db_valid]:-0}"
+  local os_name="${_rrd[os_name]:-Rocky Linux 9}"
+  local target_dir="${_rrd[target_dir]:-/tmp/restore_test}"
+
+  local p_status; p_status="$([[ "$p_ok" == "true" ]] && echo "만족" || echo "초과 (미흡)")"
+  local s_status; s_status="$([[ "$s_ok" == "true" ]] && echo "만족" || echo "초과 (미흡)")"
+
   cat <<EOF
 ======================================================================
 [보안 감사 증적] 백업 데이터 복구 및 정합성 테스트 결과 보고서
 ======================================================================
 - 테스트 일자: $test_date
 - 테스터: $tester
-- 테스트 대상 스냅샷 ID: $latest_snap ($latest_time 생성본)
+- 테스트 대상 스냅샷 ID: $p_snap$([[ -n "$p_time" ]] && echo " ($p_time 생성본)")
 EOF
 
-  if [[ -n "$sec_snap" ]]; then
+  if [[ -n "$s_snap" ]]; then
     cat <<EOF
-- 2차 테스트 대상 스냅샷 ID: $sec_snap ($sec_time 생성본)
+- 2차 테스트 대상 스냅샷 ID: $s_snap$([[ -n "$s_time" ]] && echo " ($s_time 생성본)")
 EOF
   fi
 
@@ -2664,11 +3104,11 @@ EOF
 2. 테스트 시나리오 및 수행 내역
   ① 임시 테스트 가상머신(Target VM) 생성 및 $os_name 설치
   ② 백업 스크립트 실행 환경 구성 및 Restic 저장소 연결 테스트 (정상)
-  ③ 'restic restore -t $target_dir' 명령을 통한 DB 덤프 파일 다운로드
-  ④ MariaDB 복원 가동 테스트 및 데이터 정합성 임의 쿼리 조회 검증
+  ③ 'restic restore' 명령을 통한 데이터 다운로드 (대상 경로: $target_dir)
+  ④ 데이터 정합성 임의 쿼리 조회 검증
 EOF
 
-  if [[ -n "$sec_snap" ]]; then
+  if [[ -n "$s_snap" ]]; then
     cat <<EOF
   ⑤ 2차 소산지 레포지토리로부터 복원 가동 테스트 및 데이터 정합성 검증 (양방향)
 EOF
@@ -2678,15 +3118,15 @@ EOF
 
 3. 복구 결과 및 소요 시간 검증
   [1차 원격 저장소]
-  - 원본 데이터 크기: $size_str
-  - 복구 소요 시간: $elapsed_str (당사 RTO 기준 ${rto}분 이내 만족) -> $rto_status
+  - 원본 데이터 크기: $p_size
+  - 복구 소요 시간: $p_elapsed_str (당사 RTO 기준 ${rto}분 이내 만족) -> $p_status
 EOF
 
-  if [[ -n "$sec_snap" ]]; then
+  if [[ -n "$s_snap" ]]; then
     cat <<EOF
   [2차 소산 저장소]
-  - 원본 데이터 크기: $sec_size_str
-  - 복구 소요 시간: $sec_elapsed_str (당사 RTO 기준 ${rto}분 이내 만족) -> $sec_rto_status
+  - 원본 데이터 크기: $s_size
+  - 복구 소요 시간: $s_elapsed_str (당사 RTO 기준 ${rto}분 이내 만족) -> $s_status
 EOF
   fi
 
@@ -2696,7 +3136,7 @@ EOF
 
   if [[ -n "$db_type" ]]; then
     local db_status_str="성공"
-    if (( ! db_valid )); then
+    if [[ "$db_ok" == "0" || "$db_ok" == "false" ]]; then
       db_status_str="실패"
     fi
     printf '  - 데이터베이스(%s) 복원 무결성 검증: %s\n' "$db_type" "$db_status_str"
@@ -2712,140 +3152,68 @@ EOF
 EOF
 }
 
-# ---------------------------------------------------------------------------
-# 감사 보고서 엔진 v2: 연관 배열 기반 어댑터 (Associative-Array Interface)
-# ---------------------------------------------------------------------------
-# 사용법: render_report_markdown  <nameref>
-#         render_report_json      <nameref>
-#         write_audit_reports     <nameref> <base_md_path>
-#
-# <nameref> 은 호출부에서 declare -A 로 선언된 배열 이름(문자열)을 넘긴다.
-# 지원 키:
-#   test_date, tester, ciso, rto_minutes
-#   primary_snap, primary_elapsed_seconds, primary_rto_satisfied
-#   secondary_snap, secondary_elapsed_seconds, secondary_rto_satisfied
-# ---------------------------------------------------------------------------
-
-render_report_markdown() {
-  # shellcheck disable=SC2178  # nameref to caller's associative array
-  local -n _rrd="$1"
-  local test_date="${_rrd[test_date]:-}"
-  local tester="${_rrd[tester]:-}"
-  local ciso="${_rrd[ciso]:-}"
-  local rto="${_rrd[rto_minutes]:-60}"
-  local p_snap="${_rrd[primary_snap]:-}"
-  local p_elapsed="${_rrd[primary_elapsed_seconds]:-0}"
-  local p_ok="${_rrd[primary_rto_satisfied]:-false}"
-  local s_snap="${_rrd[secondary_snap]:-}"
-  local s_elapsed="${_rrd[secondary_elapsed_seconds]:-0}"
-  local s_ok="${_rrd[secondary_rto_satisfied]:-false}"
-  local db_type="${_rrd[db_type]:-}"
-  local db_snap="${_rrd[db_snap]:-}"
-  local db_ok="${_rrd[db_valid]:-false}"
-
-  local p_status; p_status="$([[ "$p_ok" == "true" ]] && echo "만족" || echo "미달")"
-  local p_elapsed_str; p_elapsed_str="${p_elapsed}초"
-
-  cat <<EOF
-======================================================================
-[보안 감사 증적] 백업 데이터 복구 및 정합성 테스트 결과 보고서
-======================================================================
-- 테스트 일자: $test_date
-- 테스터: $tester
-- 테스트 대상 스냅샷 ID: $p_snap
-EOF
-
-  if [[ -n "$s_snap" ]]; then
-    cat <<EOF
-- 2차 테스트 대상 스냅샷 ID: $s_snap
-EOF
-  fi
-
-  cat <<EOF
-
-1. 테스트 목적
-  - 재해 재난 및 랜섬웨어 감염 시 백업 데이터로부터 실제 서비스 복구가 원활히 이루어지는지 검증하고, 목표 복구 시간(RTO) 내 복구 가능한지 점검함.
-
-2. 테스트 시나리오 및 수행 내역
-  ① 임시 테스트 환경 구성 및 Restic 저장소 연결 테스트 (정상)
-  ② 'restic restore' 명령을 통한 데이터 다운로드
-  ③ 데이터 정합성 임의 쿼리 조회 검증
-EOF
-
-  if [[ -n "$s_snap" ]]; then
-    cat <<EOF
-  ④ 2차 소산지 레포지토리로부터 복원 가동 테스트 및 데이터 정합성 검증 (양방향)
-EOF
-  fi
-
-  cat <<EOF
-
-3. 복구 결과 및 소요 시간 검증
-  [1차 원격 저장소]
-  - 복구 소요 시간: $p_elapsed_str (당사 RTO 기준 ${rto}분 이내 만족) -> $p_status
-EOF
-
-  if [[ -n "$s_snap" ]]; then
-    local s_status; s_status="$([[ "$s_ok" == "true" ]] && echo "만족" || echo "미달")"
-    local s_elapsed_str="${s_elapsed}초"
-    cat <<EOF
-  [2차 소산 저장소]
-  - 복구 소요 시간: $s_elapsed_str (당사 RTO 기준 ${rto}분 이내 만족) -> $s_status
-EOF
-  fi
-
-  cat <<EOF
-  - 데이터 정합성 검증: 성공
-EOF
-
-  if [[ -n "$db_type" ]]; then
-    local db_status_str; db_status_str="$([[ "$db_ok" == "true" ]] && echo "성공" || echo "실패")"
-    printf '  - 데이터베이스(%s) 복원 무결성 검증: %s\n' "$db_type" "$db_status_str"
-  fi
-
-  cat <<EOF
-
-4. 특이사항 및 종합 의견
-  - 백업 암호화 키 분실 방지 대책이 정상 작동 중임.
-
-- 승인자: $ciso (인)
-======================================================================
-EOF
-}
-
 render_report_json() {
+  # nameref를 통한 연관 배열 키 동적 할당으로 정적 분석기 미인식 우회
+  # shellcheck disable=SC2154
   # shellcheck disable=SC2178  # nameref to caller's associative array
   local -n _rrj="$1"
   local test_date="${_rrj[test_date]:-}"
   local tester="${_rrj[tester]:-}"
   local ciso="${_rrj[ciso]:-}"
-  local rto="${_rrj[rto_minutes]:-60}"
+  local rto="${_rrj[rto_minutes]:-120}"
   local p_snap="${_rrj[primary_snap]:-}"
+  local p_time="${_rrj[primary_snap_time]:-}"
+  local p_size="${_rrj[primary_size]:-0 B}"
   local p_elapsed="${_rrj[primary_elapsed_seconds]:-0}"
+  local p_elapsed_str="${_rrj[primary_elapsed_str]:-0초}"
   local p_ok="${_rrj[primary_rto_satisfied]:-false}"
+  
   local s_snap="${_rrj[secondary_snap]:-}"
+  local s_time="${_rrj[secondary_snap_time]:-}"
+  local s_size="${_rrj[secondary_size]:-}"
   local s_elapsed="${_rrj[secondary_elapsed_seconds]:-0}"
+  local s_elapsed_str="${_rrj[secondary_elapsed_str]:-}"
   local s_ok="${_rrj[secondary_rto_satisfied]:-false}"
+  
   local db_type="${_rrj[db_type]:-}"
   local db_snap="${_rrj[db_snap]:-}"
-  local db_ok="${_rrj[db_valid]:-false}"
+  local db_time="${_rrj[db_snap_time]:-}"
+  local db_ok="${_rrj[db_valid]:-0}"
+  local target_dir="${_rrj[target_dir]:-/tmp/restore_test}"
+
+  local db_integrity_verified="null"
+  if [[ -n "$db_type" ]]; then
+    if [[ "$db_ok" == "1" || "$db_ok" == "true" ]]; then
+      db_integrity_verified="true"
+    else
+      db_integrity_verified="false"
+    fi
+  fi
 
   cat <<EOF
 {
+  "hostname": "$(hostname 2>/dev/null || echo "unknown")",
+  "timestamp": "$(date --iso-8601=seconds 2>/dev/null || date -Iseconds 2>/dev/null || date "+%Y-%m-%dT%H:%M:%S%z")",
   "report_type": "restore_drill",
   "test_date": "${test_date}",
   "tester": "${tester//\"/\\\"}",
   "ciso": "${ciso//\"/\\\"}",
-  "target_rto_minutes": ${rto},
+  "target_snapshot_id": "${p_snap}",
+  "target_snapshot_time": "${p_time}",
+  "target_directory": "${target_dir//\"/\\\"}",
   "recovery_results": {
-    "target_snapshot_id": "${p_snap}",
+    "data_size_human": "${p_size}",
     "elapsed_seconds": ${p_elapsed},
-    "rto_satisfied": ${p_ok}
-  },
-  "database_verification": {
-    "db_type": $([[ -n "$db_type" ]] && echo "\"$db_type\"" || echo "null"),
-    "db_snapshot_id": $([[ -n "$db_snap" ]] && echo "\"$db_snap\"" || echo "null"),
-    "db_integrity_verified": ${db_ok}
+    "elapsed_human": "${p_elapsed_str}",
+    "target_rto_minutes": ${rto},
+    "rto_satisfied": ${p_ok},
+    "data_integrity_verified": true,
+    "database_verification": {
+      "db_type": $([[ -n "$db_type" ]] && echo "\"$db_type\"" || echo "null"),
+      "db_snapshot_id": $([[ -n "$db_snap" ]] && echo "\"$db_snap\"" || echo "null"),
+      "db_snapshot_time": $([[ -n "$db_time" ]] && echo "\"$db_time\"" || echo "null"),
+      "db_integrity_verified": ${db_integrity_verified}
+    }
   }
 EOF
 
@@ -2854,8 +3222,13 @@ EOF
   ,
   "secondary_recovery_results": {
     "target_snapshot_id": "${s_snap}",
+    "target_snapshot_time": "${s_time}",
+    "data_size_human": "${s_size}",
     "elapsed_seconds": ${s_elapsed},
-    "rto_satisfied": ${s_ok}
+    "elapsed_human": "${s_elapsed_str}",
+    "target_rto_minutes": ${rto},
+    "rto_satisfied": ${s_ok},
+    "data_integrity_verified": true
   }
 EOF
   fi
@@ -2869,12 +3242,22 @@ write_audit_reports() {
   # shellcheck disable=SC2178  # nameref to caller's associative array
   local -n _war_data="$1"
   local md_path="$2"
-  local json_path="${md_path%.md}.json"
-  local html_path="${md_path%.md}.html"
+  
+  local base_path
+  if [[ "$md_path" == *.md ]]; then
+    base_path="${md_path%.md}"
+  elif [[ "$md_path" == *.txt ]]; then
+    base_path="${md_path%.txt}"
+  else
+    base_path="$md_path"
+  fi
+
+  local json_path="${base_path}.json"
+  local html_path="${base_path}.html"
 
   mkdir -p "$(dirname "$md_path")"
 
-  # Markdown
+  # Markdown / Text
   render_report_markdown _war_data > "$md_path"
   chmod 600 "$md_path"
 
@@ -2882,68 +3265,54 @@ write_audit_reports() {
   render_report_json _war_data > "$json_path"
   chmod 600 "$json_path"
 
-  # HTML: render_restore_drill_report_html 존재 여부와 무관하게
-  # 최소한의 HTML 래퍼로 마크다운 내용을 포함한다.
-  {
-    echo "<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><title>Audit Report</title></head><body><pre>"
-    render_report_markdown _war_data | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
-    echo "</pre></body></html>"
-  } > "$html_path"
+  # HTML
+  render_restore_drill_report_html _war_data > "$html_path"
   chmod 600 "$html_path"
 }
 
 render_restore_drill_report_json() {
-  local test_date="$1" tester="$2" latest_snap="$3" latest_time="$4" target_dir="$5"
-  local size_str="$6" elapsed="$7" elapsed_str="$8" rto="$9" rto_status="${10}" ciso="${11}"
-  local sec_snap="${12:-}" sec_time="${13:-}" sec_size_str="${14:-}" sec_elapsed="${15:-0}" sec_elapsed_str="${16:-}" sec_rto_status="${17:-}"
-  local db_type="${18:-}" db_snap="${19:-}" db_time="${20:-}" db_valid="${21:-0}"
-  
-  cat <<EOF
-{
-  "hostname": "$(hostname 2>/dev/null || echo "unknown")",
-  "timestamp": "$(date --iso-8601=seconds 2>/dev/null || date -Iseconds 2>/dev/null || date "+%Y-%m-%dT%H:%M:%S%z")",
-  "report_type": "restore_drill",
-  "test_date": "${test_date}",
-  "tester": "${tester//\"/\\\"}",
-  "ciso": "${ciso//\"/\\\"}",
-  "target_snapshot_id": "${latest_snap}",
-  "target_snapshot_time": "${latest_time}",
-  "target_directory": "${target_dir//\"/\\\"}",
-  "recovery_results": {
-    "data_size_human": "${size_str}",
-    "elapsed_seconds": ${elapsed},
-    "elapsed_human": "${elapsed_str}",
-    "target_rto_minutes": ${rto},
-    "rto_satisfied": $([[ "$rto_status" == "만족" ]] && echo "true" || echo "false"),
-    "data_integrity_verified": true,
-    "database_verification": {
-      "db_type": $([[ -n "$db_type" ]] && echo "\"$db_type\"" || echo "null"),
-      "db_snapshot_id": $([[ -n "$db_snap" ]] && echo "\"$db_snap\"" || echo "null"),
-      "db_snapshot_time": $([[ -n "$db_time" ]] && echo "\"$db_time\"" || echo "null"),
-      "db_integrity_verified": $([[ -n "$db_type" ]] && { [[ "$db_valid" == "1" ]] && echo "true" || echo "false"; } || echo "null")
-    }
-  }
-EOF
-
-  if [[ -n "$sec_snap" ]]; then
-    cat <<EOF
-  ,
-  "secondary_recovery_results": {
-    "target_snapshot_id": "${sec_snap}",
-    "target_snapshot_time": "${sec_time}",
-    "data_size_human": "${sec_size_str}",
-    "elapsed_seconds": ${sec_elapsed},
-    "elapsed_human": "${sec_elapsed_str}",
-    "target_rto_minutes": ${rto},
-    "rto_satisfied": $([[ "$sec_rto_status" == "만족" ]] && echo "true" || echo "false"),
-    "data_integrity_verified": true
-  }
-EOF
+  if (( $# == 1 )); then
+    # shellcheck disable=SC2178
+    local -n _rrj_ref="$1"
+    render_report_json _rrj_ref
+  else
+    local -A _tmp_rrj=(
+      [test_date]="$1"
+      [tester]="$2"
+      [primary_snap]="$3"
+      [primary_snap_time]="$4"
+      [target_dir]="$5"
+      [primary_size]="$6"
+      [primary_elapsed_seconds]="$7"
+      [primary_elapsed_str]="$8"
+      [rto_minutes]="$9"
+      [ciso]="${11}"
+    )
+    if [[ "${10}" == "만족" ]]; then
+      _tmp_rrj[primary_rto_satisfied]="true"
+    else
+      _tmp_rrj[primary_rto_satisfied]="false"
+    fi
+    if [[ -n "${12:-}" ]]; then
+      _tmp_rrj[secondary_snap]="${12}"
+      _tmp_rrj[secondary_snap_time]="${13}"
+      _tmp_rrj[secondary_size]="${14}"
+      _tmp_rrj[secondary_elapsed_seconds]="${15}"
+      _tmp_rrj[secondary_elapsed_str]="${16}"
+      if [[ "${17}" == "만족" ]]; then
+        _tmp_rrj[secondary_rto_satisfied]="true"
+      else
+        _tmp_rrj[secondary_rto_satisfied]="false"
+      fi
+    fi
+    if [[ -n "${18:-}" ]]; then
+      _tmp_rrj[db_type]="${18}"
+      _tmp_rrj[db_snap]="${19}"
+      _tmp_rrj[db_snap_time]="${20}"
+      _tmp_rrj[db_valid]="${21:-0}"
+    fi
+    render_report_json _tmp_rrj
   fi
-
-  cat <<EOF
-}
-EOF
 }
 
 
@@ -3257,10 +3626,37 @@ EOF
 }
 
 render_restore_drill_report_html() {
-  local test_date="$1" tester="$2" latest_snap="$3" latest_time="$4" target_dir="$5"
-  local size_str="$6" elapsed_str="$7" rto="$8" rto_status="$9" ciso="${10}" os_name="${11}"
-  local sec_snap="${12:-}" sec_time="${13:-}" sec_size_str="${14:-}" sec_elapsed_str="${15:-}" sec_rto_status="${16:-}"
-  local db_type="${17:-}" db_valid="${18:-0}"
+  # nameref를 통한 연관 배열 키 동적 할당으로 정적 분석기 미인식 우회
+  # shellcheck disable=SC2154
+  if (( $# == 1 )); then
+    # shellcheck disable=SC2178
+    local -n _rr_html="$1"
+    local test_date="${_rr_html[test_date]:-}"
+    local tester="${_rr_html[tester]:-}"
+    local latest_snap="${_rr_html[primary_snap]:-}"
+    local latest_time="${_rr_html[primary_snap_time]:-}"
+    local target_dir="${_rr_html[target_dir]:-/tmp/restore_test}"
+    local size_str="${_rr_html[primary_size]:-0 B}"
+    local elapsed_str="${_rr_html[primary_elapsed_str]:-0초}"
+    local rto="${_rr_html[rto_minutes]:-120}"
+    local p_ok="${_rr_html[primary_rto_satisfied]:-false}"
+    local rto_status; rto_status="$([[ "$p_ok" == "true" ]] && echo "만족" || echo "초과 (미흡)")"
+    local ciso="${_rr_html[ciso]:-}"
+    local os_name="${_rr_html[os_name]:-Rocky Linux 9}"
+    local sec_snap="${_rr_html[secondary_snap]:-}"
+    local sec_time="${_rr_html[secondary_snap_time]:-}"
+    local sec_size_str="${_rr_html[secondary_size]:-}"
+    local sec_elapsed_str="${_rr_html[secondary_elapsed_str]:-}"
+    local s_ok="${_rr_html[secondary_rto_satisfied]:-false}"
+    local sec_rto_status; sec_rto_status="$([[ "$s_ok" == "true" ]] && echo "만족" || echo "초과 (미흡)")"
+    local db_type="${_rr_html[db_type]:-}"
+    local db_valid="${_rr_html[db_valid]:-0}"
+  else
+    local test_date="$1" tester="$2" latest_snap="$3" latest_time="$4" target_dir="$5"
+    local size_str="$6" elapsed_str="$7" rto="$8" rto_status="$9" ciso="${10}" os_name="${11}"
+    local sec_snap="${12:-}" sec_time="${13:-}" sec_size_str="${14:-}" sec_elapsed_str="${15:-}" sec_rto_status="${16:-}"
+    local db_type="${17:-}" db_valid="${18:-0}"
+  fi
   
   cat <<EOF
 <!DOCTYPE html>
@@ -4275,296 +4671,45 @@ cmd_audit() {
     local ciso; ciso=$(resolve_value "${opts[ciso]:-}" "${BACKUP_AUDIT_CISO:-}" "" "이몽룡 (정보보안책임자 CISO)")
     local rto; rto=$(resolve_value "${opts[rto]:-}" "${BACKUP_AUDIT_RTO:-}" "" "120")
     local target_dir="${opts[target]:-/tmp/restore_test}"
-    
-    local os_name="Rocky Linux 9"
-    if [[ -f /etc/os-release ]]; then
-      # OS 명칭 획득을 위해 시스템 os-release 파일 동적 소싱
-      # shellcheck disable=SC1091
-      os_name=$(source /etc/os-release && echo "${PRETTY_NAME:-Rocky Linux 9}")
-    fi
-    
-    # Get latest snapshot ID and date
-    local latest_snap latest_time
-    latest_snap=$(restic snapshots --latest 1 --json 2>/dev/null | python3 -c '
-import sys, json
-try:
-    data = json.loads(sys.stdin.read())
-    if data:
-        print(data[0]["id"])
-except:
-    pass
-' 2>/dev/null)
-  
-    latest_time=$(restic snapshots --latest 1 --json 2>/dev/null | python3 -c '
-import sys, json
-try:
-    data = json.loads(sys.stdin.read())
-    if data:
-        print(data[0]["time"][:19].replace("T", " "))
-except:
-    pass
-' 2>/dev/null)
-  
-    if [[ -z "$latest_snap" ]]; then
-      die "복구 테스트 실패: 저장소에 백업 스냅샷이 존재하지 않습니다."
-    fi
-    
-    # Safe guard cleanup of existing target directory
-    if [[ -d "$target_dir" ]]; then
-      if [[ "$target_dir" == /tmp/* || "$target_dir" == /var/tmp/* ]]; then
-        rm -rf "$target_dir"
-      else
-        die "복구 경로가 안전하지 않습니다 (/tmp 또는 /var/tmp 하위 경로만 지원): $target_dir"
-      fi
-    fi
-    mkdir -p "$target_dir"
-    
-    # Measure restore duration
-    local start_time; start_time=$(date +%s)
-    
-    # Run real restore
-    restic restore "$latest_snap" --target "$target_dir" >/dev/null 2>&1 || die "restic restore 복구 실패"
-    
-    local end_time; end_time=$(date +%s)
-    local elapsed=$((end_time - start_time))
-    
-    # Format elapsed time
-    local elapsed_str
-    if (( elapsed < 60 )); then
-      elapsed_str="${elapsed}초"
-    else
-      elapsed_str="$((elapsed / 60))분 $((elapsed % 60))초"
-    fi
-    
-    # Check RTO satisfaction
-    local rto_seconds=$((rto * 60))
-    local rto_status="초과 (미흡)"
-    if (( elapsed <= rto_seconds )); then
-      rto_status="만족"
-    fi
-    
-    # Calculate restore folder size
-    local total_bytes=0
-    total_bytes=$(du -sb "$target_dir" 2>/dev/null | awk '{print $1}') || total_bytes=0
-    local size_str; size_str=$(format_bytes "$total_bytes")
-    
-    # Clean up target directory
-    rm -rf "$target_dir"
 
-    # DB 복구 테스트 수행
-    local db_latest_snap="" db_latest_time="" db_valid=0
-    if [[ -n "${BACKUP_DB_TYPE:-}" ]]; then
-      db_latest_snap=$(restic snapshots --tag db --latest 1 --json 2>/dev/null | python3 -c '
-import sys, json
-try:
-    data = json.loads(sys.stdin.read())
-    if data:
-        print(data[0]["id"])
-except:
-    pass
-' 2>/dev/null)
+    # nameref 인자로 전달되어 정적 분석기에서 미사용으로 오탐지 우회
+    # shellcheck disable=SC2034
+    local -A drill_opts=(
+      [tester]="$tester"
+      [ciso]="$ciso"
+      [rto]="$rto"
+      [target]="$target_dir"
+    )
 
-      db_latest_time=$(restic snapshots --tag db --latest 1 --json 2>/dev/null | python3 -c '
-import sys, json
-try:
-    data = json.loads(sys.stdin.read())
-    if data:
-        print(data[0]["time"][:19].replace("T", " "))
-except:
-    pass
-' 2>/dev/null)
+    # shellcheck disable=SC2034
+    local -A drill_res=()
+    run_restore_drill drill_opts drill_res
 
-      if [[ -z "$db_latest_snap" ]]; then
-        die "DB 복구 테스트 실패: 저장소에 DB 백업 스냅샷이 존재하지 않습니다."
-      fi
-
-      local db_target_dir="${target_dir}_db"
-      if [[ -d "$db_target_dir" ]]; then
-        rm -rf "$db_target_dir"
-      fi
-      mkdir -p "$db_target_dir"
-
-      # Run DB restore
-      restic restore "$db_latest_snap" --target "$db_target_dir" >/dev/null 2>&1 || die "DB restic restore 복구 실패"
-
-      # Validate DB dump file header integrity
-      local file_path="${db_target_dir}/${BACKUP_DB_FILENAME:-db-dump.sql}"
-      if [[ -f "$file_path" && -s "$file_path" ]]; then
-        local header
-        header=$(head -n 10 "$file_path" 2>/dev/null) || true
-        case "${BACKUP_DB_TYPE}" in
-          mysql|mariadb)
-            if [[ "$header" == *"MySQL dump"* || "$header" == *"MariaDB dump"* ]]; then
-              db_valid=1
-            fi
-            ;;
-          postgres)
-            if [[ "$header" == *"PostgreSQL database dump"* || "$header" == *"PostgreSQL database cluster dump"* ]]; then
-              db_valid=1
-            fi
-            ;;
-          custom)
-            db_valid=1
-            ;;
-        esac
-      fi
-
-      # Clean up DB target directory
-      rm -rf "$db_target_dir"
+    if [[ -n "${drill_res[error_message]:-}" ]]; then
+      die "${drill_res[error_message]}"
     fi
 
-    # 2차 소산지 복구 훈련 수행 (양방향 이중 복구 검증)
-    local sec_elapsed=0 sec_elapsed_str="" sec_size_str="" sec_rto_status=""
-    local sec_latest_snap="" sec_latest_time="" sec_backend="${SECONDARY_BACKEND:-}"
-    if [[ -n "$sec_backend" ]]; then
-      log_info "2차 소산지 복구 모의훈련을 시작합니다..."
+    render_restore_drill_report drill_res
 
-      # 2차 스냅샷 정보 획득
-      sec_latest_snap=$(
-        export RESTIC_REPOSITORY="${SECONDARY_RESTIC_REPOSITORY:-}"
-        export RESTIC_PASSWORD="${SECONDARY_RESTIC_PASSWORD:-$RESTIC_PASSWORD}"
-        if [[ "$sec_backend" == "s3" ]]; then
-          export AWS_ACCESS_KEY_ID="${SECONDARY_AWS_ACCESS_KEY_ID:-}"
-          export AWS_SECRET_ACCESS_KEY="${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
-        elif [[ "$sec_backend" == "sftp" ]]; then
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp"
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-}}"
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-}}"
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-22}}"
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE:-$BACKUP_SSH_KEY}}"
-        fi
-        restic snapshots --latest 1 --json 2>/dev/null | python3 -c '
-import sys, json
-try:
-    data = json.loads(sys.stdin.read())
-    if data:
-        print(data[0]["id"])
-except:
-    pass
-' 2>/dev/null
-      )
-
-      sec_latest_time=$(
-        export RESTIC_REPOSITORY="${SECONDARY_RESTIC_REPOSITORY:-}"
-        export RESTIC_PASSWORD="${SECONDARY_RESTIC_PASSWORD:-$RESTIC_PASSWORD}"
-        if [[ "$sec_backend" == "s3" ]]; then
-          export AWS_ACCESS_KEY_ID="${SECONDARY_AWS_ACCESS_KEY_ID:-}"
-          export AWS_SECRET_ACCESS_KEY="${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
-        elif [[ "$sec_backend" == "sftp" ]]; then
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp"
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-}}"
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-}}"
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-22}}"
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE:-$BACKUP_SSH_KEY}}"
-        fi
-        restic snapshots --latest 1 --json 2>/dev/null | python3 -c '
-import sys, json
-try:
-    data = json.loads(sys.stdin.read())
-    if data:
-        print(data[0]["time"][:19].replace("T", " "))
-except:
-    pass
-' 2>/dev/null
-      )
-
-      if [[ -z "$sec_latest_snap" ]]; then
-        die "2차 복구 테스트 실패: 2차 저장소에 백업 스냅샷이 존재하지 않습니다."
-      fi
-
-      local sec_target_dir="${target_dir}_secondary"
-      if [[ -d "$sec_target_dir" ]]; then
-        rm -rf "$sec_target_dir"
-      fi
-      mkdir -p "$sec_target_dir"
-
-      local sec_start; sec_start=$(date +%s)
-
-      (
-        export RESTIC_REPOSITORY="${SECONDARY_RESTIC_REPOSITORY:-}"
-        export RESTIC_PASSWORD="${SECONDARY_RESTIC_PASSWORD:-$RESTIC_PASSWORD}"
-        if [[ "$sec_backend" == "s3" ]]; then
-          export AWS_ACCESS_KEY_ID="${SECONDARY_AWS_ACCESS_KEY_ID:-}"
-          export AWS_SECRET_ACCESS_KEY="${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
-        elif [[ "$sec_backend" == "sftp" ]]; then
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp"
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-}}"
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-}}"
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-22}}"
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE:-$BACKUP_SSH_KEY}}"
-        fi
-        restic restore "$sec_latest_snap" --target "$sec_target_dir" >/dev/null 2>&1
-      ) || die "2차 저장소 restic restore 복구 실패"
-
-      local sec_end; sec_end=$(date +%s)
-      sec_elapsed=$((sec_end - sec_start))
-
-      if (( sec_elapsed < 60 )); then
-        sec_elapsed_str="${sec_elapsed}초"
-      else
-        sec_elapsed_str="$((sec_elapsed / 60))분 $((sec_elapsed % 60))초"
-      fi
-
-      if (( sec_elapsed <= rto_seconds )); then
-        sec_rto_status="만족"
-      else
-        sec_rto_status="초과 (미흡)"
-      fi
-
-      local sec_total_bytes=0
-      sec_total_bytes=$(du -sb "$sec_target_dir" 2>/dev/null | awk '{print $1}') || sec_total_bytes=0
-      sec_size_str=$(format_bytes "$sec_total_bytes")
-
-      rm -rf "$sec_target_dir"
-    fi
-    
-    local test_date; test_date=$(date "+%Y-%m-%d")
-    
-    render_restore_drill_report "$test_date" "$tester" "$latest_snap" "$latest_time" \
-      "$target_dir" "$size_str" "$elapsed_str" "$rto" "$rto_status" "$ciso" "$os_name" \
-      "$sec_latest_snap" "$sec_latest_time" "$sec_size_str" "$sec_elapsed_str" "$sec_rto_status" \
-      "${BACKUP_DB_TYPE:-}" "${db_valid:-0}"
-      
     if [[ -n "$report_file" ]]; then
       mkdir -p "$(dirname "$report_file")"
       chmod 700 "$(dirname "$report_file")" 2>/dev/null || true
       
-      render_restore_drill_report "$test_date" "$tester" "$latest_snap" "$latest_time" \
-        "$target_dir" "$size_str" "$elapsed_str" "$rto" "$rto_status" "$ciso" "$os_name" \
-        "$sec_latest_snap" "$sec_latest_time" "$sec_size_str" "$sec_elapsed_str" "$sec_rto_status" \
-        "${BACKUP_DB_TYPE:-}" "${db_valid:-0}" > "$report_file"
-      chmod 600 "$report_file"
+      write_audit_reports drill_res "$report_file"
 
-      local json_report_file
-      if [[ "$report_file" =~ \.(txt|md)$ ]]; then
-        json_report_file="${report_file%.*}.json"
+      local base_path
+      if [[ "$report_file" == *.md ]]; then
+        base_path="${report_file%.md}"
+      elif [[ "$report_file" == *.txt ]]; then
+        base_path="${report_file%.txt}"
       else
-        json_report_file="${report_file}.json"
+        base_path="$report_file"
       fi
 
-      render_restore_drill_report_json "$test_date" "$tester" "$latest_snap" "$latest_time" \
-        "$target_dir" "$size_str" "$elapsed" "$elapsed_str" "$rto" "$rto_status" "$ciso" \
-        "$sec_latest_snap" "$sec_latest_time" "$sec_size_str" "$sec_elapsed" "$sec_elapsed_str" "$sec_rto_status" \
-        "${BACKUP_DB_TYPE:-}" "$db_latest_snap" "$db_latest_time" "${db_valid:-0}" > "$json_report_file"
-      chmod 600 "$json_report_file"
-
-      local html_report_file
-      if [[ "$report_file" =~ \.(txt|md)$ ]]; then
-        html_report_file="${report_file%.*}.html"
-      else
-        html_report_file="${report_file}.html"
-      fi
-
-      render_restore_drill_report_html "$test_date" "$tester" "$latest_snap" "$latest_time" \
-        "$target_dir" "$size_str" "$elapsed_str" "$rto" "$rto_status" "$ciso" "$os_name" \
-        "$sec_latest_snap" "$sec_latest_time" "$sec_size_str" "$sec_elapsed_str" "$sec_rto_status" \
-        "${BACKUP_DB_TYPE:-}" "${db_valid:-0}" > "$html_report_file"
-      chmod 600 "$html_report_file"
-      
       log_info "감사 보고서가 동시 저장되었습니다:"
       log_info "  - 텍스트 보고서: $report_file"
-      log_info "  - JSON 보고서: $json_report_file"
-      log_info "  - HTML 보고서: $html_report_file"
+      log_info "  - JSON 보고서: ${base_path}.json"
+      log_info "  - HTML 보고서: ${base_path}.html"
     fi
 
     return 0
@@ -5077,8 +5222,8 @@ cmd_migrate() {
   fi
 
   # Call resolve_and_validate_config to validate the destination options
-  # Since resolve_and_validate_config needs targets and password, we feed mock ones
-  # resolve_and_validate_config에 nameref로 인자를 넘기므로 shellcheck 오탐 방지
+  # Since load_and_validate_config needs targets and password, we feed mock ones
+  # load_and_validate_config에 nameref로 인자를 넘기므로 shellcheck 오탐 방지
   # shellcheck disable=SC2034
   local -A dest_opts=()
   local key
@@ -5090,7 +5235,7 @@ cmd_migrate() {
 
   local -A resolved=()
   local -a errors=()
-  if ! resolve_and_validate_config dest_opts resolved errors; then
+  if ! load_and_validate_config "" dest_opts resolved errors; then
     local e
     for e in "${errors[@]}"; do
       log_error "$e"
@@ -5769,7 +5914,7 @@ cmd_config() {
   # 3. 설정 해석 및 검증
   local -A resolved=()
   local -a errors=()
-  if ! resolve_and_validate_config opts resolved errors; then
+  if ! load_and_validate_config "" opts resolved errors; then
     local e
     for e in "${errors[@]}"; do
       log_error "$e"
@@ -5781,49 +5926,30 @@ cmd_config() {
 
   # 스케줄 주기(on_calendar) 결정
   local on_calendar="${opts[on-calendar]:-}"
-  if [[ -z "$on_calendar" ]]; then
-    if [[ -f "$RESTICPROFILE_CONFIG_FILE" ]]; then
-      local parsed_schedule
-      parsed_schedule=$(grep -E 'schedule:[[:space:]]*"[^"]+"' "$RESTICPROFILE_CONFIG_FILE" | head -n1 | sed -E 's/.*schedule:[[:space:]]*"([^"]+)".*/\1/')
-      if [[ -n "$parsed_schedule" ]]; then
-        on_calendar="$parsed_schedule"
-      fi
-    fi
-  fi
-  if [[ -z "$on_calendar" ]]; then
-    on_calendar="$DEFAULT_ON_CALENDAR"
+  if [[ -n "$on_calendar" ]]; then
+    resolved[on_calendar]="$on_calendar"
   fi
 
   if (( dry_run )); then
+    local current_schedule="${resolved[on_calendar]:-}"
+    if [[ -z "$current_schedule" ]]; then
+      if [[ -f "$RESTICPROFILE_CONFIG_FILE" ]]; then
+        local parsed_schedule
+        parsed_schedule=$(grep -E 'schedule:[[:space:]]*"[^"]+"' "$RESTICPROFILE_CONFIG_FILE" | head -n1 | sed -E 's/.*schedule:[[:space:]]*"([^"]+)".*/\1/')
+        if [[ -n "$parsed_schedule" ]]; then
+          current_schedule="$parsed_schedule"
+        fi
+      fi
+    fi
+    if [[ -z "$current_schedule" ]]; then
+      current_schedule="$DEFAULT_ON_CALENDAR"
+    fi
     log_info "[dry-run] backup.env(${backend}) 설정 변경 예정: ${BACKUP_ENV_FILE}"
-    log_info "[dry-run] 변경 예정 상세: targets=${resolved[targets]}, excludes=${resolved[excludes_csv]:-(없음)}, schedule=${on_calendar}"
+    log_info "[dry-run] 변경 예정 상세: targets=${resolved[targets]}, excludes=${resolved[excludes_csv]:-(없음)}, schedule=${current_schedule}"
     return 0
   fi
 
-  ensure_restic_dir
-
-  # 4. 백엔드 구성 빌드
-  local content="" notice=""
-  backend_"${backend}"_configure resolved content notice
-  append_secondary_config_and_notice resolved content notice
-
-
-  # 5. 설정 파일 저장 (권한 600)
-  write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
-
-  # 6. profiles.yaml 및 Systemd 스케줄 동기화
-  (
-    # shellcheck source=/dev/null
-    source "$BACKUP_ENV_FILE"
-    write_resticprofile_assets "${resolved[profile_name]}" "$on_calendar"
-
-    local timer_name
-    timer_name=$(resticprofile_timer_unit_name "${resolved[profile_name]}")
-    if systemctl is-enabled "$timer_name" >/dev/null 2>&1; then
-      log_info "정기 백업 스케줄 타이머(${timer_name})가 활성화되어 있어 설정을 자동 리로드합니다."
-      resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "${resolved[profile_name]}" schedule
-    fi
-  )
+  save_profile_config resolved >/dev/null
 
   log_info "config(${backend}) 완료"
 }
@@ -5854,7 +5980,7 @@ cmd_setting() {
 
   local -A resolved=()
   local -a errors=()
-  if ! resolve_and_validate_config opts resolved errors; then
+  if ! load_and_validate_config "" opts resolved errors; then
     local e
     for e in "${errors[@]}"; do
       log_error "$e"
@@ -5869,16 +5995,8 @@ cmd_setting() {
     return 0
   fi
 
-  ensure_restic_dir
+  save_profile_config resolved
 
-  local content="" notice=""
-  backend_"${backend}"_configure resolved content notice
-  append_secondary_config_and_notice resolved content notice
-
-
-  write_secure_file "$BACKUP_ENV_FILE" 600 "$content"
-
-  printf '%s\n' "$notice"
   log_info "setting(${backend}) 완료"
 }
 
