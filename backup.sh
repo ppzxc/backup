@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.37"
+BACKUP_SCRIPT_VERSION="0.0.38"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -1426,7 +1426,7 @@ build_notification_payload_discord() {
 }
 
 build_notification_payload_custom() {
-  local status="$1" hostname="$2" profile_name="$3" err_msg="$4" body_success="$5" body_failure="$6"
+  local status="$1" hostname="$2" profile_name="$3" err_msg="$4" body_success="$5" body_failure="$6" profile_command="${7:-}"
   local payload=""
   if [[ "$status" == "success" ]]; then
     payload="$body_success"
@@ -1436,6 +1436,7 @@ build_notification_payload_custom() {
   fi
   payload="${payload//\$\{HOSTNAME\}/$hostname}"
   payload="${payload//\$\{PROFILE_NAME\}/$profile_name}"
+  payload="${payload//\$\{PROFILE_COMMAND\}/$profile_command}"
   printf '%s' "$payload"
 }
 
@@ -1454,9 +1455,9 @@ send_notification_discord() {
 }
 
 send_notification_custom() {
-  local url="$1" status="$2" hostname="$3" profile_name="$4" err_msg="$5" method="$6" headers_str="$7" body_success="$8" body_failure="$9"
+  local url="$1" status="$2" hostname="$3" profile_name="$4" err_msg="$5" method="$6" headers_str="$7" body_success="$8" body_failure="$9" profile_command="${10:-}"
   local payload
-  payload=$(build_notification_payload_custom "$status" "$hostname" "$profile_name" "$err_msg" "$body_success" "$body_failure")
+  payload=$(build_notification_payload_custom "$status" "$hostname" "$profile_name" "$err_msg" "$body_success" "$body_failure" "$profile_command")
   
   local -a curl_headers=()
   if [[ -n "$headers_str" ]]; then
@@ -1509,7 +1510,8 @@ dispatch_notification() {
       local headers="${_ctx[headers]:-${BACKUP_NOTIFICATION_HEADERS:-}}"
       local body_success="${_ctx[body_success]:-${BACKUP_NOTIFICATION_BODY_SUCCESS:-}}"
       local body_failure="${_ctx[body_failure]:-${BACKUP_NOTIFICATION_BODY_FAILURE:-}}"
-      send_notification_custom "$url" "$status" "$hostname_val" "$profile_name_val" "$err_msg" "$method" "$headers" "$body_success" "$body_failure" || res=$?
+      local profile_command="${_ctx[profile_command]:-}"
+      send_notification_custom "$url" "$status" "$hostname_val" "$profile_name_val" "$err_msg" "$method" "$headers" "$body_success" "$body_failure" "$profile_command" || res=$?
       ;;
     *)
       return 0
@@ -1526,6 +1528,7 @@ dispatch_notification() {
 send_unified_notification() {
   local status="$1"
   local err_msg="${2:-}"
+  local profile_command="${3:-}"
   
   # nameref로 인자를 전달하여 사용되지 않는 것으로 오인받는 변수 우회
   # shellcheck disable=SC2034
@@ -1539,6 +1542,7 @@ send_unified_notification() {
     [headers]="${BACKUP_NOTIFICATION_HEADERS:-}"
     [body_success]="${BACKUP_NOTIFICATION_BODY_SUCCESS:-}"
     [body_failure]="${BACKUP_NOTIFICATION_BODY_FAILURE:-}"
+    [profile_command]="$profile_command"
   )
   dispatch_notification notify_ctx
 }
@@ -2950,11 +2954,17 @@ cmd_run() {
     fi
   fi
 
+  # 1차 파일 백업 실행 커맨드 조립
+  local executed_cmd="resticprofile --config ${RESTICPROFILE_CONFIG_FILE} --name ${profile_name} backup"
+  if [[ "${BACKUP_VERBOSE:-0}" == "1" ]]; then
+    executed_cmd="resticprofile --config ${RESTICPROFILE_CONFIG_FILE} --name ${profile_name} backup -v"
+  fi
+
   # 통합 알림 발송 및 종료 처리
   if [[ -z "$pipeline_err" ]]; then
-    send_unified_notification "success"
+    send_unified_notification "success" "" "$executed_cmd"
   else
-    send_unified_notification "failure" "$pipeline_err"
+    send_unified_notification "failure" "$pipeline_err" "$executed_cmd"
     die "$pipeline_err"
   fi
 }

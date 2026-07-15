@@ -142,4 +142,25 @@ ENV
   [[ "$output" == *"일부 파일을 읽지 못했습니다"* ]]
 }
 
+@test "cmd_run triggers custom notification and replaces PROFILE_COMMAND placeholder" {
+  cat >> "$BACKUP_ENV_FILE" <<'ENV'
+export BACKUP_NOTIFICATION_URL="https://hooks.example.com/custom"
+export BACKUP_NOTIFICATION_TYPE="custom"
+export BACKUP_NOTIFICATION_ON="success"
+export BACKUP_NOTIFICATION_BODY_SUCCESS='{"text":"[${HOSTNAME}] Cmd: ${PROFILE_COMMAND}"}'
+ENV
+
+  stub_command "resticprofile" 'exit 0'
+  stub_command "curl" 'echo "curl $*" >> "'"${STUB_BIN}"'/curl.calls"; exit 0'
+
+  run cmd_run
+  [ "$status" -eq 0 ]
+
+  [ -f "${STUB_BIN}/curl.calls" ]
+  run cat "${STUB_BIN}/curl.calls"
+  [[ "$output" == *"hooks.example.com/custom"* ]]
+  [[ "$output" == *"Cmd: resticprofile --config"* ]]
+  [[ "$output" == *"backup"* ]]
+}
+
 
