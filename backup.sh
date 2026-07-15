@@ -2,9 +2,29 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.32"
+BACKUP_SCRIPT_VERSION="0.0.33"
 
+restic() {
+  RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
+  RESTIC_REPOSITORY="${RESTIC_REPOSITORY:-}" \
+  AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}" \
+  AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}" \
+  command restic "$@"
+}
 
+rclone() {
+  RCLONE_CONFIG_SYNO_BACKUP_TYPE="${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_HOST="${RCLONE_CONFIG_SYNO_BACKUP_HOST:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_PORT="${RCLONE_CONFIG_SYNO_BACKUP_PORT:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_USER="${RCLONE_CONFIG_SYNO_BACKUP_USER:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="${RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="${RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${RCLONE_CONFIG_SYNO_BACKUP_SEC_USER:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-}" \
+  command rclone "$@"
+}
 
 RESTIC_ETC_DIR="${RESTIC_ETC_DIR:-/etc/restic}"
 BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-${RESTIC_ETC_DIR}/backup.env}"
@@ -109,37 +129,91 @@ init_config_schema() {
 
 init_config_schema
 
+migrate_env_file_if_needed() {
+  local env_file="${1:-$BACKUP_ENV_FILE}"
+  if [[ ! -f "$env_file" ]]; then
+    return 0
+  fi
+
+  if ! grep -q -E '^[[:space:]]*export[[:space:]]+' "$env_file"; then
+    return 0
+  fi
+
+  log_info "기존 export 기반의 설정을 표준 데이터 포맷으로 자동 마이그레이션합니다."
+
+  local temp_file
+  temp_file=$(mktemp "${env_file}.tmp.XXXXXX")
+  chmod 600 "$temp_file"
+
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^([[:space:]]*)export[[:space:]]+(.*)$ ]]; then
+      echo "${BASH_REMATCH[1]}${BASH_REMATCH[2]}" >> "$temp_file"
+    else
+      echo "$line" >> "$temp_file"
+    fi
+  done < "$env_file"
+
+  mv -f "$temp_file" "$env_file"
+}
+
 # nameref 매개변수 dest_array_ref 간접 수정에 따른 shellcheck 경고 발생 대응
 # shellcheck disable=SC2034
 load_backup_env_to_array() {
   local env_file="$1"
-  local -n dest_array_ref="$2"
+  local -n __load_env_dest_ref="$2"
+  local errs_ref_name="${3:-}"
+  
+  if [[ -n "$errs_ref_name" ]]; then
+    local -n __load_env_errors_ref="$errs_ref_name"
+  else
+    local -a _dummy_errors=()
+    local -n __load_env_errors_ref="_dummy_errors"
+  fi
+
   if [[ ! -f "$env_file" ]]; then
     return 1
   fi
+
+  if [[ "$env_file" == "$BACKUP_ENV_FILE" ]]; then
+    migrate_env_file_if_needed "$env_file"
+  fi
+
+  local line_num=0
+  local line
   while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ ^[[:space:]]*# ]] && continue
-    [[ -z "${line//[[:space:]]/}" ]] && continue
+    ((line_num++))
+    
+    # Trim leading/trailing whitespace
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+
+    [[ -z "$line" || "$line" =~ ^# ]] && continue
+
     local key="" val="" raw_val=""
-    if [[ "$line" =~ ^[[:space:]]*export[[:space:]]+([A-Za-z0-9_]+)=\'(.*)\'[[:space:]]*$ ]]; then
-      key="${BASH_REMATCH[1]}"
-      raw_val="${BASH_REMATCH[2]}"
+    if [[ "$line" =~ ^(export[[:space:]]+)?([A-Za-z0-9_]+)=\'(.*)\'[[:space:]]*$ ]]; then
+      key="${BASH_REMATCH[2]}"
+      raw_val="${BASH_REMATCH[3]}"
       val="${raw_val//\'\\\'\'/\'}"
-    elif [[ "$line" =~ ^[[:space:]]*export[[:space:]]+([A-Za-z0-9_]+)=\"(.*)\"[[:space:]]*$ ]]; then
-      key="${BASH_REMATCH[1]}"
-      val="${BASH_REMATCH[2]}"
-    elif [[ "$line" =~ ^[[:space:]]*export[[:space:]]+([A-Za-z0-9_]+)=(.*)$ ]]; then
-      key="${BASH_REMATCH[1]}"
-      val="${BASH_REMATCH[2]}"
-      # 따옴표가 없는 경우 뒤의 주석 및 공백 트리밍
+    elif [[ "$line" =~ ^(export[[:space:]]+)?([A-Za-z0-9_]+)=\"(.*)\"[[:space:]]*$ ]]; then
+      key="${BASH_REMATCH[2]}"
+      val="${BASH_REMATCH[3]}"
+    elif [[ "$line" =~ ^(export[[:space:]]+)?([A-Za-z0-9_]+)=(.*)$ ]]; then
+      key="${BASH_REMATCH[2]}"
+      val="${BASH_REMATCH[3]}"
       val="${val%%#*}"
       val="${val#[[:space:]]}"
       val="${val%[[:space:]]}"
+    else
+      __load_env_errors_ref+=("라인 ${line_num}: 올바르지 않은 설정 형식입니다: '$line'")
+      return 1
     fi
+
     if [[ -n "$key" ]]; then
-      dest_array_ref["$key"]="$val"
+      __load_env_dest_ref["$key"]="$val"
     fi
   done < "$env_file"
+
   return 0
 }
 
@@ -236,8 +310,21 @@ require_backup_env() {
   if [[ ! -f "$BACKUP_ENV_FILE" ]]; then
     die "$(render_missing_settings_message)"
   fi
-  # shellcheck source=/dev/null
-  source "$BACKUP_ENV_FILE"
+  
+  declare -A file_config=()
+  declare -a parse_errors=()
+  if ! load_backup_env_to_array "$BACKUP_ENV_FILE" file_config parse_errors; then
+    local err_msg
+    for err_msg in "${parse_errors[@]}"; do
+      log_error "$err_msg"
+    done
+    die "설정 파일 파싱 실패: $BACKUP_ENV_FILE" 1
+  fi
+
+  local k
+  for k in "${!file_config[@]}"; do
+    declare -g "$k"="${file_config[$k]}"
+  done
 }
 
 resolve_profile_name() {
@@ -385,9 +472,9 @@ load_and_validate_config() {
   fi
 
   if [[ -z "$backend" && -f "$BACKUP_ENV_FILE" ]]; then
-    if grep -q "AWS_ACCESS_KEY_ID=" "$BACKUP_ENV_FILE" || grep -q 'RESTIC_REPOSITORY="s3:' "$BACKUP_ENV_FILE"; then
+    if grep -q -E "AWS_ACCESS_KEY_ID=" "$BACKUP_ENV_FILE" || grep -q -E 'RESTIC_REPOSITORY=["'\'' ]s3:' "$BACKUP_ENV_FILE"; then
       backend="s3"
-    elif grep -q "RCLONE_CONFIG_SYNO_BACKUP_TYPE=\"sftp\"" "$BACKUP_ENV_FILE" || grep -q 'RESTIC_REPOSITORY="rclone:syno_backup' "$BACKUP_ENV_FILE"; then
+    elif grep -q -E "RCLONE_CONFIG_SYNO_BACKUP_TYPE=['\"]sftp['\"]" "$BACKUP_ENV_FILE" || grep -q -E 'RESTIC_REPOSITORY=["'\'' ]rclone:syno_backup' "$BACKUP_ENV_FILE"; then
       backend="sftp"
     fi
   fi
@@ -455,9 +542,12 @@ save_profile_config() {
 
   # 3. Synchronize derived assets (profiles.yaml, systemd timers)
   (
-    # Sourcing the environment file we just saved
-    # shellcheck source=/dev/null
-    source "$BACKUP_ENV_FILE"
+    declare -A file_config=()
+    load_backup_env_to_array "$BACKUP_ENV_FILE" file_config || true
+    local k
+    for k in "${!file_config[@]}"; do
+      declare -g "$k"="${file_config[$k]}"
+    done
     write_resticprofile_assets "${_res_ref[profile_name]}" "$on_calendar"
 
     local timer_name
@@ -491,90 +581,45 @@ resolve_and_validate_config() {
   local file_secondary_host="" file_secondary_port="" file_secondary_user="" file_secondary_repo=""
   local file_db_type="" file_db_command="" file_db_filename="" file_db_schedule="" file_db_keep_daily="" file_db_keep_weekly="" file_db_keep_monthly=""
   if [[ -f "${BACKUP_ENV_FILE:-}" ]]; then
-    # Sourcing in a subshell to isolate variables
-    local env_data
-    env_data=$(
-      # shellcheck source=/dev/null
-      source "$BACKUP_ENV_FILE" >/dev/null 2>&1 || true
-      printf '%s\n' "targets=${BACKUP_TARGETS:-}"
-      printf '%s\n' "keep_daily=${KEEP_DAILY:-}"
-      printf '%s\n' "keep_weekly=${KEEP_WEEKLY:-}"
-      printf '%s\n' "keep_monthly=${KEEP_MONTHLY:-}"
-      printf '%s\n' "excludes=${BACKUP_EXCLUDES:-}"
-      printf '%s\n' "profile_name=${BACKUP_PROFILE_NAME:-}"
-      printf '%s\n' "password=${RESTIC_PASSWORD:-}"
-      printf '%s\n' "notification_url=${BACKUP_NOTIFICATION_URL:-}"
-      printf '%s\n' "notification_type=${BACKUP_NOTIFICATION_TYPE:-}"
-      printf '%s\n' "notification_on=${BACKUP_NOTIFICATION_ON:-}"
-      printf '%s\n' "notification_method=${BACKUP_NOTIFICATION_METHOD:-}"
-      printf 'notification_headers=%s\n' "$(echo -n "${BACKUP_NOTIFICATION_HEADERS:-}" | base64 | tr -d '\n')"
-      printf 'notification_body_success=%s\n' "$(echo -n "${BACKUP_NOTIFICATION_BODY_SUCCESS:-}" | base64 | tr -d '\n')"
-      printf 'notification_body_failure=%s\n' "$(echo -n "${BACKUP_NOTIFICATION_BODY_FAILURE:-}" | base64 | tr -d '\n')"
-      printf '%s\n' "audit_tester=${BACKUP_AUDIT_TESTER:-}"
-      printf '%s\n' "audit_ciso=${BACKUP_AUDIT_CISO:-}"
-      printf '%s\n' "audit_rto=${BACKUP_AUDIT_RTO:-}"
-      printf '%s\n' "sec_backend=${SECONDARY_BACKEND:-}"
-      printf '%s\n' "sec_password=${SECONDARY_RESTIC_PASSWORD:-}"
-      printf '%s\n' "sec_keep_daily=${SECONDARY_KEEP_DAILY:-}"
-      printf '%s\n' "sec_keep_weekly=${SECONDARY_KEEP_WEEKLY:-}"
-      printf '%s\n' "sec_keep_monthly=${SECONDARY_KEEP_MONTHLY:-}"
-      printf '%s\n' "sec_repo=${SECONDARY_RESTIC_REPOSITORY:-}"
-      printf '%s\n' "sec_access_key=${SECONDARY_AWS_ACCESS_KEY_ID:-}"
-      printf '%s\n' "sec_secret_key=${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
-      printf '%s\n' "sec_host=${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-}"
-      printf '%s\n' "sec_port=${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-}"
-      printf '%s\n' "sec_user=${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-}"
-      printf '%s\n' "db_type=${BACKUP_DB_TYPE:-}"
-      printf 'db_command=%s\n' "$(echo -n "${BACKUP_DB_COMMAND:-}" | base64 | tr -d '\n')"
-      printf '%s\n' "db_filename=${BACKUP_DB_FILENAME:-}"
-      printf '%s\n' "db_schedule=${BACKUP_DB_SCHEDULE:-}"
-      printf '%s\n' "db_keep_daily=${KEEP_DB_DAILY:-}"
-      printf '%s\n' "db_keep_weekly=${KEEP_DB_WEEKLY:-}"
-      printf '%s\n' "db_keep_monthly=${KEEP_DB_MONTHLY:-}"
-    )
-    local line key val
-    while IFS= read -r line; do
-      [[ -z "$line" ]] && continue
-      key="${line%%=*}"
-      val="${line#*=}"
-      case "$key" in
-        targets) file_targets="$val" ;;
-        keep_daily) file_keep_daily="$val" ;;
-        keep_weekly) file_keep_weekly="$val" ;;
-        keep_monthly) file_keep_monthly="$val" ;;
-        excludes) file_excludes="$val" ;;
-        profile_name) file_profile_name="$val" ;;
-        password) file_password="$val" ;;
-        notification_url) file_notification_url="$val" ;;
-        notification_type) file_notification_type="$val" ;;
-        notification_on) file_notification_on="$val" ;;
-        notification_method) file_notification_method="$val" ;;
-        notification_headers) file_notification_headers="$(echo -n "$val" | base64 -d 2>/dev/null || echo -n "$val" | base64 --decode 2>/dev/null)" ;;
-        notification_body_success) file_notification_body_success="$(echo -n "$val" | base64 -d 2>/dev/null || echo -n "$val" | base64 --decode 2>/dev/null)" ;;
-        notification_body_failure) file_notification_body_failure="$(echo -n "$val" | base64 -d 2>/dev/null || echo -n "$val" | base64 --decode 2>/dev/null)" ;;
-        audit_tester) file_audit_tester="$val" ;;
-        audit_ciso) file_audit_ciso="$val" ;;
-        audit_rto) file_audit_rto="$val" ;;
-        sec_backend) file_secondary_backend="$val" ;;
-        sec_password) file_secondary_password="$val" ;;
-        sec_keep_daily) file_secondary_keep_daily="$val" ;;
-        sec_keep_weekly) file_secondary_keep_weekly="$val" ;;
-        sec_keep_monthly) file_secondary_keep_monthly="$val" ;;
-        sec_repo) file_secondary_repo="$val" ;;
-        sec_access_key) file_secondary_access_key="$val" ;;
-        sec_secret_key) file_secondary_secret_key="$val" ;;
-        sec_host) file_secondary_host="$val" ;;
-        sec_port) file_secondary_port="$val" ;;
-        sec_user) file_secondary_user="$val" ;;
-        db_type) file_db_type="$val" ;;
-        db_command) file_db_command="$(echo -n "$val" | base64 -d 2>/dev/null || echo -n "$val" | base64 --decode 2>/dev/null)" ;;
-        db_filename) file_db_filename="$val" ;;
-        db_schedule) file_db_schedule="$val" ;;
-        db_keep_daily) file_db_keep_daily="$val" ;;
-        db_keep_weekly) file_db_keep_weekly="$val" ;;
-        db_keep_monthly) file_db_keep_monthly="$val" ;;
-      esac
-    done <<< "$env_data"
+    declare -A file_config=()
+    if ! load_backup_env_to_array "$BACKUP_ENV_FILE" file_config _errors; then
+      return 1
+    fi
+    file_targets="${file_config[BACKUP_TARGETS]:-}"
+    file_keep_daily="${file_config[KEEP_DAILY]:-}"
+    file_keep_weekly="${file_config[KEEP_WEEKLY]:-}"
+    file_keep_monthly="${file_config[KEEP_MONTHLY]:-}"
+    file_excludes="${file_config[BACKUP_EXCLUDES]:-}"
+    file_profile_name="${file_config[BACKUP_PROFILE_NAME]:-}"
+    file_password="${file_config[RESTIC_PASSWORD]:-}"
+    file_notification_url="${file_config[BACKUP_NOTIFICATION_URL]:-}"
+    file_notification_type="${file_config[BACKUP_NOTIFICATION_TYPE]:-}"
+    file_notification_on="${file_config[BACKUP_NOTIFICATION_ON]:-}"
+    file_notification_method="${file_config[BACKUP_NOTIFICATION_METHOD]:-}"
+    file_notification_headers="${file_config[BACKUP_NOTIFICATION_HEADERS]:-}"
+    file_notification_body_success="${file_config[BACKUP_NOTIFICATION_BODY_SUCCESS]:-}"
+    file_notification_body_failure="${file_config[BACKUP_NOTIFICATION_BODY_FAILURE]:-}"
+    file_audit_tester="${file_config[BACKUP_AUDIT_TESTER]:-}"
+    file_audit_ciso="${file_config[BACKUP_AUDIT_CISO]:-}"
+    file_audit_rto="${file_config[BACKUP_AUDIT_RTO]:-}"
+    file_secondary_backend="${file_config[SECONDARY_BACKEND]:-}"
+    file_secondary_password="${file_config[SECONDARY_RESTIC_PASSWORD]:-}"
+    file_secondary_keep_daily="${file_config[SECONDARY_KEEP_DAILY]:-}"
+    file_secondary_keep_weekly="${file_config[SECONDARY_KEEP_WEEKLY]:-}"
+    file_secondary_keep_monthly="${file_config[SECONDARY_KEEP_MONTHLY]:-}"
+    file_secondary_repo="${file_config[SECONDARY_RESTIC_REPOSITORY]:-}"
+    file_secondary_access_key="${file_config[SECONDARY_AWS_ACCESS_KEY_ID]:-}"
+    file_secondary_secret_key="${file_config[SECONDARY_AWS_SECRET_ACCESS_KEY]:-}"
+    file_secondary_host="${file_config[SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST]:-}"
+    file_secondary_port="${file_config[SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT]:-}"
+    file_secondary_user="${file_config[SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER]:-}"
+    file_db_type="${file_config[BACKUP_DB_TYPE]:-}"
+    file_db_command="${file_config[BACKUP_DB_COMMAND]:-}"
+    file_db_filename="${file_config[BACKUP_DB_FILENAME]:-}"
+    file_db_schedule="${file_config[BACKUP_DB_SCHEDULE]:-}"
+    file_db_keep_daily="${file_config[KEEP_DB_DAILY]:-}"
+    file_db_keep_weekly="${file_config[KEEP_DB_WEEKLY]:-}"
+    file_db_keep_monthly="${file_config[KEEP_DB_MONTHLY]:-}"
   fi
 
 
@@ -1155,13 +1200,13 @@ render_notification_env_block() {
 # ==========================================
 # 백업 성공/실패 알림 설정 (Slack, Discord, Custom)
 # ==========================================
-export BACKUP_NOTIFICATION_URL='$(escape_single_quotes "${_res[notification_url]:-}")'
-export BACKUP_NOTIFICATION_TYPE='$(escape_single_quotes "${_res[notification_type]:-}")'
-export BACKUP_NOTIFICATION_ON='$(escape_single_quotes "${_res[notification_on]:-both}")'
-export BACKUP_NOTIFICATION_METHOD='$(escape_single_quotes "${_res[notification_method]:-POST}")'
-export BACKUP_NOTIFICATION_HEADERS='$(escape_single_quotes "${_res[notification_headers]:-}")'
-export BACKUP_NOTIFICATION_BODY_SUCCESS='$(escape_single_quotes "${_res[notification_body_success]:-}")'
-export BACKUP_NOTIFICATION_BODY_FAILURE='$(escape_single_quotes "${_res[notification_body_failure]:-}")'
+BACKUP_NOTIFICATION_URL='$(escape_single_quotes "${_res[notification_url]:-}")'
+BACKUP_NOTIFICATION_TYPE='$(escape_single_quotes "${_res[notification_type]:-}")'
+BACKUP_NOTIFICATION_ON='$(escape_single_quotes "${_res[notification_on]:-both}")'
+BACKUP_NOTIFICATION_METHOD='$(escape_single_quotes "${_res[notification_method]:-POST}")'
+BACKUP_NOTIFICATION_HEADERS='$(escape_single_quotes "${_res[notification_headers]:-}")'
+BACKUP_NOTIFICATION_BODY_SUCCESS='$(escape_single_quotes "${_res[notification_body_success]:-}")'
+BACKUP_NOTIFICATION_BODY_FAILURE='$(escape_single_quotes "${_res[notification_body_failure]:-}")'
 EOF
 }
 
@@ -1172,9 +1217,9 @@ render_audit_env_block() {
 # ==========================================
 # ISMS/ISMS-P 감사 보고서용 사용자 설정
 # ==========================================
-export BACKUP_AUDIT_TESTER='$(escape_single_quotes "${_res[audit_tester]:-}")'
-export BACKUP_AUDIT_CISO='$(escape_single_quotes "${_res[audit_ciso]:-}")'
-export BACKUP_AUDIT_RTO='$(escape_single_quotes "${_res[audit_rto]:-}")'
+BACKUP_AUDIT_TESTER='$(escape_single_quotes "${_res[audit_tester]:-}")'
+BACKUP_AUDIT_CISO='$(escape_single_quotes "${_res[audit_ciso]:-}")'
+BACKUP_AUDIT_RTO='$(escape_single_quotes "${_res[audit_rto]:-}")'
 EOF
 }
 
@@ -1186,13 +1231,13 @@ render_db_env_block() {
 # ==========================================
 # 데이터베이스 백업용 설정 (Database Backup)
 # ==========================================
-export BACKUP_DB_TYPE='$(escape_single_quotes "${_res[db_type]:-}")'
-export BACKUP_DB_COMMAND='$(escape_single_quotes "${_res[db_command]:-}")'
-export BACKUP_DB_FILENAME='$(escape_single_quotes "${_res[db_filename]:-db-dump.sql}")'
-export BACKUP_DB_SCHEDULE='$(escape_single_quotes "${_res[db_schedule]:-}")'
-export KEEP_DB_DAILY='$(escape_single_quotes "${_res[db_keep_daily]:-}")'
-export KEEP_DB_WEEKLY='$(escape_single_quotes "${_res[db_keep_weekly]:-}")'
-export KEEP_DB_MONTHLY='$(escape_single_quotes "${_res[db_keep_monthly]:-}")'
+BACKUP_DB_TYPE='$(escape_single_quotes "${_res[db_type]:-}")'
+BACKUP_DB_COMMAND='$(escape_single_quotes "${_res[db_command]:-}")'
+BACKUP_DB_FILENAME='$(escape_single_quotes "${_res[db_filename]:-db-dump.sql}")'
+BACKUP_DB_SCHEDULE='$(escape_single_quotes "${_res[db_schedule]:-}")'
+KEEP_DB_DAILY='$(escape_single_quotes "${_res[db_keep_daily]:-}")'
+KEEP_DB_WEEKLY='$(escape_single_quotes "${_res[db_keep_weekly]:-}")'
+KEEP_DB_MONTHLY='$(escape_single_quotes "${_res[db_keep_monthly]:-}")'
 EOF
   fi
 }
@@ -1993,11 +2038,11 @@ render_secondary_config() {
   local profile_name="${__res_sec_ref[profile_name]:-$(hostname)}"
 
   printf '\n# 2차 원격 소산 백업 설정\n'
-  printf 'export SECONDARY_BACKEND="%s"\n' "$sec_backend"
-  printf 'export SECONDARY_RESTIC_PASSWORD="%s"\n' "$sec_password"
-  printf 'export SECONDARY_KEEP_DAILY="%s"\n' "$sec_keep_daily"
-  printf 'export SECONDARY_KEEP_WEEKLY="%s"\n' "$sec_keep_weekly"
-  printf 'export SECONDARY_KEEP_MONTHLY="%s"\n' "$sec_keep_monthly"
+  printf 'SECONDARY_BACKEND="%s"\n' "$sec_backend"
+  printf 'SECONDARY_RESTIC_PASSWORD="%s"\n' "$sec_password"
+  printf 'SECONDARY_KEEP_DAILY="%s"\n' "$sec_keep_daily"
+  printf 'SECONDARY_KEEP_WEEKLY="%s"\n' "$sec_keep_weekly"
+  printf 'SECONDARY_KEEP_MONTHLY="%s"\n' "$sec_keep_monthly"
 
   if [[ "$sec_backend" == "s3" ]]; then
     local sec_endpoint="${__res_sec_ref[secondary_endpoint]}"
@@ -2005,20 +2050,20 @@ render_secondary_config() {
     local sec_access_key="${__res_sec_ref[secondary_access_key]}"
     local sec_secret_key="${__res_sec_ref[secondary_secret_key]}"
     
-    printf 'export SECONDARY_RESTIC_REPOSITORY="s3:%s/%s/%s"\n' "$sec_endpoint" "$sec_bucket" "$profile_name"
-    printf 'export SECONDARY_AWS_ACCESS_KEY_ID="%s"\n' "$sec_access_key"
-    printf 'export SECONDARY_AWS_SECRET_ACCESS_KEY="%s"\n' "$sec_secret_key"
+    printf 'SECONDARY_RESTIC_REPOSITORY="s3:%s/%s/%s"\n' "$sec_endpoint" "$sec_bucket" "$profile_name"
+    printf 'SECONDARY_AWS_ACCESS_KEY_ID="%s"\n' "$sec_access_key"
+    printf 'SECONDARY_AWS_SECRET_ACCESS_KEY="%s"\n' "$sec_secret_key"
   elif [[ "$sec_backend" == "sftp" ]]; then
     local sec_host="${__res_sec_ref[secondary_host]}"
     local sec_port="${__res_sec_ref[secondary_port]:-22}"
     local sec_user="${__res_sec_ref[secondary_user]}"
     
-    printf 'export SECONDARY_RESTIC_REPOSITORY="rclone:syno_backup_sec:/backup/%s"\n' "$profile_name"
-    printf 'export SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp"\n'
-    printf 'export SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="%s"\n' "$sec_host"
-    printf 'export SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="%s"\n' "$sec_port"
-    printf 'export SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="%s"\n' "$sec_user"
-    printf 'export SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="%s"\n' "${BACKUP_SSH_KEY}"
+    printf 'SECONDARY_RESTIC_REPOSITORY="rclone:syno_backup_sec:/backup/%s"\n' "$profile_name"
+    printf 'SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp"\n'
+    printf 'SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="%s"\n' "$sec_host"
+    printf 'SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="%s"\n' "$sec_port"
+    printf 'SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="%s"\n' "$sec_user"
+    printf 'SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="%s"\n' "${BACKUP_SSH_KEY}"
   fi
 }
 
@@ -2077,19 +2122,19 @@ backend_sftp_configure() {
 
   # Render Env
   _out_env=$(cat <<EOF
-export RESTIC_REPOSITORY='rclone:syno_backup:/backup/$(escape_single_quotes "${_resolved[profile_name]:-$(hostname)}")'
-export RCLONE_CONFIG_SYNO_BACKUP_TYPE='sftp'
-export RCLONE_CONFIG_SYNO_BACKUP_HOST='$(escape_single_quotes "${_resolved[host]}")'
-export RCLONE_CONFIG_SYNO_BACKUP_USER='$(escape_single_quotes "${_resolved[user]}")'
-export RCLONE_CONFIG_SYNO_BACKUP_PORT='$(escape_single_quotes "${_resolved[port]}")'
-export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE='$(escape_single_quotes "${BACKUP_SSH_KEY}")'
-export RESTIC_PASSWORD='$(escape_single_quotes "${_resolved[password]}")'
-export BACKUP_TARGETS='$(escape_single_quotes "${_resolved[targets]}")'
-export BACKUP_EXCLUDES='$(escape_single_quotes "${_resolved[excludes_csv]:-}")'
-export KEEP_DAILY='$(escape_single_quotes "${_resolved[keep_daily]}")'
-export KEEP_WEEKLY='$(escape_single_quotes "${_resolved[keep_weekly]}")'
-export KEEP_MONTHLY='$(escape_single_quotes "${_resolved[keep_monthly]}")'
-export BACKUP_PROFILE_NAME='$(escape_single_quotes "${_resolved[profile_name]}")'
+RESTIC_REPOSITORY='rclone:syno_backup:/backup/$(escape_single_quotes "${_resolved[profile_name]:-$(hostname)}")'
+RCLONE_CONFIG_SYNO_BACKUP_TYPE='sftp'
+RCLONE_CONFIG_SYNO_BACKUP_HOST='$(escape_single_quotes "${_resolved[host]}")'
+RCLONE_CONFIG_SYNO_BACKUP_USER='$(escape_single_quotes "${_resolved[user]}")'
+RCLONE_CONFIG_SYNO_BACKUP_PORT='$(escape_single_quotes "${_resolved[port]}")'
+RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE='$(escape_single_quotes "${BACKUP_SSH_KEY}")'
+RESTIC_PASSWORD='$(escape_single_quotes "${_resolved[password]}")'
+BACKUP_TARGETS='$(escape_single_quotes "${_resolved[targets]}")'
+BACKUP_EXCLUDES='$(escape_single_quotes "${_resolved[excludes_csv]:-}")'
+KEEP_DAILY='$(escape_single_quotes "${_resolved[keep_daily]}")'
+KEEP_WEEKLY='$(escape_single_quotes "${_resolved[keep_weekly]}")'
+KEEP_MONTHLY='$(escape_single_quotes "${_resolved[keep_monthly]}")'
+BACKUP_PROFILE_NAME='$(escape_single_quotes "${_resolved[profile_name]}")'
 EOF
 )
   _out_env+="$(render_notification_env_block _resolved)"
@@ -2135,16 +2180,16 @@ backend_s3_configure() {
 
   # Render Env
   _out_env=$(cat <<EOF
-export RESTIC_REPOSITORY='s3:$(escape_single_quotes "${_resolved[endpoint]}")/$(escape_single_quotes "${_resolved[bucket]}")/$(escape_single_quotes "${_resolved[profile_name]:-$(hostname)}")'
-export AWS_ACCESS_KEY_ID='$(escape_single_quotes "${_resolved[access_key]}")'
-export AWS_SECRET_ACCESS_KEY='$(escape_single_quotes "${_resolved[secret_key]}")'
-export RESTIC_PASSWORD='$(escape_single_quotes "${_resolved[password]}")'
-export BACKUP_TARGETS='$(escape_single_quotes "${_resolved[targets]}")'
-export BACKUP_EXCLUDES='$(escape_single_quotes "${_resolved[excludes_csv]:-}")'
-export KEEP_DAILY='$(escape_single_quotes "${_resolved[keep_daily]}")'
-export KEEP_WEEKLY='$(escape_single_quotes "${_resolved[keep_weekly]}")'
-export KEEP_MONTHLY='$(escape_single_quotes "${_resolved[keep_monthly]}")'
-export BACKUP_PROFILE_NAME='$(escape_single_quotes "${_resolved[profile_name]}")'
+RESTIC_REPOSITORY='s3:$(escape_single_quotes "${_resolved[endpoint]}")/$(escape_single_quotes "${_resolved[bucket]}")/$(escape_single_quotes "${_resolved[profile_name]:-$(hostname)}")'
+AWS_ACCESS_KEY_ID='$(escape_single_quotes "${_resolved[access_key]}")'
+AWS_SECRET_ACCESS_KEY='$(escape_single_quotes "${_resolved[secret_key]}")'
+RESTIC_PASSWORD='$(escape_single_quotes "${_resolved[password]}")'
+BACKUP_TARGETS='$(escape_single_quotes "${_resolved[targets]}")'
+BACKUP_EXCLUDES='$(escape_single_quotes "${_resolved[excludes_csv]:-}")'
+KEEP_DAILY='$(escape_single_quotes "${_resolved[keep_daily]}")'
+KEEP_WEEKLY='$(escape_single_quotes "${_resolved[keep_weekly]}")'
+KEEP_MONTHLY='$(escape_single_quotes "${_resolved[keep_monthly]}")'
+BACKUP_PROFILE_NAME='$(escape_single_quotes "${_resolved[profile_name]}")'
 EOF
 )
   _out_env+="$(render_notification_env_block _resolved)"
@@ -2197,7 +2242,7 @@ cmd_init() {
   load_and_validate_config "" opts resolved errors || true
 
   if [[ "$backend" == "sftp" ]]; then
-    if ! command -v rclone >/dev/null 2>&1; then
+    if ! type -P rclone >/dev/null 2>&1; then
       die "[!] rclone이 설치되어 있지 않습니다. 'backup.sh install'을 다시 실행해 restic/rclone을 설치한 뒤 'backup.sh init'을 재시도하세요."
     fi
   fi
@@ -2233,7 +2278,7 @@ cmd_init() {
   if [[ -n "$sec_backend" ]]; then
     # 2차 SFTP 연결성 확인
     if [[ "$sec_backend" == "sftp" ]]; then
-      if ! command -v rclone >/dev/null 2>&1; then
+      if ! type -P rclone >/dev/null 2>&1; then
         die "[!] rclone이 설치되어 있지 않습니다. 2차 SFTP 소산 백업을 수행할 수 없습니다."
       fi
 
@@ -5727,7 +5772,7 @@ cmd_wizard() {
   require_root
   local db_type="" db_schedule=""
 
-  if ! command -v restic >/dev/null 2>&1 || ! command -v rclone >/dev/null 2>&1 \
+  if ! type -P restic >/dev/null 2>&1 || ! type -P rclone >/dev/null 2>&1 \
     || [[ ! -x "$RESTICPROFILE_INSTALL_PATH" ]]; then
     if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
       setup_colors

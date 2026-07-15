@@ -258,5 +258,111 @@ EOF
   [ "$output" = "/tmp/*" ]
 }
 
+@test "parse_env_file handles static KEY='VALUE' format and de-escapes single quotes correctly" {
+  mkdir -p "$RESTIC_ETC_DIR"
+  chmod 700 "$RESTIC_ETC_DIR"
+
+  cat > "$BACKUP_ENV_FILE" <<'EOF'
+RESTIC_REPOSITORY='rclone:syno_backup:/backup/host1'
+RCLONE_CONFIG_SYNO_BACKUP_TYPE='sftp'
+RCLONE_CONFIG_SYNO_BACKUP_HOST='192.168.1.100'
+RCLONE_CONFIG_SYNO_BACKUP_USER='backup_user'
+RCLONE_CONFIG_SYNO_BACKUP_PORT='2222'
+RESTIC_PASSWORD='pwd'\''with'\''quotes'
+BACKUP_TARGETS='/home/user/data'
+KEEP_DAILY='7'
+KEEP_WEEKLY='4'
+KEEP_MONTHLY='12'
+BACKUP_PROFILE_NAME='host1'
+EOF
+  chmod 600 "$BACKUP_ENV_FILE"
+
+  declare -A resolved=()
+  declare -a errors=()
+
+  load_and_validate_config "host1" resolved errors
+  local status=$?
+
+  [ "$status" -eq 0 ]
+  [ "${#errors[@]}" -eq 0 ]
+  [ "${resolved[password]}" = "pwd'with'quotes" ]
+  [ "${resolved[backend]}" = "sftp" ]
+}
+
+@test "load_and_validate_config automatically migrates old export format to static format atomically" {
+  mkdir -p "$RESTIC_ETC_DIR"
+  chmod 700 "$RESTIC_ETC_DIR"
+
+  cat > "$BACKUP_ENV_FILE" <<'EOF'
+export RESTIC_REPOSITORY='rclone:syno_backup:/backup/host1'
+export RCLONE_CONFIG_SYNO_BACKUP_TYPE='sftp'
+export RCLONE_CONFIG_SYNO_BACKUP_HOST='192.168.1.100'
+export RCLONE_CONFIG_SYNO_BACKUP_USER='backup_user'
+export RCLONE_CONFIG_SYNO_BACKUP_PORT='2222'
+export RESTIC_PASSWORD='testpassword'
+export BACKUP_TARGETS='/home/user/data'
+export KEEP_DAILY='7'
+export KEEP_WEEKLY='4'
+export KEEP_MONTHLY='12'
+export BACKUP_PROFILE_NAME='host1'
+EOF
+  chmod 600 "$BACKUP_ENV_FILE"
+
+  declare -A resolved=()
+  declare -a errors=()
+
+  load_and_validate_config "host1" resolved errors
+  local status=$?
+
+  [ "$status" -eq 0 ]
+  [ "${#errors[@]}" -eq 0 ]
+
+  run grep "export " "$BACKUP_ENV_FILE"
+  [ "$status" -ne 0 ]
+
+  local env_perm; env_perm=$(stat -c "%a" "$BACKUP_ENV_FILE")
+  [ "$env_perm" = "600" ]
+
+  [ "${resolved[password]}" = "testpassword" ]
+}
+
+@test "parse_env_file strictly fails on syntax errors" {
+  mkdir -p "$RESTIC_ETC_DIR"
+  chmod 700 "$RESTIC_ETC_DIR"
+
+  cat > "$BACKUP_ENV_FILE" <<'EOF'
+RESTIC_REPOSITORY='rclone:syno_backup:/backup/host1'
+INVALID_LINE_WITHOUT_EQUALS
+EOF
+  chmod 600 "$BACKUP_ENV_FILE"
+
+  declare -A resolved=()
+  declare -a errors=()
+
+  local status=0
+  load_and_validate_config "host1" resolved errors || status=$?
+
+  [ "$status" -eq 1 ]
+  [ "${#errors[@]}" -gt 0 ]
+}
+
+@test "adapter overrides command restic to inject local variables as env context" {
+  stub_command "restic" '
+    echo "RESTIC_PASSWORD=$RESTIC_PASSWORD"
+    echo "RESTIC_REPOSITORY=$RESTIC_REPOSITORY"
+  '
+
+  # Local variables, not exported
+  RESTIC_PASSWORD="local_test_pwd"
+  RESTIC_REPOSITORY="local_test_repo"
+  
+  # Invoke the overridden function in backup.sh
+  run restic snapshots
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RESTIC_PASSWORD=local_test_pwd"* ]]
+  [[ "$output" == *"RESTIC_REPOSITORY=local_test_repo"* ]]
+}
+
 
 
