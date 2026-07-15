@@ -6,6 +6,7 @@
 !/README.md
 !/.gitignore
 !/.gitattributes
+!/LICENSE
 !/tests/
 !/tests/**
 !/docs/
