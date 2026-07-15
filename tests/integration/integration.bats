@@ -410,8 +410,8 @@ seed_databases() {
   dexec "grep -q '\"db_integrity_verified\": true' /tmp/audit_report_postgres.json"
 }
 
-# 10. Config migration: upgrade-config
-@test "Config migration: upgrade-config" {
+# 10. Config migration: upgrade
+@test "Config migration: upgrade" {
   # Setup original S3 setting to migrate legacy to S3
   dexec "bash backup.sh setting --backend s3 \
     --endpoint http://minio:9000 --bucket restic-test \
@@ -428,8 +428,8 @@ seed_databases() {
     restic -r /tmp/legacy-local --password-file <(echo -n 'test-repo-password') backup /tmp/legacy_file.txt
   "
 
-  # Run upgrade-config
-  dexec "bash backup.sh upgrade-config --legacy-dir '/tmp/legacy-local'"
+  # Run upgrade
+  dexec "bash backup.sh upgrade --legacy-dir '/tmp/legacy-local'"
 
   # Verify migrated snapshot in destination S3 repository
   run dexec "source /etc/restic/backup.env && restic snapshots --json"

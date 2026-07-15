@@ -7,24 +7,24 @@ setup() {
   mkdir -p "$RESTIC_ETC_DIR"
 }
 
-@test "cmd_upgrade_config fails when backup.env is missing" {
-  run main upgrade-config
+@test "cmd_upgrade fails when backup.env is missing" {
+  run main upgrade
   [ "$status" -eq 1 ]
   [[ "$output" == *"설정 파일이 존재하지 않습니다"* ]]
 }
 
-@test "cmd_upgrade_config completes successfully when there is no legacy local repository" {
+@test "cmd_upgrade completes successfully when there is no legacy local repository" {
   cat > "$BACKUP_ENV_FILE" <<'ENV'
 export RESTIC_REPOSITORY="s3:https://s3.amazonaws.com/my-bucket/host"
 export RESTIC_PASSWORD="secret"
 ENV
 
-  run main upgrade-config
+  run main upgrade
   [ "$status" -eq 0 ]
   [[ "$output" == *"이관할 로컬 데이터가 없습니다"* ]]
 }
 
-@test "cmd_upgrade_config performs migration from local repo to remote repo when legacy local repo exists" {
+@test "cmd_upgrade performs migration from local repo to remote repo when legacy local repo exists" {
   cat > "$BACKUP_ENV_FILE" <<'ENV'
 export RESTIC_REPOSITORY="s3:https://s3.amazonaws.com/my-bucket/host"
 export RESTIC_PASSWORD="secret"
@@ -45,10 +45,29 @@ ENV
   '
 
   # --legacy-dir 옵션을 명시적으로 주거나 환경변수를 활용하여 마이그레이션 기동
-  run main upgrade-config --legacy-dir "$legacy_local_dir"
+  run main upgrade --legacy-dir "$legacy_local_dir"
   [ "$status" -eq 0 ]
   
   run cat "${STUB_BIN}/restic.calls"
   [[ "$output" == *"copy"* ]]
   [[ "$output" == *"--from-repo ${legacy_local_dir}"* ]]
+}
+
+@test "cmd_upgrade handles backup.env with multiline notification body" {
+  cat > "$BACKUP_ENV_FILE" <<'ENV'
+export RESTIC_REPOSITORY="s3:https://s3.amazonaws.com/my-bucket/host"
+export RESTIC_PASSWORD="secret"
+export BACKUP_NOTIFICATION_BODY_SUCCESS='[백업 성공] Restic 백업 정상 완료 보고
+----------------------------------------
+- 대상 호스트: ${HOSTNAME}
+- 실행 프로파일: ${PROFILE_NAME}
+----------------------------------------'
+ENV
+
+  run main upgrade
+  [ "$status" -eq 0 ]
+
+  run config_get "BACKUP_NOTIFICATION_BODY_SUCCESS" "$BACKUP_ENV_FILE"
+  [[ "$output" == *"[백업 성공]"* ]]
+  [[ "$output" == *"대상 호스트"* ]]
 }
