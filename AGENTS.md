@@ -8,7 +8,7 @@
 * **전체 단위 테스트**: `bats tests/`
 * **단일 테스트 실행**: `bats tests/<file>.bats`
 * **단일 테스트 케이스**: `bats tests/<file>.bats -f "<test-case-name>"`
-* **통합 테스트 (E2E)**: `cd tests/integration && ./run.sh` (MinIO/SFTP 도커 환경 활용)
+* **통합 테스트 (E2E)**: `bats tests/integration/integration.bats` (MinIO/SFTP 도커 환경 활용)
 
 ## 🏗️ 아키텍처 및 설계 규칙 (Architecture & Rules)
 

@@ -29,7 +29,7 @@
 - [ ] `backup.sh init`을 `setting` 전에 실행 → 안내 메시지가 s3/sftp 두 예시 모두 보여주는지 확인
 
 ## 참고: Tier 2(docker-compose) 자동화 테스트로 이미 확인된 항목
-`tests/integration/run.sh`가 MinIO + atmoz/sftp + rockylinux:9 컨테이너로
+`tests/integration/integration.bats`가 MinIO + atmoz/sftp + rockylinux:9 컨테이너로
 S3/SFTP 각각의 install → setting → init → run → 스냅샷 확인까지는 이미
 자동으로 검증한다. 위 체크리스트는 컨테이너로 재현 불가능한 부분
 (systemd 타이머 실동작, 실제 NAS/버킷 등록, 대화형 wizard 문구 검토)에

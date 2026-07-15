@@ -1,0 +1,473 @@
+#!/usr/bin/env bats
+
+# Setup helper for executing commands in the 'app' container
+dexec() {
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T app bash -c "$1"
+}
+
+setup_file() {
+  # Start containers
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" up -d --build
+
+  # Wait for MinIO and set up mc alias
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T minio sh -c \
+    'until mc alias set local http://localhost:9000 AKIAIOSFODNN7EXAMPLE wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY 2>/dev/null; do sleep 1; done'
+
+  # Run install once for the entire test suite execution
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T app bash -c "bash backup.sh install --force"
+}
+
+teardown_file() {
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" down -v
+}
+
+setup() {
+  # Clean only the generated settings, keys, and profiles (preserving templates)
+  dexec "rm -f /etc/restic/backup.env /etc/restic/profiles.yaml /etc/restic/backup_key /etc/restic/backup_key.pub"
+
+  # Clean leftover systemd unit files from previous runs
+  dexec "rm -f /etc/systemd/system/resticprofile-backup@profile-*.service /etc/systemd/system/resticprofile-backup@profile-*.timer"
+
+  # Clean audit reports and legacy files
+  dexec "rm -rf /tmp/audit_report* /tmp/legacy* /tmp/legacy_file.txt"
+
+  # Reset SFTP home directory backup contents
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T sftp sh -c \
+    "rm -rf /home/backup_restic/backup/* /home/backup_migrate/backup/* /home/backup_restic/.ssh/* /home/backup_migrate/.ssh/*"
+
+  # Re-create MinIO buckets (clean previous state)
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T minio sh -c \
+    "mc rm --recursive --force local/restic-test || true
+     mc rm --recursive --force local/restic-test-sftp-to-s3 || true
+     mc rm --recursive --force local/restic-test-s3-to-s3 || true
+     mc rm --recursive --force local/restic-test-primary-55 || true
+     mc rm --recursive --force local/restic-test-primary-latest || true
+     mc rm --recursive --force local/restic-test-primary-postgres || true
+     mc mb -p local/restic-test || true"
+}
+
+# 1. S3 scenario
+@test "S3 scenario: setting -> init -> run -> schedule" {
+  dexec "bash backup.sh setting --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --password test-repo-password --force"
+
+  dexec "bash backup.sh init"
+
+  dexec "bash backup.sh run"
+
+  # Verify snapshots
+  run dexec "source /etc/restic/backup.env && restic snapshots --json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostname"* ]]
+
+  # Schedule check
+  dexec "bash backup.sh schedule enable || true"
+
+  # Find unit file and check no secrets leaked
+  run dexec "find /etc/systemd/system -maxdepth 1 -name 'resticprofile-backup@profile-*.service'"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  local unit_file="$output"
+
+  dexec "grep -q 'ISMS Compliance' '$unit_file'"
+
+  run dexec "grep -q 'RESTIC_PASSWORD' '$unit_file'"
+  [ "$status" -ne 0 ]
+
+  run dexec "grep -q 'AWS_SECRET_ACCESS_KEY' '$unit_file'"
+  [ "$status" -ne 0 ]
+
+  dexec "bash backup.sh schedule disable || true"
+}
+
+# 2. SFTP scenario
+@test "SFTP scenario: setting -> key setup -> init -> run -> schedule" {
+  dexec "bash backup.sh setting --backend sftp \
+    --host sftp --port 22 --user backup_restic \
+    --password test-repo-password --force"
+
+  # Register public keys on sftp container
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T app cat /etc/restic/backup_key.pub | \
+    docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T sftp sh -c '
+      mkdir -p /home/backup_restic/.ssh
+      cat > /home/backup_restic/.ssh/authorized_keys
+      chown -R backup_restic:users /home/backup_restic/.ssh
+      chmod 700 /home/backup_restic/.ssh
+      chmod 600 /home/backup_restic/.ssh/authorized_keys
+    '
+
+  # Setup backup directory inside sftp container
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T sftp sh -c '
+    mkdir -p /home/backup_restic/backup
+    chown backup_restic:users /home/backup_restic/backup
+  '
+
+  dexec "bash backup.sh init"
+
+  dexec "bash backup.sh run"
+
+  # Verify snapshots
+  run dexec "source /etc/restic/backup.env && restic snapshots --json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostname"* ]]
+
+  # Schedule check
+  dexec "bash backup.sh schedule enable || true"
+
+  run dexec "find /etc/systemd/system -maxdepth 1 -name 'resticprofile-backup@profile-*.service'"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  local unit_file="$output"
+
+  dexec "grep -q 'ISMS Compliance' '$unit_file'"
+
+  run dexec "grep -q 'RESTIC_PASSWORD' '$unit_file'"
+  [ "$status" -ne 0 ]
+
+  dexec "bash backup.sh schedule disable || true"
+}
+
+# 3. Migration SFTP to S3
+@test "Migration: SFTP to S3" {
+  # 1. Setup SFTP source
+  dexec "bash backup.sh setting --backend sftp \
+    --host sftp --port 22 --user backup_restic \
+    --password test-repo-password --force"
+
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T app cat /etc/restic/backup_key.pub | \
+    docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T sftp sh -c '
+      mkdir -p /home/backup_restic/.ssh
+      cat > /home/backup_restic/.ssh/authorized_keys
+      chown -R backup_restic:users /home/backup_restic/.ssh
+      chmod 700 /home/backup_restic/.ssh
+      chmod 600 /home/backup_restic/.ssh/authorized_keys
+    '
+
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T sftp sh -c '
+    mkdir -p /home/backup_restic/backup
+    chown backup_restic:users /home/backup_restic/backup
+  '
+
+  dexec "bash backup.sh init"
+
+  dexec "bash backup.sh run"
+
+  # 2. Setup target S3 bucket
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T minio mc mb -p local/restic-test-sftp-to-s3 || true
+
+  # 3. Run migration
+  dexec "bash backup.sh migrate --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test-sftp-to-s3 \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --new-password pass-sftp-to-s3 --force"
+
+  # 4. Verify migrated S3 snapshots
+  run dexec "source /etc/restic/backup.env && restic snapshots --json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostname"* ]]
+}
+
+# 4. Migration S3 to SFTP
+@test "Migration: S3 to SFTP" {
+  # 1. Setup S3 source
+  dexec "bash backup.sh setting --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --password test-repo-password --force"
+
+  dexec "bash backup.sh init"
+
+  dexec "bash backup.sh run"
+
+  # 2. Setup SFTP target key and directory
+  # Generate SSH key pair in app container first (since S3 source doesn't use/generate it)
+  dexec "ssh-keygen -t ed25519 -N '' -f /etc/restic/backup_key"
+
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T app cat /etc/restic/backup_key.pub | \
+    docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T sftp sh -c '
+      mkdir -p /home/backup_migrate/.ssh
+      cat > /home/backup_migrate/.ssh/authorized_keys
+      chown -R backup_migrate:users /home/backup_migrate/.ssh
+      chmod 700 /home/backup_migrate/.ssh
+      chmod 600 /home/backup_migrate/.ssh/authorized_keys
+      mkdir -p /home/backup_migrate/backup
+      chown backup_migrate:users /home/backup_migrate/backup
+    '
+
+  # Clean target directory
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T sftp sh -c 'rm -rf /home/backup_migrate/backup/*'
+
+  # 3. Run migration
+  dexec "bash backup.sh migrate --backend sftp \
+    --host sftp --port 22 --user backup_migrate \
+    --new-password pass-s3-to-sftp --force"
+
+  # 4. Verify migrated SFTP snapshots
+  run dexec "source /etc/restic/backup.env && restic snapshots --json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostname"* ]]
+}
+
+# 5. Migration SFTP to SFTP
+@test "Migration: SFTP to SFTP" {
+  # 1. Setup SFTP source
+  dexec "bash backup.sh setting --backend sftp \
+    --host sftp --port 22 --user backup_restic \
+    --password test-repo-password --force"
+
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T app cat /etc/restic/backup_key.pub | \
+    docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T sftp sh -c '
+      mkdir -p /home/backup_restic/.ssh
+      cat > /home/backup_restic/.ssh/authorized_keys
+      chown -R backup_restic:users /home/backup_restic/.ssh
+      chmod 700 /home/backup_restic/.ssh
+      chmod 600 /home/backup_restic/.ssh/authorized_keys
+      mkdir -p /home/backup_restic/backup
+      chown backup_restic:users /home/backup_restic/backup
+    '
+
+  dexec "bash backup.sh init"
+
+  dexec "bash backup.sh run"
+
+  # 2. Setup SFTP target (backup_migrate)
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T app cat /etc/restic/backup_key.pub | \
+    docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T sftp sh -c '
+      mkdir -p /home/backup_migrate/.ssh
+      cat > /home/backup_migrate/.ssh/authorized_keys
+      chown -R backup_migrate:users /home/backup_migrate/.ssh
+      chmod 700 /home/backup_migrate/.ssh
+      chmod 600 /home/backup_migrate/.ssh/authorized_keys
+      mkdir -p /home/backup_migrate/backup
+      chown backup_migrate:users /home/backup_migrate/backup
+    '
+
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T sftp sh -c 'rm -rf /home/backup_migrate/backup/*'
+
+  # 3. Run migration
+  dexec "bash backup.sh migrate --backend sftp \
+    --host sftp --port 22 --user backup_migrate \
+    --new-password pass-sftp-to-sftp --force"
+
+  # 4. Verify migrated SFTP snapshots
+  run dexec "source /etc/restic/backup.env && restic snapshots --json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostname"* ]]
+}
+
+# 6. Migration S3 to S3
+@test "Migration: S3 to S3" {
+  # 1. Setup S3 source
+  dexec "bash backup.sh setting --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --password test-repo-password --force"
+
+  dexec "bash backup.sh init"
+
+  dexec "bash backup.sh run"
+
+  # 2. Setup target S3 bucket
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T minio mc mb -p local/restic-test-s3-to-s3 || true
+
+  # 3. Run migration
+  dexec "bash backup.sh migrate --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test-s3-to-s3 \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --new-password pass-s3-to-s3 --force"
+
+  # 4. Verify migrated S3 snapshots
+  run dexec "source /etc/restic/backup.env && restic snapshots --json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostname"* ]]
+}
+
+# Seed DB Helper
+seed_databases() {
+  dexec "mysql -h mariadb-5-5 -u root -ptestpass testdb -e \"CREATE TABLE IF NOT EXISTS users (id INT, name VARCHAR(50)); INSERT INTO users VALUES (1, 'user_5_5');\""
+  dexec "mariadb -h mariadb-latest -u root -ptestpass testdb -e \"CREATE TABLE IF NOT EXISTS users (id INT, name VARCHAR(50)); INSERT INTO users VALUES (2, 'user_latest');\""
+  dexec "env PGPASSWORD=testpass psql -h postgres-13 -U postgres -d testdb -c \"CREATE TABLE IF NOT EXISTS users (id INT, name VARCHAR(50)); INSERT INTO users VALUES (3, 'user_pg');\""
+}
+
+# 7. MariaDB 5.5 Backup & Restore Audit
+@test "Database integration: MariaDB 5.5 Backup & Dual Audit" {
+  seed_databases
+
+  # Setup S3 primary and SFTP secondary
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T minio mc mb -p local/restic-test-primary-55 || true
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T sftp sh -c 'rm -rf /home/backup_migrate/backup/*'
+
+  dexec "bash backup.sh setting --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test-primary-55 \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --password test-repo-password \
+    --secondary-backend sftp \
+    --secondary-host sftp --secondary-port 22 --secondary-user backup_migrate \
+    --secondary-password test-sec-password --force \
+    --db-type mysql \
+    --db-command \"mysqldump -h mariadb-5-5 -u root -ptestpass --all-databases --single-transaction --quick --order-by-primary\" \
+    --db-keep-daily 7 --db-keep-weekly 4 --db-keep-monthly 12 \
+    --db-schedule \"*-*-* 03:00:00\""
+
+  # Setup keys for SFTP (must be done after setting generates the keys)
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T app cat /etc/restic/backup_key.pub | \
+    docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T sftp sh -c '
+      mkdir -p /home/backup_migrate/.ssh
+      cat > /home/backup_migrate/.ssh/authorized_keys
+      chown -R backup_migrate:users /home/backup_migrate/.ssh
+      chmod 700 /home/backup_migrate/.ssh
+      chmod 600 /home/backup_migrate/.ssh/authorized_keys
+      mkdir -p /home/backup_migrate/backup
+      chown backup_migrate:users /home/backup_migrate/backup
+    '
+
+  dexec "bash backup.sh init"
+
+  dexec "bash backup.sh run"
+
+  # Restore Drill and Audit
+  dexec "bash backup.sh audit --restore-drill --report-file /tmp/audit_report_55.md"
+
+  # Check reports exist
+  dexec "test -f /tmp/audit_report_55.md && test -f /tmp/audit_report_55.json && test -f /tmp/audit_report_55.html"
+
+  # Verify report content
+  dexec "grep -q '2차 소산 저장소' /tmp/audit_report_55.md"
+
+  dexec "grep -q '\"secondary_recovery_results\":' /tmp/audit_report_55.json"
+
+  dexec "grep -q '데이터베이스(mysql) 복원 무결성 검증: 성공' /tmp/audit_report_55.md"
+
+  dexec "grep -q '\"db_integrity_verified\": true' /tmp/audit_report_55.json"
+}
+
+# 8. MariaDB Latest Backup & Restore Audit
+@test "Database integration: MariaDB Latest Backup & Dual Audit" {
+  seed_databases
+
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T minio mc mb -p local/restic-test-primary-latest || true
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T sftp sh -c 'rm -rf /home/backup_migrate/backup/*'
+
+  dexec "bash backup.sh setting --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test-primary-latest \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --password test-repo-password \
+    --secondary-backend sftp \
+    --secondary-host sftp --secondary-port 22 --secondary-user backup_migrate \
+    --secondary-password test-sec-password --force \
+    --db-type mariadb \
+    --db-command \"mariadb-dump -h mariadb-latest -u root -ptestpass --all-databases --single-transaction --quick --order-by-primary\" \
+    --db-keep-daily 7 --db-keep-weekly 4 --db-keep-monthly 12 \
+    --db-schedule \"*-*-* 03:00:00\""
+
+  # Setup keys for SFTP (must be done after setting generates the keys)
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T app cat /etc/restic/backup_key.pub | \
+    docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T sftp sh -c '
+      mkdir -p /home/backup_migrate/.ssh
+      cat > /home/backup_migrate/.ssh/authorized_keys
+      chown -R backup_migrate:users /home/backup_migrate/.ssh
+      chmod 700 /home/backup_migrate/.ssh
+      chmod 600 /home/backup_migrate/.ssh/authorized_keys
+      mkdir -p /home/backup_migrate/backup
+      chown backup_migrate:users /home/backup_migrate/backup
+    '
+
+  dexec "bash backup.sh init"
+
+  dexec "bash backup.sh run"
+
+  # Restore Drill and Audit
+  dexec "bash backup.sh audit --restore-drill --report-file /tmp/audit_report_latest.md"
+
+  # Check reports exist
+  dexec "test -f /tmp/audit_report_latest.md && test -f /tmp/audit_report_latest.json && test -f /tmp/audit_report_latest.html"
+
+  # Verify report content
+  dexec "grep -q '2차 소산 저장소' /tmp/audit_report_latest.md"
+
+  dexec "grep -q '\"secondary_recovery_results\":' /tmp/audit_report_latest.json"
+
+  dexec "grep -q '데이터베이스(mariadb) 복원 무결성 검증: 성공' /tmp/audit_report_latest.md"
+
+  dexec "grep -q '\"db_integrity_verified\": true' /tmp/audit_report_latest.json"
+}
+
+# 9. PostgreSQL Latest Backup & Restore Audit
+@test "Database integration: PostgreSQL Backup & Dual Audit" {
+  seed_databases
+
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T minio mc mb -p local/restic-test-primary-postgres || true
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T sftp sh -c 'rm -rf /home/backup_migrate/backup/*'
+
+  dexec "bash backup.sh setting --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test-primary-postgres \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --password test-repo-password \
+    --secondary-backend sftp \
+    --secondary-host sftp --secondary-port 22 --secondary-user backup_migrate \
+    --secondary-password test-sec-password --force \
+    --db-type postgres \
+    --db-command \"env PGPASSWORD=testpass pg_dumpall -h postgres-13 -U postgres\" \
+    --db-keep-daily 7 --db-keep-weekly 4 --db-keep-monthly 12 \
+    --db-schedule \"*-*-* 03:00:00\""
+
+  # Setup keys for SFTP (must be done after setting generates the keys)
+  docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T app cat /etc/restic/backup_key.pub | \
+    docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T sftp sh -c '
+      mkdir -p /home/backup_migrate/.ssh
+      cat > /home/backup_migrate/.ssh/authorized_keys
+      chown -R backup_migrate:users /home/backup_migrate/.ssh
+      chmod 700 /home/backup_migrate/.ssh
+      chmod 600 /home/backup_migrate/.ssh/authorized_keys
+      mkdir -p /home/backup_migrate/backup
+      chown backup_migrate:users /home/backup_migrate/backup
+    '
+
+  dexec "bash backup.sh init"
+
+  dexec "bash backup.sh run"
+
+  # Restore Drill and Audit
+  dexec "bash backup.sh audit --restore-drill --report-file /tmp/audit_report_postgres.md"
+
+  # Check reports exist
+  dexec "test -f /tmp/audit_report_postgres.md && test -f /tmp/audit_report_postgres.json && test -f /tmp/audit_report_postgres.html"
+
+  # Verify report content
+  dexec "grep -q '2차 소산 저장소' /tmp/audit_report_postgres.md"
+
+  dexec "grep -q '\"secondary_recovery_results\":' /tmp/audit_report_postgres.json"
+
+  dexec "grep -q '데이터베이스(postgres) 복원 무결성 검증: 성공' /tmp/audit_report_postgres.md"
+
+  dexec "grep -q '\"db_integrity_verified\": true' /tmp/audit_report_postgres.json"
+}
+
+# 10. Config migration: upgrade-config
+@test "Config migration: upgrade-config" {
+  # Setup original S3 setting to migrate legacy to S3
+  dexec "bash backup.sh setting --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --password test-repo-password --force"
+
+  dexec "bash backup.sh init"
+
+  # Create temporary legacy repo and snapshot
+  dexec "
+    rm -rf /tmp/legacy-local
+    restic init -r /tmp/legacy-local --password-file <(echo -n 'test-repo-password')
+    echo 'legacy-data' > /tmp/legacy_file.txt
+    restic -r /tmp/legacy-local --password-file <(echo -n 'test-repo-password') backup /tmp/legacy_file.txt
+  "
+
+  # Run upgrade-config
+  dexec "bash backup.sh upgrade-config --legacy-dir '/tmp/legacy-local'"
+
+  # Verify migrated snapshot in destination S3 repository
+  run dexec "source /etc/restic/backup.env && restic snapshots --json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"/tmp/legacy_file.txt"* ]]
+}
