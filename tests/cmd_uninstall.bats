@@ -8,8 +8,8 @@ setup() {
   stub_command "systemctl" 'echo "systemctl $*" >> "'"${STUB_BIN}"'/systemctl.calls"; exit 0'
   mkdir -p "$RESTIC_ETC_DIR"
   cat > "$BACKUP_ENV_FILE" <<'ENV'
-export RESTIC_PASSWORD=secret
-export BACKUP_PROFILE_NAME=web01
+export RESTIC_PASSWORD='secret'
+export BACKUP_PROFILE_NAME='web01'
 ENV
 }
 

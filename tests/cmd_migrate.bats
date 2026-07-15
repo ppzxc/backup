@@ -160,3 +160,37 @@ ENV
   # Should not have check command because --skip-check was specified
   [[ "$output" != *"check"* ]]
 }
+
+@test "cmd_migrate preserves secondary backup configuration when migrating primary repository" {
+  cat >> "$BACKUP_ENV_FILE" <<'ENV'
+export SECONDARY_BACKEND="s3"
+export SECONDARY_RESTIC_REPOSITORY="s3:https://sec-s3.com/sec-bucket/host1"
+export SECONDARY_RESTIC_PASSWORD="sec-secret"
+export SECONDARY_AWS_ACCESS_KEY_ID="SEC_AK"
+export SECONDARY_AWS_SECRET_ACCESS_KEY="SEC_SK"
+export SECONDARY_KEEP_DAILY="30"
+export SECONDARY_KEEP_WEEKLY="12"
+export SECONDARY_KEEP_MONTHLY="12"
+ENV
+
+  stub_command "restic" '
+    echo "restic $*" >> "'"${STUB_BIN}"'/restic.calls"
+    exit 0
+  '
+
+  run cmd_migrate --backend s3 --endpoint http://new-s3 --bucket new-bucket --access-key key --secret-key sec --new-password newsecret --skip-check
+  [ "$status" -eq 0 ]
+
+  # Verify primary config was updated
+  run config_get "RESTIC_REPOSITORY" "$BACKUP_ENV_FILE"
+  [ "$output" = "s3:http://new-s3/new-bucket/host1" ]
+
+  # Verify secondary config was preserved
+  run config_get "SECONDARY_BACKEND" "$BACKUP_ENV_FILE"
+  [ "$output" = "s3" ]
+  run config_get "SECONDARY_RESTIC_REPOSITORY" "$BACKUP_ENV_FILE"
+  [ "$output" = "s3:https://sec-s3.com/sec-bucket/host1" ]
+  run config_get "SECONDARY_RESTIC_PASSWORD" "$BACKUP_ENV_FILE"
+  [ "$output" = "sec-secret" ]
+}
+

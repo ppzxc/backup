@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.33"
+BACKUP_SCRIPT_VERSION="0.0.34"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -2805,17 +2805,11 @@ cmd_run() {
   fi
 
   # 통합 알림 발송 및 종료 처리
-  if [[ -n "${SECONDARY_BACKEND:-}" ]]; then
-    if [[ -z "$pipeline_err" ]]; then
-      send_unified_notification "success"
-    else
-      send_unified_notification "failure" "$pipeline_err"
-      die "$pipeline_err"
-    fi
+  if [[ -z "$pipeline_err" ]]; then
+    send_unified_notification "success"
   else
-    if [[ -n "$pipeline_err" ]]; then
-      die "$pipeline_err"
-    fi
+    send_unified_notification "failure" "$pipeline_err"
+    die "$pipeline_err"
   fi
 }
 

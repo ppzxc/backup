@@ -88,3 +88,40 @@ ENV
   [[ "$output" == *"--name web01-secondary copy"* ]]
 }
 
+@test "cmd_run triggers notification on success even without secondary backup" {
+  cat >> "$BACKUP_ENV_FILE" <<'ENV'
+export BACKUP_NOTIFICATION_URL="https://hooks.slack.com/services/test"
+export BACKUP_NOTIFICATION_TYPE="slack"
+export BACKUP_NOTIFICATION_ON="both"
+ENV
+
+  stub_command "resticprofile" 'exit 0'
+  stub_command "curl" 'echo "curl $*" >> "'"${STUB_BIN}"'/curl.calls"; exit 0'
+
+  run cmd_run
+  [ "$status" -eq 0 ]
+  
+  [ -f "${STUB_BIN}/curl.calls" ]
+  run cat "${STUB_BIN}/curl.calls"
+  [[ "$output" == *"hooks.slack.com"* ]]
+}
+
+@test "cmd_run triggers notification on failure even without secondary backup" {
+  cat >> "$BACKUP_ENV_FILE" <<'ENV'
+export BACKUP_NOTIFICATION_URL="https://hooks.slack.com/services/test"
+export BACKUP_NOTIFICATION_TYPE="slack"
+export BACKUP_NOTIFICATION_ON="both"
+ENV
+
+  stub_command "resticprofile" 'exit 1'
+  stub_command "curl" 'echo "curl $*" >> "'"${STUB_BIN}"'/curl.calls"; exit 0'
+
+  run cmd_run
+  [ "$status" -eq 1 ]
+
+  [ -f "${STUB_BIN}/curl.calls" ]
+  run cat "${STUB_BIN}/curl.calls"
+  [[ "$output" == *"hooks.slack.com"* ]]
+}
+
+
