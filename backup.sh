@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.35"
+BACKUP_SCRIPT_VERSION="0.0.36"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -542,6 +542,25 @@ validate_not_empty() {
   return 0
 }
 
+validate_absolute_path() {
+  local value="$1"
+  local name="${2:-경로}"
+  if [[ -z "$value" ]]; then
+    printf '%s이(가) 비어 있습니다\n' "$name"
+    return 1
+  fi
+  local p
+  for p in ${value//,/ }; do
+    p="${p#"${p%%[![:space:]]*}"}"
+    p="${p%"${p##*[![:space:]]}"}"
+    if [[ ! "$p" =~ ^/ ]]; then
+      printf '%s "%s"은(는) 올바른 절대 경로가 아닙니다 (/로 시작해야 합니다)\n' "$name" "$p"
+      return 1
+    fi
+  done
+  return 0
+}
+
 validate_resolved_config() {
   local -n resolved_ref="$1"
   local -n errors_ref="$2"
@@ -588,6 +607,15 @@ validate_resolved_config() {
       errors_ref+=("Secondary backend error: $sec_err")
     fi
     unset _validate_sec_fields
+  fi
+
+  # 3. 백업 대상 경로(targets) 절대경로 여부 검증
+  local targets="${resolved_ref[targets]:-}"
+  if [[ -n "$targets" ]]; then
+    local path_err
+    if ! path_err=$(validate_absolute_path "$targets" "백업 대상 경로" 2>&1); then
+      errors_ref+=("$path_err")
+    fi
   fi
 }
 
@@ -2809,11 +2837,16 @@ cmd_run() {
   fi
 
   local pipeline_err=""
-  if resticprofile "${resticprofile_args[@]}"; then
+  local run_status=0
+  resticprofile "${resticprofile_args[@]}" || run_status=$?
+  if [[ $run_status -eq 0 ]]; then
     log_info "1차 파일 백업 성공"
   else
     pipeline_err="1차 파일 백업 실패 (resticprofile backup error)"
     log_error "$pipeline_err"
+    if [[ $run_status -eq 10 || $run_status -eq 1 ]]; then
+      log_warn "원격 저장소가 아직 초기화(init)되지 않았을 수 있습니다. 'backup.sh init'을 먼저 실행하였는지 확인하세요."
+    fi
   fi
 
   # DB 백업이 구성된 경우, 1차 DB 백업도 실행
@@ -5954,12 +5987,51 @@ cmd_wizard() {
     final_targets="/var/log,/etc"
   fi
 
-  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-    printf '%b추가로 백업할 디렉터리 경로가 있습니까? (쉼표로 구분하여 입력, 없으면 Enter): %b' "$C_CYAN" "$C_RESET"
-  else
-    printf '추가로 백업할 디렉터리 경로가 있습니까? (쉼표로 구분하여 입력, 없으면 Enter): '
-  fi
-  local additional_targets; read -r additional_targets
+  local additional_targets=""
+  while true; do
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      printf '%b추가로 백업할 디렉터리 절대 경로가 있습니까? (쉼표로 구분하여 절대 경로 입력, 없으면 Enter): %b' "$C_CYAN" "$C_RESET"
+    else
+      printf '추가로 백업할 디렉터리 절대 경로가 있습니까? (쉼표로 구분하여 절대 경로 입력, 없으면 Enter): '
+    fi
+    read -r additional_targets
+    
+    additional_targets="${additional_targets#"${additional_targets%%[![:space:]]*}"}"
+    additional_targets="${additional_targets%"${additional_targets##*[![:space:]]}"}"
+
+    if [[ -z "$additional_targets" ]]; then
+      break
+    fi
+
+    if [[ "$additional_targets" =~ ^[Yy][Ee]?[Ss]?$ || "$additional_targets" =~ ^[Nn][Oo]?$ ]]; then
+      if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+        printf '%b경고: 예/아니오 대답("%s")은 유효한 경로가 아닙니다. 절대 경로(예: /data)를 직접 입력하세요.%b\n' "$C_RED" "$additional_targets" "$C_RESET"
+      else
+        printf '경고: 예/아니오 대답("%s")은 유효한 경로가 아닙니다. 절대 경로(예: /data)를 직접 입력하세요.\n' "$additional_targets"
+      fi
+      continue
+    fi
+
+    local path_err=0
+    local p
+    for p in ${additional_targets//,/ }; do
+      p="${p#"${p%%[![:space:]]*}"}"
+      p="${p%"${p##*[![:space:]]}"}"
+      if [[ ! "$p" =~ ^/ ]]; then
+        path_err=1
+        if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+          printf '%b경고: 경로 "%s"은(는) 절대 경로가 아닙니다. /로 시작하는 전체 경로를 입력해야 합니다.%b\n' "$C_RED" "$p" "$C_RESET"
+        else
+          printf '경고: 경로 "%s"은(는) 절대 경로가 아닙니다. /로 시작하는 전체 경로를 입력해야 합니다.\n' "$p"
+        fi
+        break
+      fi
+    done
+
+    if [[ $path_err -eq 0 ]]; then
+      break
+    fi
+  done
 
   if [[ -n "$additional_targets" ]]; then
     if [[ -n "$final_targets" ]]; then

@@ -124,4 +124,13 @@ ENV
   [[ "$output" == *"hooks.slack.com"* ]]
 }
 
+@test "cmd_run outputs initialization recommendation warning when resticprofile exits with status 10" {
+  stub_command "resticprofile" 'exit 10'
+  
+  run cmd_run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"WARNING:"* ]]
+  [[ "$output" == *"초기화(init)되지 않았을 수 있습니다"* ]]
+}
+
 
