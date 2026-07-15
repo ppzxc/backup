@@ -9,6 +9,16 @@ restic() {
   RESTIC_REPOSITORY="${RESTIC_REPOSITORY:-}" \
   AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}" \
   AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_TYPE="${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_HOST="${RCLONE_CONFIG_SYNO_BACKUP_HOST:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_PORT="${RCLONE_CONFIG_SYNO_BACKUP_PORT:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_USER="${RCLONE_CONFIG_SYNO_BACKUP_USER:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="${RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="${RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${RCLONE_CONFIG_SYNO_BACKUP_SEC_USER:-}" \
+  RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-}" \
   command restic "$@"
 }
 
@@ -240,7 +250,16 @@ config_get() {
     CONFIG_CACHE_FILE="$env_file"
     # shellcheck disable=SC2034
     declare -g -A CONFIG_CACHE_DATA=()
-    load_backup_env_to_array "$env_file" CONFIG_CACHE_DATA || true
+    if [[ -f "$env_file" ]]; then
+      declare -a errors=()
+      if ! load_backup_env_to_array "$env_file" CONFIG_CACHE_DATA errors; then
+        local err_msg
+        for err_msg in "${errors[@]}"; do
+          log_error "$err_msg"
+        done
+        die "설정 파일 파싱 실패: $env_file" 1
+      fi
+    fi
   fi
   local env_var="${CONFIG_ENV_MAP[$key]:-}"
   local val=""
@@ -543,7 +562,14 @@ save_profile_config() {
   # 3. Synchronize derived assets (profiles.yaml, systemd timers)
   (
     declare -A file_config=()
-    load_backup_env_to_array "$BACKUP_ENV_FILE" file_config || true
+    declare -a errors=()
+    if ! load_backup_env_to_array "$BACKUP_ENV_FILE" file_config errors; then
+      local err_msg
+      for err_msg in "${errors[@]}"; do
+        log_error "$err_msg"
+      done
+      exit 1
+    fi
     local k
     for k in "${!file_config[@]}"; do
       declare -g "$k"="${file_config[$k]}"
@@ -556,7 +582,7 @@ save_profile_config() {
       log_info "정기 백업 스케줄 타이머(${timer_name})가 활성화되어 있어 설정을 자동 리로드합니다."
       resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "${_res_ref[profile_name]}" schedule
     fi
-  )
+  ) || return 1
 
   if [[ -n "$notice" ]]; then
     printf '%s\n' "$notice"
@@ -879,31 +905,22 @@ resolve_and_validate_config() {
     done <<< "$env_vars_mapping"
 
     if [[ -f "${BACKUP_ENV_FILE:-}" ]]; then
-      local backend_file_raw
-      backend_file_raw=$(
-        # shellcheck source=/dev/null
-        source "$BACKUP_ENV_FILE" >/dev/null 2>&1 || true
-        printf '%s\n' "RCLONE_CONFIG_SYNO_BACKUP_HOST=${RCLONE_CONFIG_SYNO_BACKUP_HOST:-}"
-        printf '%s\n' "RCLONE_CONFIG_SYNO_BACKUP_PORT=${RCLONE_CONFIG_SYNO_BACKUP_PORT:-}"
-        printf '%s\n' "RCLONE_CONFIG_SYNO_BACKUP_USER=${RCLONE_CONFIG_SYNO_BACKUP_USER:-}"
-        printf '%s\n' "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}"
-        printf '%s\n' "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}"
-        printf '%s\n' "RESTIC_REPOSITORY=${RESTIC_REPOSITORY:-}"
-        printf '%s\n' "BACKUP_HOST=${BACKUP_HOST:-}"
-        printf '%s\n' "BACKUP_PORT=${BACKUP_PORT:-}"
-        printf '%s\n' "BACKUP_USER=${BACKUP_USER:-}"
-        printf '%s\n' "BACKUP_ENDPOINT=${BACKUP_ENDPOINT:-}"
-        printf '%s\n' "BACKUP_BUCKET=${BACKUP_BUCKET:-}"
-        printf '%s\n' "BACKUP_ACCESS_KEY=${BACKUP_ACCESS_KEY:-}"
-        printf '%s\n' "BACKUP_SECRET_KEY=${BACKUP_SECRET_KEY:-}"
-      )
-      local fl k v
-      while IFS= read -r fl; do
-        [[ -z "$fl" ]] && continue
-        k="${fl%%=*}"
-        v="${fl#*=}"
-        backend_file["$k"]="$v"
-      done <<< "$backend_file_raw"
+      declare -A temp_file_config=()
+      if load_backup_env_to_array "$BACKUP_ENV_FILE" temp_file_config; then
+        backend_file[RCLONE_CONFIG_SYNO_BACKUP_HOST]="${temp_file_config[RCLONE_CONFIG_SYNO_BACKUP_HOST]:-}"
+        backend_file[RCLONE_CONFIG_SYNO_BACKUP_PORT]="${temp_file_config[RCLONE_CONFIG_SYNO_BACKUP_PORT]:-}"
+        backend_file[RCLONE_CONFIG_SYNO_BACKUP_USER]="${temp_file_config[RCLONE_CONFIG_SYNO_BACKUP_USER]:-}"
+        backend_file[AWS_ACCESS_KEY_ID]="${temp_file_config[AWS_ACCESS_KEY_ID]:-}"
+        backend_file[AWS_SECRET_ACCESS_KEY]="${temp_file_config[AWS_SECRET_ACCESS_KEY]:-}"
+        backend_file[RESTIC_REPOSITORY]="${temp_file_config[RESTIC_REPOSITORY]:-}"
+        backend_file[BACKUP_HOST]="${temp_file_config[BACKUP_HOST]:-}"
+        backend_file[BACKUP_PORT]="${temp_file_config[BACKUP_PORT]:-}"
+        backend_file[BACKUP_USER]="${temp_file_config[BACKUP_USER]:-}"
+        backend_file[BACKUP_ENDPOINT]="${temp_file_config[BACKUP_ENDPOINT]:-}"
+        backend_file[BACKUP_BUCKET]="${temp_file_config[BACKUP_BUCKET]:-}"
+        backend_file[BACKUP_ACCESS_KEY]="${temp_file_config[BACKUP_ACCESS_KEY]:-}"
+        backend_file[BACKUP_SECRET_KEY]="${temp_file_config[BACKUP_SECRET_KEY]:-}"
+      fi
     fi
 
     local -A backend_fields=()
@@ -947,24 +964,15 @@ resolve_and_validate_config() {
     fi
 
     if [[ -f "${BACKUP_ENV_FILE:-}" ]]; then
-      local sec_backend_file_raw
-      sec_backend_file_raw=$(
-        # shellcheck source=/dev/null
-        source "$BACKUP_ENV_FILE" >/dev/null 2>&1 || true
-        printf 'host=%s\n' "\${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST:-\${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST:-}}"
-        printf 'port=%s\n' "\${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT:-\${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT:-}}"
-        printf 'user=%s\n' "\${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER:-\${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER:-}}"
-        printf 'access_key=%s\n' "\${SECONDARY_AWS_ACCESS_KEY_ID:-}"
-        printf 'secret_key=%s\n' "\${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
-        printf 'repo=%s\n' "\${SECONDARY_RESTIC_REPOSITORY:-}"
-      )
-      local sfl sk sv
-      while IFS= read -r sfl; do
-        [[ -z "$sfl" ]] && continue
-        sk="${sfl%%=*}"
-        sv="${sfl#*=}"
-        sec_backend_file["$sk"]="$sv"
-      done <<< "$sec_backend_file_raw"
+      declare -A temp_sec_config=()
+      if load_backup_env_to_array "$BACKUP_ENV_FILE" temp_sec_config; then
+        sec_backend_file[host]="${temp_sec_config[SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST]:-${temp_sec_config[SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_HOST]:-}}"
+        sec_backend_file[port]="${temp_sec_config[SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT]:-${temp_sec_config[SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_PORT]:-}}"
+        sec_backend_file[user]="${temp_sec_config[SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER]:-${temp_sec_config[SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_USER]:-}}"
+        sec_backend_file[access_key]="${temp_sec_config[SECONDARY_AWS_ACCESS_KEY_ID]:-}"
+        sec_backend_file[secret_key]="${temp_sec_config[SECONDARY_AWS_SECRET_ACCESS_KEY]:-}"
+        sec_backend_file[repo]="${temp_sec_config[SECONDARY_RESTIC_REPOSITORY]:-}"
+      fi
     fi
 
     local sec_repo="${SECONDARY_RESTIC_REPOSITORY:-${sec_backend_file[repo]:-}}"
@@ -2224,10 +2232,6 @@ cmd_init() {
   require_root
   require_backup_env
 
-  # Sourcing to read current configs into environment (standard for cmd_init)
-  # shellcheck source=/dev/null
-  source "$BACKUP_ENV_FILE"
-
   local backend="s3"
   if [[ -n "${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" ]]; then
     backend="sftp"
@@ -2288,11 +2292,11 @@ cmd_init() {
       sec_conn_resolved[user]="${resolved[secondary_user]}"
 
       (
-        export RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp"
-        export RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${sec_conn_resolved[host]}"
-        export RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${sec_conn_resolved[port]}"
-        export RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${sec_conn_resolved[user]}"
-        export RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${BACKUP_SSH_KEY}"
+        RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp" \
+        RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${sec_conn_resolved[host]}" \
+        RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${sec_conn_resolved[port]}" \
+        RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${sec_conn_resolved[user]}" \
+        RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${BACKUP_SSH_KEY}" \
         rclone_check_connectivity "syno_backup_sec" "${BACKUP_VERBOSE:-0}"
       ) || die "2차 SFTP 소산지 연결 실패 (호스트: ${sec_conn_resolved[host]})"
     fi
@@ -2300,38 +2304,31 @@ cmd_init() {
     # 2차 미초기화 시 restic init 수행
     local sec_init_needed=0
     (
-      export RESTIC_REPOSITORY="${SECONDARY_RESTIC_REPOSITORY:-}"
-      export RESTIC_PASSWORD="${SECONDARY_RESTIC_PASSWORD:-$RESTIC_PASSWORD}"
-      if [[ "$sec_backend" == "s3" ]]; then
-        export AWS_ACCESS_KEY_ID="${SECONDARY_AWS_ACCESS_KEY_ID:-}"
-        export AWS_SECRET_ACCESS_KEY="${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
-      elif [[ "$sec_backend" == "sftp" ]]; then
-        export RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp"
-        export RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${resolved[secondary_host]:-}"
-        export RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${resolved[secondary_port]:-22}"
-        export RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${resolved[secondary_user]:-}"
-        export RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-$BACKUP_SSH_KEY}"
-      fi
+      RESTIC_REPOSITORY="${SECONDARY_RESTIC_REPOSITORY:-}" \
+      RESTIC_PASSWORD="${SECONDARY_RESTIC_PASSWORD:-$RESTIC_PASSWORD}" \
+      AWS_ACCESS_KEY_ID="${SECONDARY_AWS_ACCESS_KEY_ID:-}" \
+      AWS_SECRET_ACCESS_KEY="${SECONDARY_AWS_SECRET_ACCESS_KEY:-}" \
+      RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp" \
+      RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${resolved[secondary_host]:-}" \
+      RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${resolved[secondary_port]:-22}" \
+      RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${resolved[secondary_user]:-}" \
+      RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-$BACKUP_SSH_KEY}" \
       restic snapshots >/dev/null 2>&1
     ) || sec_init_needed=1
 
     if (( sec_init_needed )); then
       log_info "2차 원격 저장소를 초기화합니다..."
       (
-        export RESTIC_REPOSITORY="${SECONDARY_RESTIC_REPOSITORY:-}"
-        export RESTIC_PASSWORD="${SECONDARY_RESTIC_PASSWORD:-$RESTIC_PASSWORD}"
-        if [[ "$sec_backend" == "s3" ]]; then
-          export AWS_ACCESS_KEY_ID="${SECONDARY_AWS_ACCESS_KEY_ID:-}"
-          export AWS_SECRET_ACCESS_KEY="${SECONDARY_AWS_SECRET_ACCESS_KEY:-}"
-        elif [[ "$sec_backend" == "sftp" ]]; then
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp"
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${resolved[secondary_host]:-}"
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${resolved[secondary_port]:-22}"
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${resolved[secondary_user]:-}"
-          export RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-$BACKUP_SSH_KEY}"
-        fi
-
-        local -a sec_init_args=(init)
+        RESTIC_REPOSITORY="${SECONDARY_RESTIC_REPOSITORY:-}" \
+        RESTIC_PASSWORD="${SECONDARY_RESTIC_PASSWORD:-$RESTIC_PASSWORD}" \
+        AWS_ACCESS_KEY_ID="${SECONDARY_AWS_ACCESS_KEY_ID:-}" \
+        AWS_SECRET_ACCESS_KEY="${SECONDARY_AWS_SECRET_ACCESS_KEY:-}" \
+        RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp" \
+        RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="${resolved[secondary_host]:-}" \
+        RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${resolved[secondary_port]:-22}" \
+        RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${resolved[secondary_user]:-}" \
+        RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-$BACKUP_SSH_KEY}" \
+        sec_init_args=(init)
         if [[ "${BACKUP_VERBOSE:-0}" == "1" ]]; then
           sec_init_args+=(--verbose)
         fi
@@ -5276,8 +5273,9 @@ cmd_uninstall() {
   local purge="${opts[purge]:-0}"
 
   if [[ -f "$BACKUP_ENV_FILE" ]]; then
-    # shellcheck source=/dev/null
-    source "$BACKUP_ENV_FILE"
+    declare -A file_config=()
+    load_backup_env_to_array "$BACKUP_ENV_FILE" file_config || true
+    local BACKUP_PROFILE_NAME="${file_config[BACKUP_PROFILE_NAME]:-}"
     local profile_name; profile_name=$(resolve_profile_name)
     scheduler_unregister "$profile_name" "all"
   else
@@ -5352,10 +5350,6 @@ cmd_migrate() {
   fi
   require_root
   require_backup_env
-
-  # Sourcing current configuration
-  # shellcheck source=/dev/null
-  source "$BACKUP_ENV_FILE"
 
   local -A opts=()
   parse_opts_into opts "backend: endpoint: bucket: access-key: secret-key: host: port: user: new-password: skip-check force" -- "$@"
@@ -5708,6 +5702,7 @@ cmd_upgrade_config() {
   if [[ ! -f "$BACKUP_ENV_FILE" ]]; then
     die "설정 파일이 존재하지 않습니다: ${BACKUP_ENV_FILE} (먼저 wizard나 setting을 실행하세요)"
   fi
+  require_backup_env
 
   local -A opts=()
   parse_opts_into opts "legacy-dir:" -- "$@"
@@ -5720,16 +5715,11 @@ cmd_upgrade_config() {
   fi
 
   log_info "레거시 로컬 백업 저장소(${legacy_dir})를 발견했습니다. 원격지로 데이터 이관을 시작합니다..."
-  
-  # shellcheck source=/dev/null
-  source "$BACKUP_ENV_FILE"
 
   local legacy_password="${RESTIC_PASSWORD}"
 
   local copy_status=0
   (
-    export RESTIC_REPOSITORY="${RESTIC_REPOSITORY}"
-    export RESTIC_PASSWORD="${RESTIC_PASSWORD}"
     restic copy --from-repo "$legacy_dir" --from-password-file <(echo -n "$legacy_password") || exit 1
   ) || copy_status=1
 
@@ -6039,9 +6029,9 @@ cmd_wizard() {
   # 문자열을 다시 조립하지 않고 render_backup_env_* 가 실제로 쓴 값을 그대로 사용).
   local repo_location=""
   if [[ -f "$BACKUP_ENV_FILE" ]]; then
-    # shellcheck source=/dev/null
-    source "$BACKUP_ENV_FILE"
-    repo_location="${RESTIC_REPOSITORY:-}"
+    declare -A file_config=()
+    load_backup_env_to_array "$BACKUP_ENV_FILE" file_config || true
+    repo_location="${file_config[RESTIC_REPOSITORY]:-}"
   fi
 
   if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
