@@ -369,3 +369,30 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "validate_absolute_path accepts single absolute path" {
+  run validate_absolute_path "/var/log"
+  [ "$status" -eq 0 ]
+}
+
+@test "validate_absolute_path accepts comma-separated absolute paths" {
+  run validate_absolute_path "/var/log,/etc"
+  [ "$status" -eq 0 ]
+}
+
+@test "validate_absolute_path rejects relative path" {
+  run validate_absolute_path "y" "test_targets"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"올바른 절대 경로가 아닙니다"* ]]
+}
+
+@test "resolve_and_validate_config fails when targets contain a relative path" {
+  local -A opts=() resolved=()
+  local -a errors=()
+  opts[targets]="/etc,y"
+  opts[password]="mypassword"
+
+  resolve_and_validate_config opts resolved errors || true
+  [ ${#errors[@]} -gt 0 ]
+  [[ "${errors[0]}" == *"절대 경로"* ]]
+}
+
