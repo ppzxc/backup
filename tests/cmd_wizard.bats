@@ -43,10 +43,11 @@ setup() {
   echo "WIZARD_STATUS: $status"
   echo "WIZARD_OUTPUT: $output"
   [ "$status" -eq 0 ]
-  [ -f "$BACKUP_ENV_FILE" ]
-  grep -q "RCLONE_CONFIG_SYNO_BACKUP_HOST='1.2.3.4'" "$BACKUP_ENV_FILE"
   [[ "$output" == *"ssh-ed25519"* ]]
   [[ "$output" == *"저장소 위치:"* ]]
+  [ -f "$BACKUP_ENV_FILE" ]
+  run config_get "host" "$BACKUP_ENV_FILE"
+  [ "$output" = "1.2.3.4" ]
 }
 
 
@@ -100,8 +101,9 @@ setup() {
     printf "2\n\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\n\ny\n\n\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
-  grep -q "RCLONE_CONFIG_SYNO_BACKUP_HOST='1.2.3.4'" "$BACKUP_ENV_FILE"
   [[ "$output" == *"값을 입력해야 합니다"* ]]
+  run config_get "host" "$BACKUP_ENV_FILE"
+  [ "$output" = "1.2.3.4" ]
 }
 
 @test "wizard re-prompts on an invalid port and accepts the default on retry" {
@@ -111,7 +113,8 @@ setup() {
   '
   [ "$status" -eq 0 ]
   [[ "$output" == *"port must be numeric"* ]]
-  grep -q "RCLONE_CONFIG_SYNO_BACKUP_PORT='22'" "$BACKUP_ENV_FILE"
+  run config_get "port" "$BACKUP_ENV_FILE"
+  [ "$output" = "22" ]
 }
 
 @test "wizard shows the port default inline instead of a separate sentence" {
@@ -170,7 +173,8 @@ setup() {
   '
   [ "$status" -eq 0 ]
   [ -f "$BACKUP_ENV_FILE" ]
-  grep -q "BACKUP_TARGETS='/var/www'" "$BACKUP_ENV_FILE"
+  run config_get "targets" "$BACKUP_ENV_FILE"
+  [ "$output" = "/var/www" ]
 }
 
 @test "wizard prompts for a custom folder name after sftp connection info" {
@@ -179,8 +183,10 @@ setup() {
     printf "2\n1.2.3.4\n22\nbackup_restic\nmy-nas-box\nrepo-pass\n\n\n\n\n\n\ny\n\n\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
-  grep -q "BACKUP_PROFILE_NAME='my-nas-box'" "$BACKUP_ENV_FILE"
-  grep -q "RESTIC_REPOSITORY='rclone:syno_backup:/backup/my-nas-box'" "$BACKUP_ENV_FILE"
+  run config_get "profile_name" "$BACKUP_ENV_FILE"
+  [ "$output" = "my-nas-box" ]
+  run config_get "RESTIC_REPOSITORY" "$BACKUP_ENV_FILE"
+  [ "$output" = "rclone:syno_backup:/backup/my-nas-box" ]
 }
 
 @test "wizard uses hostname as default folder name when Enter is pressed at the profile-name prompt" {
@@ -190,7 +196,8 @@ setup() {
   '
   [ "$status" -eq 0 ]
   local hostname_val; hostname_val=$(hostname)
-  grep -q "RESTIC_REPOSITORY='rclone:syno_backup:/backup/${hostname_val}'" "$BACKUP_ENV_FILE"
+  run config_get "RESTIC_REPOSITORY" "$BACKUP_ENV_FILE"
+  [ "$output" = "rclone:syno_backup:/backup/${hostname_val}" ]
 }
 
 @test "wizard shows folder name in confirm summary" {
@@ -209,9 +216,12 @@ setup() {
   '
   [ "$status" -eq 0 ]
   [ -f "$BACKUP_ENV_FILE" ]
-  grep -q "BACKUP_AUDIT_TESTER='임꺽정'" "$BACKUP_ENV_FILE"
-  grep -q "BACKUP_AUDIT_CISO='정보보안부장 CISO'" "$BACKUP_ENV_FILE"
-  grep -q "BACKUP_AUDIT_RTO='60'" "$BACKUP_ENV_FILE"
+  run config_get "audit_tester" "$BACKUP_ENV_FILE"
+  [ "$output" = "임꺽정" ]
+  run config_get "audit_ciso" "$BACKUP_ENV_FILE"
+  [ "$output" = "정보보안부장 CISO" ]
+  run config_get "audit_rto" "$BACKUP_ENV_FILE"
+  [ "$output" = "60" ]
 }
 
 
@@ -224,8 +234,12 @@ setup() {
   '
   [ "$status" -eq 0 ]
   [ -f "$BACKUP_ENV_FILE" ]
-  grep -q "BACKUP_DB_TYPE='mariadb'" "$BACKUP_ENV_FILE"
-  grep -q "BACKUP_DB_COMMAND='mariadb-dump --all-databases --single-transaction --quick --order-by-primary'" "$BACKUP_ENV_FILE"
-  grep -q "KEEP_DB_DAILY='7'" "$BACKUP_ENV_FILE"
-  grep -q "BACKUP_DB_SCHEDULE='.*03:00:00'" "$BACKUP_ENV_FILE"
+  run config_get "db_type" "$BACKUP_ENV_FILE"
+  [ "$output" = "mariadb" ]
+  run config_get "db_command" "$BACKUP_ENV_FILE"
+  [ "$output" = "mariadb-dump --all-databases --single-transaction --quick --order-by-primary" ]
+  run config_get "keep_db_daily" "$BACKUP_ENV_FILE"
+  [ "$output" = "7" ]
+  run config_get "db_schedule" "$BACKUP_ENV_FILE"
+  [[ "$output" == *"03:00:00" ]]
 }

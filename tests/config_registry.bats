@@ -220,10 +220,10 @@ EOF
   [ "$prof_perm" = "600" ]
 
   # Check backup.env content
-  run cat "$BACKUP_ENV_FILE"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"RCLONE_CONFIG_SYNO_BACKUP_HOST='192.168.1.100'"* ]]
-  [[ "$output" == *"RESTIC_REPOSITORY='rclone:syno_backup:/backup/myprofile'"* ]]
+  run config_get "host"
+  [ "$output" = "192.168.1.100" ]
+  run config_get "RESTIC_REPOSITORY"
+  [ "$output" = "rclone:syno_backup:/backup/myprofile" ]
 
   # Check profiles.yaml content
   run cat "$RESTICPROFILE_CONFIG_FILE"
@@ -231,6 +231,31 @@ EOF
   [[ "$output" == *"myprofile:"* ]]
   [[ "$output" == *"- \"/var/log\""* ]]
   [[ "$output" == *"schedule: \"*-*-* 03:00:00\""* ]]
+}
+
+@test "config_get retrieves values and load_backup_env_to_array parses file correctly" {
+  local env_file="${BATS_TEST_TMPDIR}/test_query.env"
+  cat <<EOF > "$env_file"
+export BACKUP_PROFILE_NAME='web01'
+export RESTIC_PASSWORD='mysecretpassword'
+export RCLONE_CONFIG_SYNO_BACKUP_HOST='192.168.10.5'
+export BACKUP_EXCLUDES='/tmp/*'
+EOF
+  run config_get "profile_name" "$env_file"
+  [ "$status" -eq 0 ]
+  [ "$output" = "web01" ]
+
+  run config_get "password" "$env_file"
+  [ "$status" -eq 0 ]
+  [ "$output" = "mysecretpassword" ]
+
+  run config_get "host" "$env_file"
+  [ "$status" -eq 0 ]
+  [ "$output" = "192.168.10.5" ]
+
+  run config_get "excludes_csv" "$env_file"
+  [ "$status" -eq 0 ]
+  [ "$output" = "/tmp/*" ]
 }
 
 

@@ -35,6 +35,118 @@ DEFAULT_KEEP_MONTHLY=12
 DEFAULT_ON_CALENDAR="*-*-* 02:00:00"
 DEFAULT_SFTP_PORT=22
 BACKUP_VERBOSE="${BACKUP_VERBOSE:-0}"
+# --- Configuration Registry Schema ---
+CONFIG_FIELDS=()
+declare -A CONFIG_ENV_MAP=()
+declare -A CONFIG_DEFAULT_MAP=()
+declare -A CONFIG_VALIDATOR_MAP=()
+
+register_config_field() {
+  local internal_key="$1"
+  local env_var="$2"
+  local default_val="$3"
+  local validator="$4"
+  CONFIG_FIELDS+=("$internal_key")
+  CONFIG_ENV_MAP["$internal_key"]="$env_var"
+  CONFIG_DEFAULT_MAP["$internal_key"]="$default_val"
+  CONFIG_VALIDATOR_MAP["$internal_key"]="$validator"
+}
+
+init_config_schema() {
+  # 글로벌/공통 속성
+  register_config_field "profile_name" "BACKUP_PROFILE_NAME" "" "validate_profile_name"
+  register_config_field "password" "RESTIC_PASSWORD" "" "validate_not_empty"
+  register_config_field "targets" "BACKUP_TARGETS" "/var/log,/etc" "validate_not_empty"
+  register_config_field "excludes_csv" "BACKUP_EXCLUDES" "" ""
+  register_config_field "keep_daily" "KEEP_DAILY" "7" "validate_positive_int"
+  register_config_field "keep_weekly" "KEEP_WEEKLY" "4" "validate_positive_int"
+  register_config_field "keep_monthly" "KEEP_MONTHLY" "12" "validate_positive_int"
+
+  # SFTP 속성
+  register_config_field "host" "RCLONE_CONFIG_SYNO_BACKUP_HOST" "" ""
+  register_config_field "port" "RCLONE_CONFIG_SYNO_BACKUP_PORT" "22" "validate_port"
+  register_config_field "user" "RCLONE_CONFIG_SYNO_BACKUP_USER" "" ""
+
+  # S3 속성
+  register_config_field "endpoint" "BACKUP_ENDPOINT" "" ""
+  register_config_field "bucket" "BACKUP_BUCKET" "" ""
+  register_config_field "access_key" "AWS_ACCESS_KEY_ID" "" ""
+  register_config_field "secret_key" "AWS_SECRET_ACCESS_KEY" "" ""
+  
+  # 알림 속성
+  register_config_field "notification_url" "BACKUP_NOTIFICATION_URL" "" ""
+  register_config_field "notification_type" "BACKUP_NOTIFICATION_TYPE" "" ""
+  register_config_field "notification_on" "BACKUP_NOTIFICATION_ON" "both" ""
+  register_config_field "notification_method" "BACKUP_NOTIFICATION_METHOD" "POST" ""
+  register_config_field "notification_headers" "BACKUP_NOTIFICATION_HEADERS" "" ""
+  register_config_field "notification_body_success" "BACKUP_NOTIFICATION_BODY_SUCCESS" "" ""
+  register_config_field "notification_body_failure" "BACKUP_NOTIFICATION_BODY_FAILURE" "" ""
+
+  # 감사 속성
+  register_config_field "audit_tester" "BACKUP_AUDIT_TESTER" "" ""
+  register_config_field "audit_ciso" "BACKUP_AUDIT_CISO" "" ""
+  register_config_field "audit_rto" "BACKUP_AUDIT_RTO" "" ""
+
+  # DB 속성
+  register_config_field "db_type" "BACKUP_DB_TYPE" "" ""
+  register_config_field "db_command" "BACKUP_DB_COMMAND" "" ""
+  register_config_field "db_filename" "BACKUP_DB_FILENAME" "" ""
+  register_config_field "db_schedule" "BACKUP_DB_SCHEDULE" "" ""
+  register_config_field "keep_db_daily" "KEEP_DB_DAILY" "" ""
+  register_config_field "keep_db_weekly" "KEEP_DB_WEEKLY" "" ""
+  register_config_field "keep_db_monthly" "KEEP_DB_MONTHLY" "" ""
+}
+
+init_config_schema
+
+load_backup_env_to_array() {
+  local env_file="$1"
+  local -n dest_array_ref="$2"
+  if [[ ! -f "$env_file" ]]; then
+    return 1
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    if [[ "$line" =~ ^[[:space:]]*export[[:space:]]+([A-Za-z0-9_]+)=\'(.*)\'[[:space:]]*$ ]]; then
+      local key="${BASH_REMATCH[1]}"
+      local raw_val="${BASH_REMATCH[2]}"
+      local val="${raw_val//\'\\\'\'/\'}"
+      dest_array_ref["$key"]="$val"
+    elif [[ "$line" =~ ^[[:space:]]*export[[:space:]]+([A-Za-z0-9_]+)=\"(.*)\"[[:space:]]*$ ]]; then
+      local key="${BASH_REMATCH[1]}"
+      local val="${BASH_REMATCH[2]}"
+      dest_array_ref["$key"]="$val"
+    elif [[ "$line" =~ ^[[:space:]]*export[[:space:]]+([A-Za-z0-9_]+)=(.*)$ ]]; then
+      local key="${BASH_REMATCH[1]}"
+      local val="${BASH_REMATCH[2]}"
+      dest_array_ref["$key"]="$val"
+    fi
+  done < "$env_file"
+  return 0
+}
+
+config_get() {
+  local key="$1"
+  local env_file="${2:-$BACKUP_ENV_FILE}"
+  if ! declare -p CONFIG_ENV_MAP &>/dev/null; then
+    CONFIG_FIELDS=()
+    declare -g -A CONFIG_ENV_MAP=()
+    declare -g -A CONFIG_DEFAULT_MAP=()
+    declare -g -A CONFIG_VALIDATOR_MAP=()
+    init_config_schema
+  fi
+  local -A temp_env=()
+  if load_backup_env_to_array "$env_file" temp_env; then
+    local env_var="${CONFIG_ENV_MAP[$key]:-}"
+    if [[ -n "$env_var" ]]; then
+      echo "${temp_env[$env_var]:-}"
+    else
+      echo "${temp_env[$key]:-}"
+    fi
+  fi
+}
+
 C_RESET="" C_BOLD="" C_DIM="" C_RED="" C_GREEN="" C_YELLOW="" C_BLUE="" C_CYAN="" C_GRAY=""
 
 setup_colors() {
