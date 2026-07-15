@@ -120,23 +120,23 @@ setup() {
   local -A fields=([host]="1.2.3.4" [port]="22" [user]="backup_restic")
   local -A policy=([password]="secret" [targets]="/var/log" [excludes_csv]="/tmp/*,/var/tmp/*" [keep_daily]="7" [keep_weekly]="4" [keep_monthly]="12" [profile_name]="web01")
   run backend_sftp_render_env "host1" fields policy
-  [[ "$output" == *'export RESTIC_REPOSITORY="rclone:syno_backup:/backup/host1"'* ]]
-  [[ "$output" == *'export RCLONE_CONFIG_SYNO_BACKUP_HOST="1.2.3.4"'* ]]
-  [[ "$output" == *'export RCLONE_CONFIG_SYNO_BACKUP_PORT="22"'* ]]
-  [[ "$output" == *"export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE=\"${BACKUP_SSH_KEY}\""* ]]
-  [[ "$output" == *'export RESTIC_PASSWORD="secret"'* ]]
-  [[ "$output" == *'export BACKUP_PROFILE_NAME="web01"'* ]]
+  [[ "$output" == *"export RESTIC_REPOSITORY='rclone:syno_backup:/backup/host1'"* ]]
+  [[ "$output" == *"export RCLONE_CONFIG_SYNO_BACKUP_HOST='1.2.3.4'"* ]]
+  [[ "$output" == *"export RCLONE_CONFIG_SYNO_BACKUP_PORT='22'"* ]]
+  [[ "$output" == *"export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE='${BACKUP_SSH_KEY}'"* ]]
+  [[ "$output" == *"export RESTIC_PASSWORD='secret'"* ]]
+  [[ "$output" == *"export BACKUP_PROFILE_NAME='web01'"* ]]
 }
 
 @test "backend_s3_render_env produces expected export lines" {
   local -A fields=([endpoint]="https://s3.example.com" [bucket]="my-bucket" [access_key]="AKIA123" [secret_key]="secretkey")
   local -A policy=([password]="repopass" [targets]="/var/log" [excludes_csv]="/tmp/*,/var/tmp/*" [keep_daily]="7" [keep_weekly]="4" [keep_monthly]="12" [profile_name]="web01")
   run backend_s3_render_env "host1" fields policy
-  [[ "$output" == *'export RESTIC_REPOSITORY="s3:https://s3.example.com/my-bucket/host1"'* ]]
-  [[ "$output" == *'export AWS_ACCESS_KEY_ID="AKIA123"'* ]]
-  [[ "$output" == *'export AWS_SECRET_ACCESS_KEY="secretkey"'* ]]
-  [[ "$output" == *'export RESTIC_PASSWORD="repopass"'* ]]
-  [[ "$output" == *'export BACKUP_PROFILE_NAME="web01"'* ]]
+  [[ "$output" == *"export RESTIC_REPOSITORY='s3:https://s3.example.com/my-bucket/host1'"* ]]
+  [[ "$output" == *"export AWS_ACCESS_KEY_ID='AKIA123'"* ]]
+  [[ "$output" == *"export AWS_SECRET_ACCESS_KEY='secretkey'"* ]]
+  [[ "$output" == *"export RESTIC_PASSWORD='repopass'"* ]]
+  [[ "$output" == *"export BACKUP_PROFILE_NAME='web01'"* ]]
 }
 
 @test "backend_sftp_render_notice prints the generated pubkey for NAS registration" {
@@ -170,7 +170,7 @@ setup() {
   resolved[profile_name]="my-custom-server"
   local output_env="" output_notice=""
   backend_sftp_configure resolved output_env output_notice
-  [[ "$output_env" == *'RESTIC_REPOSITORY="rclone:syno_backup:/backup/my-custom-server"'* ]]
+  [[ "$output_env" == *"RESTIC_REPOSITORY='rclone:syno_backup:/backup/my-custom-server'"* ]]
 }
 
 @test "backend_s3_configure uses profile_name as the repository folder, not hostname" {
@@ -188,7 +188,7 @@ setup() {
   resolved[profile_name]="my-custom-server"
   local output_env="" output_notice=""
   backend_s3_configure resolved output_env output_notice
-  [[ "$output_env" == *'RESTIC_REPOSITORY="s3:https://s3.example.com/mybucket/my-custom-server"'* ]]
+  [[ "$output_env" == *"RESTIC_REPOSITORY='s3:https://s3.example.com/mybucket/my-custom-server'"* ]]
 }
 
 @test "backend_sftp_configure renders env and notice using resolved config" {
@@ -206,7 +206,7 @@ setup() {
   resolved[profile_name]="myhost"
   local output_env="" output_notice=""
   backend_sftp_configure resolved output_env output_notice
-  [[ "$output_env" == *"RCLONE_CONFIG_SYNO_BACKUP_HOST=\"10.0.0.1\""* ]]
+  [[ "$output_env" == *"RCLONE_CONFIG_SYNO_BACKUP_HOST='10.0.0.1'"* ]]
   [[ "$output_notice" == *"authorized_keys"* ]]
 }
 
@@ -225,7 +225,7 @@ setup() {
   resolved[profile_name]="myhost"
   local output_env="" output_notice=""
   backend_s3_configure resolved output_env output_notice
-  [[ "$output_env" == *"AWS_ACCESS_KEY_ID=\"AK\""* ]]
+  [[ "$output_env" == *"AWS_ACCESS_KEY_ID='AK'"* ]]
   [[ "$output_notice" == *"s3:::mybucket"* ]]
 }
 

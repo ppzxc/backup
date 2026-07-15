@@ -44,7 +44,7 @@ setup() {
   echo "WIZARD_OUTPUT: $output"
   [ "$status" -eq 0 ]
   [ -f "$BACKUP_ENV_FILE" ]
-  grep -q 'RCLONE_CONFIG_SYNO_BACKUP_HOST="1.2.3.4"' "$BACKUP_ENV_FILE"
+  grep -q "RCLONE_CONFIG_SYNO_BACKUP_HOST='1.2.3.4'" "$BACKUP_ENV_FILE"
   [[ "$output" == *"ssh-ed25519"* ]]
   [[ "$output" == *"저장소 위치:"* ]]
 }
@@ -100,7 +100,7 @@ setup() {
     printf "2\n\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\n\ny\n\n\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
-  grep -q 'RCLONE_CONFIG_SYNO_BACKUP_HOST="1.2.3.4"' "$BACKUP_ENV_FILE"
+  grep -q "RCLONE_CONFIG_SYNO_BACKUP_HOST='1.2.3.4'" "$BACKUP_ENV_FILE"
   [[ "$output" == *"값을 입력해야 합니다"* ]]
 }
 
@@ -111,7 +111,7 @@ setup() {
   '
   [ "$status" -eq 0 ]
   [[ "$output" == *"port must be numeric"* ]]
-  grep -q 'RCLONE_CONFIG_SYNO_BACKUP_PORT="22"' "$BACKUP_ENV_FILE"
+  grep -q "RCLONE_CONFIG_SYNO_BACKUP_PORT='22'" "$BACKUP_ENV_FILE"
 }
 
 @test "wizard shows the port default inline instead of a separate sentence" {
@@ -170,7 +170,7 @@ setup() {
   '
   [ "$status" -eq 0 ]
   [ -f "$BACKUP_ENV_FILE" ]
-  grep -q 'BACKUP_TARGETS="/var/www"' "$BACKUP_ENV_FILE"
+  grep -q "BACKUP_TARGETS='/var/www'" "$BACKUP_ENV_FILE"
 }
 
 @test "wizard prompts for a custom folder name after sftp connection info" {
@@ -179,8 +179,8 @@ setup() {
     printf "2\n1.2.3.4\n22\nbackup_restic\nmy-nas-box\nrepo-pass\n\n\n\n\n\n\ny\n\n\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
-  grep -q 'BACKUP_PROFILE_NAME="my-nas-box"' "$BACKUP_ENV_FILE"
-  grep -q 'RESTIC_REPOSITORY="rclone:syno_backup:/backup/my-nas-box"' "$BACKUP_ENV_FILE"
+  grep -q "BACKUP_PROFILE_NAME='my-nas-box'" "$BACKUP_ENV_FILE"
+  grep -q "RESTIC_REPOSITORY='rclone:syno_backup:/backup/my-nas-box'" "$BACKUP_ENV_FILE"
 }
 
 @test "wizard uses hostname as default folder name when Enter is pressed at the profile-name prompt" {
@@ -190,7 +190,7 @@ setup() {
   '
   [ "$status" -eq 0 ]
   local hostname_val; hostname_val=$(hostname)
-  grep -q "RESTIC_REPOSITORY=\"rclone:syno_backup:/backup/${hostname_val}\"" "$BACKUP_ENV_FILE"
+  grep -q "RESTIC_REPOSITORY='rclone:syno_backup:/backup/${hostname_val}'" "$BACKUP_ENV_FILE"
 }
 
 @test "wizard shows folder name in confirm summary" {

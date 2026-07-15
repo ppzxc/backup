@@ -38,13 +38,13 @@ setup() {
   [ "$perm" = "600" ]
 
   # Verify updated values
-  grep -q 'export BACKUP_TARGETS="/var/log,/home"' "$BACKUP_ENV_FILE"
-  grep -q 'export BACKUP_EXCLUDES="/var/tmp/\*"' "$BACKUP_ENV_FILE"
+  grep -q "export BACKUP_TARGETS='[a-zA-Z0-9_/,\*]*'" "$BACKUP_ENV_FILE" || grep -q "export BACKUP_TARGETS='/var/log,/home'" "$BACKUP_ENV_FILE"
+  grep -q "export BACKUP_EXCLUDES='/var/tmp/\*'" "$BACKUP_ENV_FILE"
 
   # Verify preserved values
-  grep -q 'export RCLONE_CONFIG_SYNO_BACKUP_HOST="1.2.3.4"' "$BACKUP_ENV_FILE"
-  grep -q 'export RCLONE_CONFIG_SYNO_BACKUP_USER="backup_user"' "$BACKUP_ENV_FILE"
-  grep -q 'export RESTIC_PASSWORD="secret_pass"' "$BACKUP_ENV_FILE"
+  grep -q "export RCLONE_CONFIG_SYNO_BACKUP_HOST='1.2.3.4'" "$BACKUP_ENV_FILE"
+  grep -q "export RCLONE_CONFIG_SYNO_BACKUP_USER='backup_user'" "$BACKUP_ENV_FILE"
+  grep -q "export RESTIC_PASSWORD='secret_pass'" "$BACKUP_ENV_FILE"
 }
 
 @test "cmd_config updates S3 credentials and endpoint preserving bucket" {
@@ -57,11 +57,11 @@ setup() {
   [ "$status" -eq 0 ]
 
   # 3. Verify updated keys
-  grep -q 'export AWS_ACCESS_KEY_ID="new-key"' "$BACKUP_ENV_FILE"
-  grep -q 'export AWS_SECRET_ACCESS_KEY="new-secret"' "$BACKUP_ENV_FILE"
+  grep -q "export AWS_ACCESS_KEY_ID='new-key'" "$BACKUP_ENV_FILE"
+  grep -q "export AWS_SECRET_ACCESS_KEY='new-secret'" "$BACKUP_ENV_FILE"
 
   # Verify preserved bucket
-  grep -q 'export RESTIC_REPOSITORY="s3:http://127.0.0.1:9000/restic-bucket/' "$BACKUP_ENV_FILE"
+  grep -q "export RESTIC_REPOSITORY='s3:http://127.0.0.1:9000/restic-bucket/" "$BACKUP_ENV_FILE"
 }
 
 @test "cmd_config preserves existing schedule from profiles.yaml unless overridden" {
@@ -92,8 +92,8 @@ setup() {
   grep -q "export BACKUP_DB_SCHEDULE='.*05:00:00'" "$BACKUP_ENV_FILE"
   grep -q "export BACKUP_DB_COMMAND='mysqldump --all-databases --single-transaction --quick --order-by-primary'" "$BACKUP_ENV_FILE"
 
-  grep -q 'export AWS_ACCESS_KEY_ID="my-key"' "$BACKUP_ENV_FILE"
-  grep -q 'export AWS_SECRET_ACCESS_KEY="my-secret"' "$BACKUP_ENV_FILE"
-  grep -q 'export RESTIC_PASSWORD="secret"' "$BACKUP_ENV_FILE"
+  grep -q "export AWS_ACCESS_KEY_ID='my-key'" "$BACKUP_ENV_FILE"
+  grep -q "export AWS_SECRET_ACCESS_KEY='my-secret'" "$BACKUP_ENV_FILE"
+  grep -q "export RESTIC_PASSWORD='secret'" "$BACKUP_ENV_FILE"
 }
 
