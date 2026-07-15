@@ -1713,7 +1713,6 @@ render_resticprofile_config() {
       printf '      - "%s"\n' "$e"
     done
   fi
-  render_resticprofile_notifications
 
 
   # 2차 원격 소산 프로필 추가 출력
