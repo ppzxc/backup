@@ -195,12 +195,12 @@ ENV
   
   run cmd_schedule enable
   [ "$status" -eq 0 ]
-  [ -f "${SYSTEMD_UNIT_DIR}/restic-audit-daily.timer" ]
-  [ -f "${SYSTEMD_UNIT_DIR}/restic-audit-restore-drill.timer" ]
+  [ -f "${SYSTEMD_UNIT_DIR}/backup-audit-daily.timer" ]
+  [ -f "${SYSTEMD_UNIT_DIR}/backup-audit-restore-drill.timer" ]
   
   run cat "${STUB_BIN}/systemctl.calls"
-  [[ "$output" == *"enable --now restic-audit-daily.timer"* ]]
-  [[ "$output" == *"enable --now restic-audit-restore-drill.timer"* ]]
+  [[ "$output" == *"enable --now backup-audit-daily.timer"* ]]
+  [[ "$output" == *"enable --now backup-audit-restore-drill.timer"* ]]
 }
 
 @test "cmd_audit --daily --report writes date-stamped reports" {

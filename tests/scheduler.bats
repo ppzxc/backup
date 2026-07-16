@@ -112,12 +112,12 @@ EOF
 
   # systemctl enable 호출 확인
   run cat "${STUB_BIN}/systemctl.calls"
-  [[ "$output" == *"enable --now restic-audit-daily.timer"* ]]
-  [[ "$output" == *"enable --now restic-audit-restore-drill.timer"* ]]
+  [[ "$output" == *"enable --now backup-audit-daily.timer"* ]]
+  [[ "$output" == *"enable --now backup-audit-restore-drill.timer"* ]]
 
   # systemd 에셋 생성 확인
-  [ -f "${SYSTEMD_UNIT_DIR}/restic-audit-daily.service" ]
-  [ -f "${SYSTEMD_UNIT_DIR}/restic-audit-restore-drill.timer" ]
+  [ -f "${SYSTEMD_UNIT_DIR}/backup-audit-daily.service" ]
+  [ -f "${SYSTEMD_UNIT_DIR}/backup-audit-restore-drill.timer" ]
 }
 
 @test "scheduler_unregister under systemd adapter disables timers and cleans systemd service files" {
@@ -128,10 +128,10 @@ EOF
   stub_command "resticprofile" 'echo "resticprofile $*" >> "'"${STUB_BIN}"'/resticprofile.calls"; exit 0'
 
   # 가상 유닛 파일 생성
-  touch "${SYSTEMD_UNIT_DIR}/restic-audit-daily.service"
-  touch "${SYSTEMD_UNIT_DIR}/restic-audit-daily.timer"
-  touch "${SYSTEMD_UNIT_DIR}/restic-audit-restore-drill.service"
-  touch "${SYSTEMD_UNIT_DIR}/restic-audit-restore-drill.timer"
+  touch "${SYSTEMD_UNIT_DIR}/backup-audit-daily.service"
+  touch "${SYSTEMD_UNIT_DIR}/backup-audit-daily.timer"
+  touch "${SYSTEMD_UNIT_DIR}/backup-audit-restore-drill.service"
+  touch "${SYSTEMD_UNIT_DIR}/backup-audit-restore-drill.timer"
 
   run scheduler_unregister "test-profile" "all"
   [ "$status" -eq 0 ]
@@ -142,11 +142,11 @@ EOF
 
   # systemctl disable 호출 및 파일 삭제 확인
   run cat "${STUB_BIN}/systemctl.calls"
-  [[ "$output" == *"disable --now restic-audit-daily.timer"* ]]
-  [[ "$output" == *"disable --now restic-audit-restore-drill.timer"* ]]
+  [[ "$output" == *"disable --now backup-audit-daily.timer"* ]]
+  [[ "$output" == *"disable --now backup-audit-restore-drill.timer"* ]]
 
-  [ ! -f "${SYSTEMD_UNIT_DIR}/restic-audit-daily.service" ]
-  [ ! -f "${SYSTEMD_UNIT_DIR}/restic-audit-restore-drill.timer" ]
+  [ ! -f "${SYSTEMD_UNIT_DIR}/backup-audit-daily.service" ]
+  [ ! -f "${SYSTEMD_UNIT_DIR}/backup-audit-restore-drill.timer" ]
 }
 
 @test "scheduler_status under systemd adapter queries systemctl state correctly" {
@@ -157,9 +157,9 @@ EOF
   stub_command "systemctl" '
     if [[ "$*" == *"resticprofile-backup@profile-test-profile.timer" ]]; then
       echo "active"
-    elif [[ "$*" == *"restic-audit-daily.timer" ]]; then
+    elif [[ "$*" == *"backup-audit-daily.timer" ]]; then
       echo "inactive"
-    elif [[ "$*" == *"restic-audit-restore-drill.timer" ]]; then
+    elif [[ "$*" == *"backup-audit-restore-drill.timer" ]]; then
       echo "unknown"
     fi
     exit 0

@@ -2702,12 +2702,12 @@ scheduler_systemd_register() {
   if (( daily )); then
     write_audit_systemd_assets "$daily_on_calendar" "$drill_on_calendar"
     systemd_reload_daemon
-    systemd_enable_unit "restic-audit-daily.timer"
+    systemd_enable_unit "backup-audit-daily.timer"
     log_info "schedule enable 완료 (daily: ${daily_on_calendar})"
   elif (( restore_drill )); then
     write_audit_systemd_assets "$daily_on_calendar" "$drill_on_calendar"
     systemd_reload_daemon
-    systemd_enable_unit "restic-audit-restore-drill.timer"
+    systemd_enable_unit "backup-audit-restore-drill.timer"
     log_info "schedule enable 완료 (drill: ${drill_on_calendar})"
   else
     resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" schedule
@@ -2716,8 +2716,8 @@ scheduler_systemd_register() {
     fi
     write_audit_systemd_assets "$daily_on_calendar" "$drill_on_calendar"
     systemd_reload_daemon
-    systemd_enable_unit "restic-audit-daily.timer"
-    systemd_enable_unit "restic-audit-restore-drill.timer"
+    systemd_enable_unit "backup-audit-daily.timer"
+    systemd_enable_unit "backup-audit-restore-drill.timer"
     log_info "schedule enable 완료 (${on_calendar}, daily: ${daily_on_calendar}, drill: ${drill_on_calendar})"
   fi
 }
@@ -2727,15 +2727,15 @@ scheduler_systemd_unregister() {
   local target_type="$2"
 
   if [[ "$target_type" == "daily" ]]; then
-    systemd_disable_unit "restic-audit-daily.timer"
-    rm -f "$SYSTEMD_UNIT_DIR/restic-audit-daily.service"
-    rm -f "$SYSTEMD_UNIT_DIR/restic-audit-daily.timer"
+    systemd_disable_unit "backup-audit-daily.timer"
+    rm -f "$SYSTEMD_UNIT_DIR/backup-audit-daily.service"
+    rm -f "$SYSTEMD_UNIT_DIR/backup-audit-daily.timer"
     systemd_reload_daemon
     log_info "schedule disable 완료 (daily)"
   elif [[ "$target_type" == "drill" ]]; then
-    systemd_disable_unit "restic-audit-restore-drill.timer"
-    rm -f "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.service"
-    rm -f "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.timer"
+    systemd_disable_unit "backup-audit-restore-drill.timer"
+    rm -f "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.service"
+    rm -f "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.timer"
     systemd_reload_daemon
     log_info "schedule disable 완료 (drill)"
   else
@@ -2743,12 +2743,12 @@ scheduler_systemd_unregister() {
     if [[ -n "${BACKUP_DB_TYPE:-}" ]]; then
       resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "${profile_name}-db" unschedule 2>/dev/null || true
     fi
-    systemd_disable_unit "restic-audit-daily.timer"
-    systemd_disable_unit "restic-audit-restore-drill.timer"
-    rm -f "$SYSTEMD_UNIT_DIR/restic-audit-daily.service"
-    rm -f "$SYSTEMD_UNIT_DIR/restic-audit-daily.timer"
-    rm -f "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.service"
-    rm -f "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.timer"
+    systemd_disable_unit "backup-audit-daily.timer"
+    systemd_disable_unit "backup-audit-restore-drill.timer"
+    rm -f "$SYSTEMD_UNIT_DIR/backup-audit-daily.service"
+    rm -f "$SYSTEMD_UNIT_DIR/backup-audit-daily.timer"
+    rm -f "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.service"
+    rm -f "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.timer"
     systemd_reload_daemon
     log_info "schedule disable 완료"
   fi
@@ -2762,8 +2762,8 @@ scheduler_systemd_status() {
 
   local timer_state daily_timer_state drill_timer_state db_timer_state
   timer_state=$(systemctl is-active "$(resticprofile_timer_unit_name "$profile_name")" 2>/dev/null) || true
-  daily_timer_state=$(systemctl is-active restic-audit-daily.timer 2>/dev/null) || true
-  drill_timer_state=$(systemctl is-active restic-audit-restore-drill.timer 2>/dev/null) || true
+  daily_timer_state=$(systemctl is-active backup-audit-daily.timer 2>/dev/null) || true
+  drill_timer_state=$(systemctl is-active backup-audit-restore-drill.timer 2>/dev/null) || true
   db_timer_state=$(systemctl is-active "$(resticprofile_timer_unit_name "${profile_name}-db")" 2>/dev/null) || true
 
   _sys_stat[backup]="${timer_state:-unknown}"
@@ -2793,7 +2793,7 @@ write_audit_systemd_assets() {
   mkdir -p "$SYSTEMD_UNIT_DIR"
 
   # 1. Daily review service
-  cat > "$SYSTEMD_UNIT_DIR/restic-audit-daily.service" <<EOF
+  cat > "$SYSTEMD_UNIT_DIR/backup-audit-daily.service" <<EOF
 [Unit]
 Description=Restic Daily Backup Audit Report
 After=network.target
@@ -2802,10 +2802,10 @@ After=network.target
 Type=oneshot
 ExecStart=$BACKUP_SCRIPT_INSTALL_PATH audit --daily --report
 EOF
-  chmod 644 "$SYSTEMD_UNIT_DIR/restic-audit-daily.service"
+  chmod 644 "$SYSTEMD_UNIT_DIR/backup-audit-daily.service"
 
   # 2. Daily review timer
-  cat > "$SYSTEMD_UNIT_DIR/restic-audit-daily.timer" <<EOF
+  cat > "$SYSTEMD_UNIT_DIR/backup-audit-daily.timer" <<EOF
 [Unit]
 Description=Run Restic Daily Backup Audit Report Timer
 
@@ -2816,10 +2816,10 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
-  chmod 644 "$SYSTEMD_UNIT_DIR/restic-audit-daily.timer"
+  chmod 644 "$SYSTEMD_UNIT_DIR/backup-audit-daily.timer"
 
   # 3. Restore drill service
-  cat > "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.service" <<EOF
+  cat > "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.service" <<EOF
 [Unit]
 Description=Restic Restore Drill Report
 After=network.target
@@ -2828,10 +2828,10 @@ After=network.target
 Type=oneshot
 ExecStart=$BACKUP_SCRIPT_INSTALL_PATH audit --restore-drill --report
 EOF
-  chmod 644 "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.service"
+  chmod 644 "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.service"
 
   # 4. Restore drill timer
-  cat > "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.timer" <<EOF
+  cat > "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.timer" <<EOF
 [Unit]
 Description=Run Restic Restore Drill Report Timer
 
@@ -2842,7 +2842,7 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
-  chmod 644 "$SYSTEMD_UNIT_DIR/restic-audit-restore-drill.timer"
+  chmod 644 "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.timer"
 }
 
 # nameref로 인자를 전달하여 사용되지 않는 것으로 오인받는 변수 우회
