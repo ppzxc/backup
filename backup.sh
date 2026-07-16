@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.38"
+BACKUP_SCRIPT_VERSION="0.0.39"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -85,7 +85,7 @@ RESTICPROFILE_UNIT_TEMPLATE="${RESTICPROFILE_UNIT_TEMPLATE:-${BACKUP_ETC_DIR}/re
 RESTICPROFILE_TIMER_TEMPLATE="${RESTICPROFILE_TIMER_TEMPLATE:-${BACKUP_ETC_DIR}/resticprofile-timer.tmpl}"
 SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 
-DEFAULT_TARGETS="/var/log,/etc"
+DEFAULT_TARGETS="/data/backup,/etc"
 DEFAULT_EXCLUDES="/tmp/*,/var/tmp/*"
 DEFAULT_KEEP_DAILY=7
 DEFAULT_KEEP_WEEKLY=4
@@ -138,7 +138,7 @@ init_config_schema() {
   # 글로벌/공통 속성
   register_config_field "profile_name" "BACKUP_PROFILE_NAME" "" "validate_profile_name"
   register_config_field "password" "RESTIC_PASSWORD" "" "validate_not_empty"
-  register_config_field "targets" "BACKUP_TARGETS" "/var/log,/etc" "validate_not_empty"
+  register_config_field "targets" "BACKUP_TARGETS" "/data/backup,/etc" "validate_not_empty"
   register_config_field "excludes_csv" "BACKUP_EXCLUDES" "" ""
   register_config_field "keep_daily" "KEEP_DAILY" "7" "validate_positive_int"
   register_config_field "keep_weekly" "KEEP_WEEKLY" "4" "validate_positive_int"
@@ -510,6 +510,10 @@ ensure_backup_dir_migration() {
       fi
     fi
   done
+
+  # /data/backup 디렉토리 보장 및 ISMS 대응 700 권한 설정
+  mkdir -p "${TEST_ROOT:-}/data/backup"
+  chmod 700 "${TEST_ROOT:-}/data/backup"
 }
 
 require_backup_env() {
@@ -1993,6 +1997,9 @@ self_install_copy() {
 ensure_restic_dir() {
   mkdir -p "$RESTIC_ETC_DIR"
   chmod 700 "$RESTIC_ETC_DIR"
+  # /data/backup 디렉토리 보장 및 ISMS 대응 700 권한 설정
+  mkdir -p "${TEST_ROOT:-}/data/backup"
+  chmod 700 "${TEST_ROOT:-}/data/backup"
 }
 
 write_secure_file() {
@@ -5984,31 +5991,112 @@ cmd_upgrade() {
   fi
   require_backup_env
 
+  # 1. 설정 백업본 자동 생성
+  local timestamp
+  timestamp=$(date +%Y%m%d_%H%M%S)
+  local backup_dest="${BACKUP_ENV_FILE}.${timestamp}.bak"
+  log_info "기존 설정을 안전하게 백업합니다: ${backup_dest}"
+  cp "$BACKUP_ENV_FILE" "$backup_dest"
+  chmod 600 "$backup_dest"
+
+  # 2. 기존 설정 로드 및 resolved 연관 배열 구성
+  declare -A resolved=()
+  resolved[backend]="s3"
+  if [[ -n "${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" || "${RESTIC_REPOSITORY:-}" == rclone:syno_backup* ]]; then
+    resolved[backend]="sftp"
+  fi
+
+  resolved[profile_name]=$(resolve_profile_name)
+  resolved[password]="${RESTIC_PASSWORD:-}"
+  resolved[targets]="${BACKUP_TARGETS:-}"
+  resolved[excludes_csv]="${BACKUP_EXCLUDES:-}"
+  resolved[keep_daily]="${KEEP_DAILY:-7}"
+  resolved[keep_weekly]="${KEEP_WEEKLY:-4}"
+  resolved[keep_monthly]="${KEEP_MONTHLY:-12}"
+
+  resolved[host]="${RCLONE_CONFIG_SYNO_BACKUP_HOST:-}"
+  resolved[port]="${RCLONE_CONFIG_SYNO_BACKUP_PORT:-22}"
+  resolved[user]="${RCLONE_CONFIG_SYNO_BACKUP_USER:-}"
+
+  resolved[endpoint]="${BACKUP_ENDPOINT:-}"
+  resolved[bucket]="${BACKUP_BUCKET:-}"
+  resolved[access_key]="${AWS_ACCESS_KEY_ID:-}"
+  resolved[secret_key]="${AWS_SECRET_ACCESS_KEY:-}"
+
+  resolved[notification_url]="${BACKUP_NOTIFICATION_URL:-}"
+  resolved[notification_type]="${BACKUP_NOTIFICATION_TYPE:-}"
+  resolved[notification_on]="${BACKUP_NOTIFICATION_ON:-both}"
+  resolved[notification_method]="${BACKUP_NOTIFICATION_METHOD:-POST}"
+  resolved[notification_headers]="${BACKUP_NOTIFICATION_HEADERS:-}"
+  resolved[notification_body_success]="${BACKUP_NOTIFICATION_BODY_SUCCESS:-}"
+  resolved[notification_body_failure]="${BACKUP_NOTIFICATION_BODY_FAILURE:-}"
+
+  resolved[audit_tester]="${BACKUP_AUDIT_TESTER:-}"
+  resolved[audit_ciso]="${BACKUP_AUDIT_CISO:-}"
+  resolved[audit_rto]="${BACKUP_AUDIT_RTO:-}"
+
+  resolved[db_type]="${BACKUP_DB_TYPE:-}"
+  resolved[db_command]="${BACKUP_DB_COMMAND:-}"
+  resolved[db_filename]="${BACKUP_DB_FILENAME:-}"
+  resolved[db_schedule]="${BACKUP_DB_SCHEDULE:-}"
+  resolved[keep_db_daily]="${KEEP_DB_DAILY:-}"
+  resolved[keep_db_weekly]="${KEEP_DB_WEEKLY:-}"
+  resolved[keep_db_monthly]="${KEEP_DB_MONTHLY:-}"
+
+  # 3. 누락된 신버전 필수값 확인 및 보완
+  local targets="${resolved[targets]:-}"
+  local password="${resolved[password]:-}"
+  
+  if [[ -z "$targets" ]]; then
+    if [[ -t 1 ]]; then
+      targets=$(prompt_validated "백업할 대상 경로(쉼표로 구분)를 입력하세요" "$DEFAULT_TARGETS" validate_not_empty)
+    else
+      log_warn "백업 대상(targets)이 누락되어 기본값(${DEFAULT_TARGETS})을 주입합니다."
+      targets="$DEFAULT_TARGETS"
+    fi
+    resolved[targets]="$targets"
+  fi
+
+  if [[ -z "$password" ]]; then
+    if [[ -t 1 ]]; then
+      password=$(prompt_validated "Restic 저장소 비밀번호를 입력하세요" "" validate_not_empty)
+    else
+      die "Restic 비밀번호(password)가 누락되어 비대화형 업그레이드를 중단합니다."
+    fi
+    resolved[password]="$password"
+  fi
+
+  # 4. 신버전 규격으로 설정 및 관련 에셋 저장
+  log_info "설정 파일을 신규 경로 및 포맷으로 영구 업그레이드합니다..."
+  if ! save_profile_config resolved >/dev/null; then
+    die "설정 파일 및 프로필 저장 중 오류가 발생했습니다."
+  fi
+
+  # 5. 기존 레거시 로컬 데이터 이관 진행
   local -A opts=()
   parse_opts_into opts "legacy-dir:" -- "$@"
   
   local legacy_dir="${opts[legacy-dir]:-/var/restic-local}"
 
-  if [[ ! -d "$legacy_dir" || ! -f "${legacy_dir}/config" ]]; then
+  if [[ -d "$legacy_dir" && -f "${legacy_dir}/config" ]]; then
+    log_info "레거시 로컬 백업 저장소(${legacy_dir})를 발견했습니다. 원격지로 데이터 이관을 시작합니다..."
+
+    local legacy_password="${RESTIC_PASSWORD}"
+
+    local copy_status=0
+    (
+      restic copy --from-repo "$legacy_dir" --from-password-file <(echo -n "$legacy_password") || exit 1
+    ) || copy_status=1
+
+    if (( copy_status )); then
+      die "로컬 백업 데이터를 원격지로 이관하는 도중 오류가 발생했습니다."
+    fi
+
+    log_info "데이터 이관이 완료되었습니다."
+    log_info "로컬 백업 데이터(${legacy_dir})를 삭제하여 디스크 공간을 정리하는 것을 권장합니다: rm -rf ${legacy_dir}"
+  else
     log_info "이관할 로컬 데이터가 없습니다. (레거시 경로: ${legacy_dir} 미존재)"
-    return 0
   fi
-
-  log_info "레거시 로컬 백업 저장소(${legacy_dir})를 발견했습니다. 원격지로 데이터 이관을 시작합니다..."
-
-  local legacy_password="${RESTIC_PASSWORD}"
-
-  local copy_status=0
-  (
-    restic copy --from-repo "$legacy_dir" --from-password-file <(echo -n "$legacy_password") || exit 1
-  ) || copy_status=1
-
-  if (( copy_status )); then
-    die "로컬 백업 데이터를 원격지로 이관하는 도중 오류가 발생했습니다."
-  fi
-
-  log_info "데이터 이관이 완료되었습니다."
-  log_info "로컬 백업 데이터(${legacy_dir})를 삭제하여 디스크 공간을 정리하는 것을 권장합니다: rm -rf ${legacy_dir}"
 }
 
 help_upgrade() {
@@ -6084,22 +6172,22 @@ cmd_wizard() {
   if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
     setup_colors
     printf '\n%b%b⚙  백업 대상 경로 설정 (Backup Target Paths)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
-    printf '%b보안 컴플라이언스(ISMS/ISO 27001) 기준에 부합하기 위해, 중요 설정 파일(/etc) 및 감사 추적 로그(/var/log)가 기본 백업 경로로 지정되어 있습니다.%b\n' "$C_DIM" "$C_RESET"
+    printf '%b보안 컴플라이언스(ISMS/ISO 27001) 기준에 부합하기 위해, 중요 설정 파일(/etc) 및 중요 업무 데이터(/data/backup)가 기본 백업 경로로 지정되어 있습니다.%b\n' "$C_DIM" "$C_RESET"
     printf '  * %b/etc%b: 사용자 계정, 권한 설정 및 네트워크 구성을 보존하여 설정의 무결성을 입증합니다.\n' "$C_BOLD" "$C_RESET"
-    printf '  * %b/var/log%b: 시스템 로그인 및 보안 감사 로그를 보존하여 침해사고 예방 및 사후 조사를 지원합니다.\n\n' "$C_BOLD" "$C_RESET"
-    printf '%b기본 경로(/var/log, /etc)를 백업 대상에 포함하시겠습니까? [%bY%b/n]: %b' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_RESET"
+    printf '  * %b/data/backup%b: 정보 유출 방지 및 중요 업무 데이터 보존을 지원합니다.\n\n' "$C_BOLD" "$C_RESET"
+    printf '%b기본 경로(/data/backup, /etc)를 백업 대상에 포함하시겠습니까? [%bY%b/n]: %b' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_RESET"
   else
     printf '\n--- 백업 대상 경로 설정 ---\n'
-    printf '보안 컴플라이언스(ISMS/ISO 27001) 기준에 부합하기 위해, 중요 설정 파일(/etc) 및 감사 추적 로그(/var/log)가 기본 백업 경로로 지정되어 있습니다.\n'
+    printf '보안 컴플라이언스(ISMS/ISO 27001) 기준에 부합하기 위해, 중요 설정 파일(/etc) 및 중요 업무 데이터(/data/backup)가 기본 백업 경로로 지정되어 있습니다.\n'
     printf '  * /etc: 사용자 계정, 권한 설정 및 네트워크 구성을 보존하여 설정의 무결성을 입증합니다.\n'
-    printf '  * /var/log: 시스템 로그인 및 보안 감사 로그를 보존하여 침해사고 예방 및 사후 조사를 지원합니다.\n\n'
-    printf '기본 경로(/var/log, /etc)를 백업 대상에 포함하시겠습니까? [Y/n]: '
+    printf '  * /data/backup: 정보 유출 방지 및 중요 업무 데이터 보존을 지원합니다.\n\n'
+    printf '기본 경로(/data/backup, /etc)를 백업 대상에 포함하시겠습니까? [Y/n]: '
   fi
   local use_default_targets; read -r use_default_targets
 
   local final_targets=""
   if [[ -z "$use_default_targets" || "$use_default_targets" =~ ^[Yy]$ ]]; then
-    final_targets="/var/log,/etc"
+    final_targets="/data/backup,/etc"
   fi
 
   local additional_targets=""
@@ -6159,10 +6247,10 @@ cmd_wizard() {
   while [[ -z "$final_targets" ]]; do
     if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
       printf '%b경고: 백업 대상 경로가 비어 있습니다. 최소 한 개 이상의 경로를 지정해야 합니다.%b\n' "$C_RED" "$C_RESET"
-      printf '%b백업할 디렉터리 경로를 입력하세요 (예: /var/log): %b' "$C_CYAN" "$C_RESET"
+      printf '%b백업할 디렉터리 경로를 입력하세요 (예: /data/backup): %b' "$C_CYAN" "$C_RESET"
     else
       printf '경고: 백업 대상 경로가 비어 있습니다. 최소 한 개 이상의 경로를 지정해야 합니다.\n'
-      printf '백업할 디렉터리 경로를 입력하세요 (예: /var/log): '
+      printf '백업할 디렉터리 경로를 입력하세요 (예: /data/backup): '
     fi
     read -r final_targets
   done
