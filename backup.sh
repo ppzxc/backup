@@ -5115,11 +5115,11 @@ cmd_audit() {
   local date_suffix; date_suffix=$(date +%Y%m%d)
   if (( report )) && [[ -z "$report_file" ]]; then
     if (( daily )); then
-      report_file="/var/log/restic-backup/daily_backup_audit_report_${date_suffix}.txt"
+      report_file="/data/backup/reports/daily_backup_audit_report_${date_suffix}.txt"
     elif (( restore_drill )); then
-      report_file="/var/log/restic-backup/restore_drill_report_${date_suffix}.txt"
+      report_file="/data/backup/reports/restore_drill_report_${date_suffix}.txt"
     else
-      report_file="/var/log/restic-backup/audit_report.txt"
+      report_file="/data/backup/reports/audit_report.txt"
     fi
   fi
 
@@ -5398,7 +5398,7 @@ except Exception as e:
   fi
 
   if (( report )) && [[ -z "$report_file" ]]; then
-    report_file="/var/log/restic-backup/audit_report.txt"
+    report_file="/data/backup/reports/audit_report.txt"
   fi
 
   local profile_name; profile_name=$(resolve_profile_name)
@@ -6706,7 +6706,7 @@ ISMS 및 ISO 27001 등 보안 컴플라이언스 대응을 위한 종합 백업 
   backup.sh audit
 
   # 화면에 출력하면서 지정된 기본 경로에 보고서 파일 동시 저장
-  # (텍스트: /var/log/restic-backup/audit_report.txt, JSON: /var/log/restic-backup/audit_report.json, HTML: /var/log/restic-backup/audit_report.html)
+  # (텍스트: /data/backup/reports/audit_report.txt, JSON: /data/backup/reports/audit_report.json, HTML: /data/backup/reports/audit_report.html)
   backup.sh audit --report
 
   # 일일 백업 감사 결과 보고서를 자동으로 생성 및 저장

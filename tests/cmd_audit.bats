@@ -205,9 +205,9 @@ ENV
 
 @test "cmd_audit --daily --report writes date-stamped reports" {
   local date_suffix; date_suffix=$(date +%Y%m%d)
-  local r_file="${TEST_ROOT}/var/log/restic-backup/daily_backup_audit_report_${date_suffix}.txt"
-  local j_file="${TEST_ROOT}/var/log/restic-backup/daily_backup_audit_report_${date_suffix}.json"
-  local h_file="${TEST_ROOT}/var/log/restic-backup/daily_backup_audit_report_${date_suffix}.html"
+  local r_file="${TEST_ROOT}/data/backup/reports/daily_backup_audit_report_${date_suffix}.txt"
+  local j_file="${TEST_ROOT}/data/backup/reports/daily_backup_audit_report_${date_suffix}.json"
+  local h_file="${TEST_ROOT}/data/backup/reports/daily_backup_audit_report_${date_suffix}.html"
   
   run cmd_audit --daily --report --report-file "$r_file"
   [ "$status" -eq 0 ]
@@ -232,9 +232,9 @@ ENV
 
 @test "cmd_audit --restore-drill --report writes date-stamped reports" {
   local date_suffix; date_suffix=$(date +%Y%m%d)
-  local r_file="${TEST_ROOT}/var/log/restic-backup/restore_drill_report_${date_suffix}.txt"
-  local j_file="${TEST_ROOT}/var/log/restic-backup/restore_drill_report_${date_suffix}.json"
-  local h_file="${TEST_ROOT}/var/log/restic-backup/restore_drill_report_${date_suffix}.html"
+  local r_file="${TEST_ROOT}/data/backup/reports/restore_drill_report_${date_suffix}.txt"
+  local j_file="${TEST_ROOT}/data/backup/reports/restore_drill_report_${date_suffix}.json"
+  local h_file="${TEST_ROOT}/data/backup/reports/restore_drill_report_${date_suffix}.html"
   
   run cmd_audit --restore-drill --report --report-file "$r_file"
   [ "$status" -eq 0 ]
