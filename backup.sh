@@ -420,17 +420,17 @@ setup_colors() {
 
 log_info() {
   printf '%s\n' "$1"
-  command -v logger >/dev/null 2>&1 && logger -t restic-backup -- "$1" || true
+  command -v logger >/dev/null 2>&1 && logger -t backup -- "$1" || true
 }
 
 log_error() {
   printf 'ERROR: %s\n' "$1" >&2
-  command -v logger >/dev/null 2>&1 && logger -t restic-backup -- "ERROR: $1" || true
+  command -v logger >/dev/null 2>&1 && logger -t backup -- "ERROR: $1" || true
 }
 
 log_warn() {
   printf 'WARNING: %s\n' "$1" >&2
-  command -v logger >/dev/null 2>&1 && logger -t restic-backup -- "WARNING: $1" || true
+  command -v logger >/dev/null 2>&1 && logger -t backup -- "WARNING: $1" || true
 }
 
 die() {
