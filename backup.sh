@@ -463,7 +463,58 @@ resolve_value() {
   return 1
 }
 
+ensure_backup_dir_migration() {
+  local legacy_dir="/etc/restic"
+
+  if [[ ! -d "$BACKUP_ETC_DIR" && -d "$legacy_dir" ]]; then
+    log_info "기존 설정 디렉터리(${legacy_dir})에서 새 경로(${BACKUP_ETC_DIR})로 설정을 자동 이관합니다..."
+    
+    mkdir -p "$BACKUP_ETC_DIR"
+    chmod 700 "$BACKUP_ETC_DIR"
+
+    if [[ -f "${legacy_dir}/backup.env" ]]; then
+      cp "${legacy_dir}/backup.env" "${BACKUP_ENV_FILE}"
+      chmod 600 "${BACKUP_ENV_FILE}"
+    fi
+
+    if [[ -f "${legacy_dir}/backup_key" ]]; then
+      cp "${legacy_dir}/backup_key" "${BACKUP_SSH_KEY}"
+      chmod 600 "${BACKUP_SSH_KEY}"
+    fi
+
+    if [[ -f "${legacy_dir}/resticprofile-service.tmpl" ]]; then
+      cp "${legacy_dir}/resticprofile-service.tmpl" "${BACKUP_UNIT_TEMPLATE}"
+      chmod 644 "${BACKUP_UNIT_TEMPLATE}"
+    fi
+    if [[ -f "${legacy_dir}/resticprofile-timer.tmpl" ]]; then
+      cp "${legacy_dir}/resticprofile-timer.tmpl" "${BACKUP_TIMER_TEMPLATE}"
+      chmod 644 "${BACKUP_TIMER_TEMPLATE}"
+    fi
+    if [[ -f "${legacy_dir}/profiles.yaml" ]]; then
+      cp "${legacy_dir}/profiles.yaml" "${BACKUP_PROFILE_CONFIG_FILE}"
+      chmod 600 "${BACKUP_PROFILE_CONFIG_FILE}"
+    fi
+    
+    log_info "설정 이관이 완료되었습니다."
+  fi
+
+  local legacy_timer
+  for legacy_timer in restic-audit-daily.timer restic-audit-restore-drill.timer; do
+    if command -v systemctl >/dev/null 2>&1; then
+      if systemctl is-active "$legacy_timer" >/dev/null 2>&1 || systemctl is-enabled "$legacy_timer" >/dev/null 2>&1; then
+        log_info "레거시 systemd 타이머(${legacy_timer})를 정지 및 제거합니다..."
+        systemctl disable --now "$legacy_timer" 2>/dev/null || true
+        rm -f "/etc/systemd/system/${legacy_timer}"
+        rm -f "/etc/systemd/system/${legacy_timer%.timer}.service"
+        systemctl daemon-reload 2>/dev/null || true
+      fi
+    fi
+  done
+}
+
 require_backup_env() {
+  ensure_backup_dir_migration
+
   if [[ ! -f "$BACKUP_ENV_FILE" ]]; then
     die "$(render_missing_settings_message)"
   fi
