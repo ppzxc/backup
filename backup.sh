@@ -6467,7 +6467,7 @@ EOF
 
 help_setting() {
   cat <<'EOF'
-초기 백업 환경 설정(/etc/restic/backup.env)을 수동으로 등록하고 보안 강화를 위한 안전한 파일 권한(600)을 강제합니다.
+초기 백업 환경 설정(/etc/backup/backup.env)을 수동으로 등록하고 보안 강화를 위한 안전한 파일 권한(600)을 강제합니다.
 
 사용법:
   backup.sh setting --backend <s3|sftp> [옵션...]
@@ -6670,7 +6670,7 @@ help_uninstall() {
   # 정기 백업 스케줄을 비활성화하고 설치된 스크립트 및 바이너리만 삭제 (설정은 보존)
   backup.sh uninstall
 
-  # 관련 설정 파일(/etc/restic), 사용자 캐시, 바이너리 전체를 삭제하여 데이터를 완전 초기화
+  # 관련 설정 파일(/etc/backup), 사용자 캐시, 바이너리 전체를 삭제하여 데이터를 완전 초기화
   backup.sh uninstall --purge
 
 플래그 (Flags):
@@ -6721,7 +6721,7 @@ EOF
 
 help_config() {
   cat <<'EOF'
-기존 생성되어 있는 백업 설정(/etc/restic/backup.env)을 부분 수정하거나 최신화합니다. 백엔드(S3/SFTP) 구성을 자동 판단하며, 변경 완료 후 스케줄에 따른 systemd 타이머 설정 및 resticprofile 설정을 실시간 자동 동기화합니다.
+기존 생성되어 있는 백업 설정(/etc/backup/backup.env)을 부분 수정하거나 최신화합니다. 백엔드(S3/SFTP) 구성을 자동 판단하며, 변경 완료 후 스케줄에 따른 systemd 타이머 설정 및 resticprofile 설정을 실시간 자동 동기화합니다.
 
 사용법:
   backup.sh config [옵션...]
