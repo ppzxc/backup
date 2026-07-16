@@ -71,3 +71,52 @@ ENV
   [[ "$output" == *"[백업 성공]"* ]]
   [[ "$output" == *"대상 호스트"* ]]
 }
+
+@test "cmd_upgrade creates a backup copy of backup.env and migrates legacy variables" {
+  cat > "$BACKUP_ENV_FILE" <<'ENV'
+export BACKUP_EXCLUDE_PATHS="/tmp/*"
+export RESTIC_REPOSITORY="s3:https://s3.amazonaws.com/my-bucket/host"
+export RESTIC_PASSWORD="secret"
+ENV
+
+  source "${BATS_TEST_DIRNAME}/../backup.sh"
+  
+  run main upgrade
+  [ "$status" -eq 0 ]
+
+  # 백업본 생성 확인
+  local backups
+  backups=$(find "$RESTIC_ETC_DIR" -name "backup.env.*.bak")
+  [ -n "$backups" ]
+  
+  # 백업본 권한 확인
+  local backup_file
+  for backup_file in $backups; do
+    local perm
+    perm=$(stat -c "%a" "$backup_file")
+    [ "$perm" = "600" ]
+  done
+
+  # 신규 포맷으로 변환 확인 (BACKUP_EXCLUDE_PATHS -> BACKUP_EXCLUDES)
+  run config_get "BACKUP_EXCLUDES" "$BACKUP_ENV_FILE"
+  [ "$output" = "/tmp/*" ]
+}
+
+@test "/data/backup is guaranteed with 700 permissions upon script initialization" {
+  local target_dir="${TEST_ROOT}/data/backup"
+  [ ! -d "$target_dir" ]
+
+  cat > "$BACKUP_ENV_FILE" <<'ENV'
+export RESTIC_REPOSITORY="s3:https://s3.amazonaws.com/my-bucket/host"
+export RESTIC_PASSWORD="secret"
+ENV
+
+  source "${BATS_TEST_DIRNAME}/../backup.sh"
+  run require_backup_env
+  [ "$status" -eq 0 ]
+
+  [ -d "$target_dir" ]
+  local perm
+  perm=$(stat -c "%a" "$target_dir")
+  [ "$perm" = "700" ]
+}

@@ -6018,8 +6018,21 @@ cmd_upgrade() {
   resolved[port]="${RCLONE_CONFIG_SYNO_BACKUP_PORT:-22}"
   resolved[user]="${RCLONE_CONFIG_SYNO_BACKUP_USER:-}"
 
-  resolved[endpoint]="${BACKUP_ENDPOINT:-}"
-  resolved[bucket]="${BACKUP_BUCKET:-}"
+  local ep_val="${BACKUP_ENDPOINT:-}"
+  local bucket_val="${BACKUP_BUCKET:-}"
+  if [[ "${resolved[backend]}" == "s3" && -n "${RESTIC_REPOSITORY:-}" ]]; then
+    if [[ "${RESTIC_REPOSITORY}" == s3:* ]]; then
+      local s3_url="${RESTIC_REPOSITORY#s3:}"
+      s3_url="${s3_url%/}"
+      s3_url="${s3_url%/*}"
+      local b_name="${s3_url##*/}"
+      local ep_name="${s3_url%/*}"
+      ep_val="${ep_val:-$ep_name}"
+      bucket_val="${bucket_val:-$b_name}"
+    fi
+  fi
+  resolved[endpoint]="$ep_val"
+  resolved[bucket]="$bucket_val"
   resolved[access_key]="${AWS_ACCESS_KEY_ID:-}"
   resolved[secret_key]="${AWS_SECRET_ACCESS_KEY:-}"
 
@@ -6085,6 +6098,10 @@ cmd_upgrade() {
 
     local copy_status=0
     (
+      export RESTIC_PASSWORD="${RESTIC_PASSWORD:-}"
+      export RESTIC_REPOSITORY="${RESTIC_REPOSITORY:-}"
+      export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}"
+      export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}"
       restic copy --from-repo "$legacy_dir" --from-password-file <(echo -n "$legacy_password") || exit 1
     ) || copy_status=1
 

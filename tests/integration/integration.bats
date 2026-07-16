@@ -3,24 +3,30 @@
 # Setup helper for executing commands in the 'app' container
 dexec() {
   local cmd="$1"
-  if [[ "$cmd" == *"source /etc/restic/backup.env"* ]]; then
-    local subcmd="${cmd#*source /etc/restic/backup.env && }"
+  if [[ "$cmd" == *"source /etc/backup/backup.env"* ]]; then
+    local subcmd="${cmd#*source /etc/backup/backup.env && }"
     docker compose -f "$BATS_TEST_DIRNAME/docker-compose.yml" exec -T app bash -c "
-      if [[ -f /etc/restic/backup.env ]]; then
+      if [[ -f /etc/backup/backup.env ]]; then
         while IFS= read -r line || [[ -n \"\$line\" ]]; do
           [[ \"\$line\" =~ ^[[:space:]]*# ]] && continue
           [[ \"\$line\" =~ ^[[:space:]]*\$ ]] && continue
+          line=\"\${line#export }\"
           if [[ \"\$line\" =~ ^([A-Za-z_][A-Za-z0-9_]*)=\'(.*)\'\$ ]]; then
             k=\"\${BASH_REMATCH[1]}\"
             v=\"\${BASH_REMATCH[2]}\"
             v=\"\${v//\\'\\'/\\'}\"
+            export \"\$k\"=\"\$v\"
+          elif [[ \"\$line\" =~ ^([A-Za-z_][A-Za-z0-9_]*)=\"(.*)\"\$ ]]; then
+            k=\"\${BASH_REMATCH[1]}\"
+            v=\"\${BASH_REMATCH[2]}\"
+            v=\"\${v//\\\"\\\"/\\\"}\"
             export \"\$k\"=\"\$v\"
           elif [[ \"\$line\" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)\$ ]]; then
             k=\"\${BASH_REMATCH[1]}\"
             v=\"\${BASH_REMATCH[2]}\"
             export \"\$k\"=\"\$v\"
           fi
-        done < /etc/restic/backup.env
+        done < /etc/backup/backup.env
       fi
       $subcmd
     "
@@ -37,7 +43,7 @@ dc_exec() {
 # Helper to register public SSH keys and configure backup folder permissions inside SFTP container
 register_sftp_keys() {
   local user="$1"
-  dc_exec exec -T app cat /etc/restic/backup_key.pub | \
+  dc_exec exec -T app cat /etc/backup/backup_key.pub | \
     dc_exec exec -T sftp sh -c "
       mkdir -p /home/${user}/.ssh
       cat > /home/${user}/.ssh/authorized_keys
@@ -67,7 +73,7 @@ teardown_file() {
 
 setup() {
   # Clean only the generated settings, keys, and profiles (preserving templates)
-  dexec "rm -f /etc/restic/backup.env /etc/restic/profiles.yaml /etc/restic/backup_key /etc/restic/backup_key.pub"
+  dexec "rm -f /etc/backup/backup.env /etc/backup/profiles.yaml /etc/backup/backup_key /etc/backup/backup_key.pub"
 
   # Clean leftover systemd unit files from previous runs
   dexec "rm -f /etc/systemd/system/resticprofile-backup@profile-*.service /etc/systemd/system/resticprofile-backup@profile-*.timer"
@@ -102,7 +108,7 @@ setup() {
   dexec "bash backup.sh run"
 
   # Verify snapshots
-  run dexec "source /etc/restic/backup.env && restic snapshots --json"
+  run dexec "source /etc/backup/backup.env && restic snapshots --json"
   [ "$status" -eq 0 ]
   [[ "$output" == *"hostname"* ]]
 
@@ -140,7 +146,7 @@ setup() {
   dexec "bash backup.sh run"
 
   # Verify snapshots
-  run dexec "source /etc/restic/backup.env && restic snapshots --json"
+  run dexec "source /etc/backup/backup.env && restic snapshots --json"
   [ "$status" -eq 0 ]
   [[ "$output" == *"hostname"* ]]
 
@@ -183,7 +189,7 @@ setup() {
     --new-password pass-sftp-to-s3 --force"
 
   # 4. Verify migrated S3 snapshots
-  run dexec "source /etc/restic/backup.env && restic snapshots --json"
+  run dexec "source /etc/backup/backup.env && restic snapshots --json"
   [ "$status" -eq 0 ]
   [[ "$output" == *"hostname"* ]]
 }
@@ -202,7 +208,7 @@ setup() {
 
   # 2. Setup SFTP target key and directory
   # Generate SSH key pair in app container first (since S3 source doesn't use/generate it)
-  dexec "ssh-keygen -t ed25519 -N '' -f /etc/restic/backup_key"
+  dexec "ssh-keygen -t ed25519 -N '' -f /etc/backup/backup_key"
 
   register_sftp_keys "backup_migrate"
 
@@ -215,7 +221,7 @@ setup() {
     --new-password pass-s3-to-sftp --force"
 
   # 4. Verify migrated SFTP snapshots
-  run dexec "source /etc/restic/backup.env && restic snapshots --json"
+  run dexec "source /etc/backup/backup.env && restic snapshots --json"
   [ "$status" -eq 0 ]
   [[ "$output" == *"hostname"* ]]
 }
@@ -244,7 +250,7 @@ setup() {
     --new-password pass-sftp-to-sftp --force"
 
   # 4. Verify migrated SFTP snapshots
-  run dexec "source /etc/restic/backup.env && restic snapshots --json"
+  run dexec "source /etc/backup/backup.env && restic snapshots --json"
   [ "$status" -eq 0 ]
   [[ "$output" == *"hostname"* ]]
 }
@@ -271,7 +277,7 @@ setup() {
     --new-password pass-s3-to-s3 --force"
 
   # 4. Verify migrated S3 snapshots
-  run dexec "source /etc/restic/backup.env && restic snapshots --json"
+  run dexec "source /etc/backup/backup.env && restic snapshots --json"
   [ "$status" -eq 0 ]
   [[ "$output" == *"hostname"* ]]
 }
@@ -432,7 +438,7 @@ seed_databases() {
   dexec "bash backup.sh upgrade --legacy-dir '/tmp/legacy-local'"
 
   # Verify migrated snapshot in destination S3 repository
-  run dexec "source /etc/restic/backup.env && restic snapshots --json"
+  run dexec "source /etc/backup/backup.env && restic snapshots --json"
   [ "$status" -eq 0 ]
   [[ "$output" == *"/tmp/legacy_file.txt"* ]]
 }
@@ -461,15 +467,15 @@ seed_databases() {
     --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
     --new-password pass-migrated-primary --force"
 
-  run dexec "source /etc/restic/backup.env && restic snapshots --json"
+  run dexec "source /etc/backup/backup.env && restic snapshots --json"
   [ "$status" -eq 0 ]
   [[ "$output" == *"hostname"* ]]
 
-  run dexec "grep -q 'SECONDARY_BACKEND='''s3'''' /etc/restic/backup.env"
+  run dexec "grep -q 'SECONDARY_BACKEND=\"s3\"' /etc/backup/backup.env"
   [ "$status" -eq 0 ]
-  run dexec "grep -q 'SECONDARY_RESTIC_REPOSITORY='''s3:http://minio:9000/restic-test-secondary-migrate' /etc/restic/backup.env"
+  run dexec "grep -q 'SECONDARY_RESTIC_REPOSITORY=\"s3:http://minio:9000/restic-test-secondary-migrate' /etc/backup/backup.env"
   [ "$status" -eq 0 ]
-  run dexec "grep -q 'SECONDARY_AWS_ACCESS_KEY_ID='''AKIAIOSFODNN7EXAMPLE'''' /etc/restic/backup.env"
+  run dexec "grep -q 'SECONDARY_AWS_ACCESS_KEY_ID=\"AKIAIOSFODNN7EXAMPLE\"' /etc/backup/backup.env"
   [ "$status" -eq 0 ]
 }
 
