@@ -413,6 +413,56 @@ ENV
   [[ "$output" == *"데이터베이스(mysql) 복원 무결성 검증: 성공"* ]]
 }
 
+@test "render_audit_report_unified generates general JSON and daily text reports correctly" {
+  declare -A general_data=(
+    [backend]="sftp"
+    [on_calendar]="*-*-* 02:00:00"
+    [timer_enabled]="enabled"
+    [timer_active]="active"
+    [next_run]="Thu 2026-07-16 02:00:00 KST"
+    [etc_perm]="700"
+    [env_perm]="600"
+  )
+
+  run render_audit_report_unified "general" "json" general_data
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"\"etc_restic_dir_permission\": \"700\""* ]]
+
+  declare -A daily_data=(
+    [cur_time]="2026-07-16 17:00:00 KST"
+    [hostname]="test-host"
+    [tester]="test-tester"
+    [backend]="s3"
+    [repo]="s3:https://s3.amazonaws.com/test-bucket"
+    [targets]="/etc"
+    [config_daily]="7"
+    [actual_daily]="10"
+    [config_daily_status]="만족"
+    [actual_daily_status]="만족"
+    [config_weekly]="4"
+    [actual_weekly]="5"
+    [config_weekly_status]="만족"
+    [actual_weekly_status]="만족"
+    [config_monthly]="12"
+    [actual_monthly]="15"
+    [config_monthly_status]="만족"
+    [actual_monthly_status]="만족"
+    [etc_dir]="/etc/backup"
+    [etc_perm]="700"
+    [etc_safe_str]="안전"
+    [env_file]="/etc/backup/backup.env"
+    [env_perm]="600"
+    [env_safe_str]="안전"
+    [check_status]="SUCCESS"
+    [snapshot_table]="ID Time Host Paths"
+  )
+
+  run render_audit_report_unified "daily" "txt" daily_data
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[보안 감사 증적] 일일 백업 수행 결과"* ]]
+  [[ "$output" == *"- 대상 서버 호스트: test-host"* ]]
+}
+
 
 
 

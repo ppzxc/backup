@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.39"
+BACKUP_SCRIPT_VERSION="0.0.40"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -3473,23 +3473,94 @@ run_restore_drill() {
   return 0
 }
 
+render_audit_report_unified() {
+  local report_type="$1"
+  local format="$2"
+  local -n _ra_ref="$3"
+  
+  case "$report_type" in
+    restore_drill)
+      case "$format" in
+        txt|markdown)
+          render_restore_drill_txt _ra_ref
+          ;;
+        json)
+          render_restore_drill_json _ra_ref
+          ;;
+        html)
+          render_restore_drill_html _ra_ref
+          ;;
+      esac
+      ;;
+    daily)
+      case "$format" in
+        txt)
+          render_daily_txt _ra_ref
+          ;;
+        json)
+          render_daily_json _ra_ref
+          ;;
+        html)
+          render_daily_html _ra_ref
+          ;;
+      esac
+      ;;
+    general)
+      case "$format" in
+        txt)
+          render_general_txt _ra_ref
+          ;;
+        json)
+          render_general_json _ra_ref
+          ;;
+        html)
+          render_general_html _ra_ref
+          ;;
+      esac
+      ;;
+  esac
+}
+
+write_audit_reports() {
+  local -n _war_data="$1"
+  local md_path="$2"
+  
+  local base_path
+  if [[ "$md_path" == *.md ]]; then
+    base_path="${md_path%.md}"
+  elif [[ "$md_path" == *.txt ]]; then
+    base_path="${md_path%.txt}"
+  else
+    base_path="$md_path"
+  fi
+
+  local json_path="${base_path}.json"
+  local html_path="${base_path}.html"
+
+  mkdir -p "$(dirname "$md_path")"
+
+  # txt / markdown
+  render_audit_report_unified "restore_drill" "txt" _war_data > "$md_path"
+  chmod 600 "$md_path"
+
+  # JSON
+  render_audit_report_unified "restore_drill" "json" _war_data > "$json_path"
+  chmod 600 "$json_path"
+
+  # HTML
+  render_audit_report_unified "restore_drill" "html" _war_data > "$html_path"
+  chmod 600 "$html_path"
+}
+
+# Compatibility wrappers
 render_restore_drill_report() {
   if (( $# == 1 )); then
-    # shellcheck disable=SC2178
     local -n _rrd_ref="$1"
-    render_report_markdown _rrd_ref
+    render_audit_report_unified "restore_drill" "txt" _rrd_ref
   else
     local -A _tmp_rrd=(
-      [test_date]="$1"
-      [tester]="$2"
-      [primary_snap]="$3"
-      [primary_snap_time]="$4"
-      [target_dir]="$5"
-      [primary_size]="$6"
-      [primary_elapsed_str]="$7"
-      [rto_minutes]="$9"
-      [ciso]="${10}"
-      [os_name]="${11}"
+      [test_date]="$1" [tester]="$2" [primary_snap]="$3" [primary_snap_time]="$4" [target_dir]="$5"
+      [primary_size]="$6" [primary_elapsed_str]="$7" [rto_minutes]="$9" [ciso]="${10}" [os_name]="${11}"
     )
     if [[ "$8" == "만족" ]]; then
       _tmp_rrd[primary_rto_satisfied]="true"
@@ -3511,36 +3582,198 @@ render_restore_drill_report() {
       _tmp_rrd[db_type]="${17}"
       _tmp_rrd[db_valid]="${18:-0}"
     fi
-    render_report_markdown _tmp_rrd
+    render_audit_report_unified "restore_drill" "txt" _tmp_rrd
   fi
 }
 
 render_report_markdown() {
-  # nameref를 통한 연관 배열 키 동적 할당으로 정적 분석기 미인식 우회
-  # shellcheck disable=SC2154
-  # shellcheck disable=SC2178  # nameref to caller's associative array
-  local -n _rrd="$1"
-  local test_date="${_rrd[test_date]:-}"
-  local tester="${_rrd[tester]:-}"
-  local ciso="${_rrd[ciso]:-}"
-  local rto="${_rrd[rto_minutes]:-120}"
-  local p_snap="${_rrd[primary_snap]:-}"
-  local p_time="${_rrd[primary_snap_time]:-}"
-  local p_size="${_rrd[primary_size]:-0 B}"
-  local p_elapsed_str="${_rrd[primary_elapsed_str]:-0초}"
-  local p_ok="${_rrd[primary_rto_satisfied]:-false}"
+  local -n _ref_md="$1"
+  render_audit_report_unified "restore_drill" "txt" _ref_md
+}
+
+render_report_json() {
+  local -n _ref_js="$1"
+  render_audit_report_unified "restore_drill" "json" _ref_js
+}
+
+render_restore_drill_report_json() {
+  if (( $# == 1 )); then
+    local -n _rrj_ref="$1"
+    render_audit_report_unified "restore_drill" "json" _rrj_ref
+  else
+    local -A _tmp_rrj=(
+      [test_date]="$1" [tester]="$2" [primary_snap]="$3" [primary_snap_time]="$4" [target_dir]="$5"
+      [primary_size]="$6" [primary_elapsed_seconds]="$7" [primary_elapsed_str]="$8" [rto_minutes]="$9" [ciso]="${11}"
+    )
+    if [[ "${10}" == "만족" ]]; then
+      _tmp_rrj[primary_rto_satisfied]="true"
+    else
+      _tmp_rrj[primary_rto_satisfied]="false"
+    fi
+    if [[ -n "${12:-}" ]]; then
+      _tmp_rrj[secondary_snap]="${12}"
+      _tmp_rrj[secondary_snap_time]="${13}"
+      _tmp_rrj[secondary_size]="${14}"
+      _tmp_rrj[secondary_elapsed_seconds]="${15}"
+      _tmp_rrj[secondary_elapsed_str]="${16}"
+      if [[ "${17}" == "만족" ]]; then
+        _tmp_rrj[secondary_rto_satisfied]="true"
+      else
+        _tmp_rrj[secondary_rto_satisfied]="false"
+      fi
+    fi
+    if [[ -n "${18:-}" ]]; then
+      _tmp_rrj[db_type]="${18}"
+      _tmp_rrj[db_snap]="${19}"
+      _tmp_rrj[db_snap_time]="${20}"
+      _tmp_rrj[db_valid]="${21:-0}"
+    fi
+    render_audit_report_unified "restore_drill" "json" _tmp_rrj
+  fi
+}
+
+render_restore_drill_report_html() {
+  if (( $# == 1 )); then
+    local -n _rr_html="$1"
+    render_audit_report_unified "restore_drill" "html" _rr_html
+  else
+    local -A _tmp_html=(
+      [test_date]="$1" [tester]="$2" [primary_snap]="$3" [primary_snap_time]="$4" [target_dir]="$5"
+      [primary_size]="$6" [primary_elapsed_str]="$7" [rto_minutes]="$8" [ciso]="${10}" [os_name]="${11}"
+    )
+    if [[ "$9" == "만족" ]]; then
+      _tmp_html[primary_rto_satisfied]="true"
+    else
+      _tmp_html[primary_rto_satisfied]="false"
+    fi
+    if [[ -n "${12:-}" ]]; then
+      _tmp_html[secondary_snap]="${12}"
+      _tmp_html[secondary_snap_time]="${13}"
+      _tmp_html[secondary_size]="${14}"
+      _tmp_html[secondary_elapsed_str]="${15}"
+      if [[ "${16}" == "만족" ]]; then
+        _tmp_html[secondary_rto_satisfied]="true"
+      else
+        _tmp_html[secondary_rto_satisfied]="false"
+      fi
+    fi
+    if [[ -n "${17:-}" ]]; then
+      _tmp_html[db_type]="${17}"
+      _tmp_html[db_valid]="${18:-0}"
+    fi
+    render_audit_report_unified "restore_drill" "html" _tmp_html
+  fi
+}
+
+render_daily_audit_report() {
+  if (( $# == 1 )); then
+    local -n _ref_da="$1"
+    render_audit_report_unified "daily" "txt" _ref_da
+  else
+    local -A _tmp_daily=(
+      [cur_time]="$1" [hostname]="$2" [tester]="$3" [backend]="$4" [repo]="$5" [targets]="$6"
+      [config_daily]="$7" [actual_daily]="$8" [config_daily_status]="$9" [actual_daily_status]="${10}"
+      [config_weekly]="${11}" [actual_weekly]="${12}" [config_weekly_status]="${13}" [actual_weekly_status]="${14}"
+      [config_monthly]="${15}" [actual_monthly]="${16}" [config_monthly_status]="${17}" [actual_monthly_status]="${18}"
+      [etc_dir]="${19}" [etc_perm]="${20}" [etc_safe_str]="${21}" [env_file]="${22}" [env_perm]="${23}" [env_safe_str]="${24}"
+      [check_status]="${25}" [snapshot_table]="${26}"
+    )
+    render_audit_report_unified "daily" "txt" _tmp_daily
+  fi
+}
+
+render_daily_audit_report_json() {
+  if (( $# == 1 )); then
+    local -n _ref_daj="$1"
+    render_audit_report_unified "daily" "json" _ref_daj
+  else
+    local -A _tmp_daily=(
+      [cur_time]="$1" [hostname]="$2" [tester]="$3" [backend]="$4" [repo]="$5" [targets]="$6"
+      [config_daily]="$7" [actual_daily]="$8" [config_daily_status]="$9" [actual_daily_status]="${10}"
+      [config_weekly]="${11}" [actual_weekly]="${12}" [config_weekly_status]="${13}" [actual_weekly_status]="${14}"
+      [config_monthly]="${15}" [actual_monthly]="${16}" [config_monthly_status]="${17}" [actual_monthly_status]="${18}"
+      [etc_dir]="${19}" [etc_perm]="${20}" [etc_safe_str]="${21}" [env_file]="${22}" [env_perm]="${23}" [env_safe_str]="${24}"
+      [check_status]="${25}" [snapshots_json]="${26}"
+    )
+    render_audit_report_unified "daily" "json" _tmp_daily
+  fi
+}
+
+render_daily_audit_report_html() {
+  if (( $# == 1 )); then
+    local -n _ref_dah="$1"
+    render_audit_report_unified "daily" "html" _ref_dah
+  else
+    local -A _tmp_daily=(
+      [cur_time]="$1" [hostname]="$2" [tester]="$3" [backend]="$4" [repo]="$5" [targets]="$6"
+      [config_daily]="$7" [actual_daily]="$8" [config_daily_status]="$9" [actual_daily_status]="${10}"
+      [config_weekly]="${11}" [actual_weekly]="${12}" [config_weekly_status]="${13}" [actual_weekly_status]="${14}"
+      [config_monthly]="${15}" [actual_monthly]="${16}" [config_monthly_status]="${17}" [actual_monthly_status]="${18}"
+      [etc_dir]="${19}" [etc_perm]="${20}" [etc_safe_str]="${21}" [env_file]="${22}" [env_perm]="${23}" [env_safe_str]="${24}"
+      [check_status]="${25}" [snapshot_table_html]="${26}"
+    )
+    render_audit_report_unified "daily" "html" _tmp_daily
+  fi
+}
+
+render_audit_report() {
+  if (( $# == 1 )); then
+    local -n _ref_ar="$1"
+    render_audit_report_unified "general" "txt" _ref_ar
+  else
+    local -A _tmp_gen=(
+      [backend]="$1" [on_calendar]="$2" [timer_enabled]="$3" [timer_active]="$4" [next_run]="$5" [etc_perm]="$6" [env_perm]="$7"
+    )
+    render_audit_report_unified "general" "txt" _tmp_gen
+  fi
+}
+
+render_audit_report_json() {
+  if (( $# == 1 )); then
+    local -n _ref_arj="$1"
+    render_audit_report_unified "general" "json" _ref_arj
+  else
+    local -A _tmp_gen=(
+      [backend]="$1" [on_calendar]="$2" [timer_enabled]="$3" [timer_active]="$4" [next_run]="$5" [etc_perm]="$6" [env_perm]="$7"
+    )
+    render_audit_report_unified "general" "json" _tmp_gen
+  fi
+}
+
+render_audit_report_html() {
+  if (( $# == 1 )); then
+    local -n _ref_arh="$1"
+    render_audit_report_unified "general" "html" _ref_arh
+  else
+    local -A _tmp_gen=(
+      [backend]="$1" [on_calendar]="$2" [timer_enabled]="$3" [timer_active]="$4" [next_run]="$5" [etc_perm]="$6" [env_perm]="$7" [snapshot_table_html]="$8"
+    )
+    render_audit_report_unified "general" "html" _tmp_gen
+  fi
+}
+
+render_restore_drill_txt() {
+  local -n _rd_txt="$1"
+  local test_date="${_rd_txt[test_date]:-}"
+  local tester="${_rd_txt[tester]:-}"
+  local ciso="${_rd_txt[ciso]:-}"
+  local rto="${_rd_txt[rto_minutes]:-120}"
+  local p_snap="${_rd_txt[primary_snap]:-}"
+  local p_time="${_rd_txt[primary_snap_time]:-}"
+  local p_size="${_rd_txt[primary_size]:-0 B}"
+  local p_elapsed_str="${_rd_txt[primary_elapsed_str]:-0초}"
+  local p_ok="${_rd_txt[primary_rto_satisfied]:-false}"
   
-  local s_snap="${_rrd[secondary_snap]:-}"
-  local s_time="${_rrd[secondary_snap_time]:-}"
-  local s_size="${_rrd[secondary_size]:-}"
-  local s_elapsed_str="${_rrd[secondary_elapsed_str]:-}"
-  local s_ok="${_rrd[secondary_rto_satisfied]:-false}"
+  local s_snap="${_rd_txt[secondary_snap]:-}"
+  local s_time="${_rd_txt[secondary_snap_time]:-}"
+  local s_size="${_rd_txt[secondary_size]:-}"
+  local s_elapsed_str="${_rd_txt[secondary_elapsed_str]:-}"
+  local s_ok="${_rd_txt[secondary_rto_satisfied]:-false}"
   
-  local db_type="${_rrd[db_type]:-}"
-  local db_snap="${_rrd[db_snap]:-}"
-  local db_ok="${_rrd[db_valid]:-0}"
-  local os_name="${_rrd[os_name]:-Rocky Linux 9}"
-  local target_dir="${_rrd[target_dir]:-/tmp/restore_test}"
+  local db_type="${_rd_txt[db_type]:-}"
+  local db_ok="${_rd_txt[db_valid]:-0}"
+  local os_name="${_rd_txt[os_name]:-Rocky Linux 9}"
+  local target_dir="${_rd_txt[target_dir]:-/tmp/restore_test}"
 
   local p_status; p_status="$([[ "$p_ok" == "true" ]] && echo "만족" || echo "초과 (미흡)")"
   local s_status; s_status="$([[ "$s_ok" == "true" ]] && echo "만족" || echo "초과 (미흡)")"
@@ -3616,34 +3849,31 @@ EOF
 EOF
 }
 
-render_report_json() {
-  # nameref를 통한 연관 배열 키 동적 할당으로 정적 분석기 미인식 우회
-  # shellcheck disable=SC2154
-  # shellcheck disable=SC2178  # nameref to caller's associative array
-  local -n _rrj="$1"
-  local test_date="${_rrj[test_date]:-}"
-  local tester="${_rrj[tester]:-}"
-  local ciso="${_rrj[ciso]:-}"
-  local rto="${_rrj[rto_minutes]:-120}"
-  local p_snap="${_rrj[primary_snap]:-}"
-  local p_time="${_rrj[primary_snap_time]:-}"
-  local p_size="${_rrj[primary_size]:-0 B}"
-  local p_elapsed="${_rrj[primary_elapsed_seconds]:-0}"
-  local p_elapsed_str="${_rrj[primary_elapsed_str]:-0초}"
-  local p_ok="${_rrj[primary_rto_satisfied]:-false}"
+render_restore_drill_json() {
+  local -n _rd_json="$1"
+  local test_date="${_rd_json[test_date]:-}"
+  local tester="${_rd_json[tester]:-}"
+  local ciso="${_rd_json[ciso]:-}"
+  local rto="${_rd_json[rto_minutes]:-120}"
+  local p_snap="${_rd_json[primary_snap]:-}"
+  local p_time="${_rd_json[primary_snap_time]:-}"
+  local p_size="${_rd_json[primary_size]:-0 B}"
+  local p_elapsed="${_rd_json[primary_elapsed_seconds]:-0}"
+  local p_elapsed_str="${_rd_json[primary_elapsed_str]:-0초}"
+  local p_ok="${_rd_json[primary_rto_satisfied]:-false}"
   
-  local s_snap="${_rrj[secondary_snap]:-}"
-  local s_time="${_rrj[secondary_snap_time]:-}"
-  local s_size="${_rrj[secondary_size]:-}"
-  local s_elapsed="${_rrj[secondary_elapsed_seconds]:-0}"
-  local s_elapsed_str="${_rrj[secondary_elapsed_str]:-}"
-  local s_ok="${_rrj[secondary_rto_satisfied]:-false}"
+  local s_snap="${_rd_json[secondary_snap]:-}"
+  local s_time="${_rd_json[secondary_snap_time]:-}"
+  local s_size="${_rd_json[secondary_size]:-}"
+  local s_elapsed="${_rd_json[secondary_elapsed_seconds]:-0}"
+  local s_elapsed_str="${_rd_json[secondary_elapsed_str]:-}"
+  local s_ok="${_rd_json[secondary_rto_satisfied]:-false}"
   
-  local db_type="${_rrj[db_type]:-}"
-  local db_snap="${_rrj[db_snap]:-}"
-  local db_time="${_rrj[db_snap_time]:-}"
-  local db_ok="${_rrj[db_valid]:-0}"
-  local target_dir="${_rrj[target_dir]:-/tmp/restore_test}"
+  local db_type="${_rd_json[db_type]:-}"
+  local db_snap="${_rd_json[db_snap]:-}"
+  local db_time="${_rd_json[db_snap_time]:-}"
+  local db_ok="${_rd_json[db_valid]:-0}"
+  local target_dir="${_rd_json[target_dir]:-/tmp/restore_test}"
 
   local db_integrity_verified="null"
   if [[ -n "$db_type" ]]; then
@@ -3702,426 +3932,31 @@ EOF
 EOF
 }
 
-write_audit_reports() {
-  # shellcheck disable=SC2178  # nameref to caller's associative array
-  local -n _war_data="$1"
-  local md_path="$2"
+render_restore_drill_html() {
+  local -n _rd_html="$1"
+  local test_date="${_rd_html[test_date]:-}"
+  local tester="${_rd_html[tester]:-}"
+  local latest_snap="${_rd_html[primary_snap]:-}"
+  local latest_time="${_rd_html[primary_snap_time]:-}"
+  local target_dir="${_rd_html[target_dir]:-/tmp/restore_test}"
+  local size_str="${_rd_html[primary_size]:-0 B}"
+  local elapsed_str="${_rd_html[primary_elapsed_str]:-0초}"
+  local rto="${_rd_html[rto_minutes]:-120}"
+  local p_ok="${_rd_html[primary_rto_satisfied]:-false}"
+  local rto_status; rto_status="$([[ "$p_ok" == "true" ]] && echo "만족" || echo "초과 (미흡)")"
+  local ciso="${_rd_html[ciso]:-}"
+  local os_name="${_rd_html[os_name]:-Rocky Linux 9}"
   
-  local base_path
-  if [[ "$md_path" == *.md ]]; then
-    base_path="${md_path%.md}"
-  elif [[ "$md_path" == *.txt ]]; then
-    base_path="${md_path%.txt}"
-  else
-    base_path="$md_path"
-  fi
-
-  local json_path="${base_path}.json"
-  local html_path="${base_path}.html"
-
-  mkdir -p "$(dirname "$md_path")"
-
-  # Markdown / Text
-  render_report_markdown _war_data > "$md_path"
-  chmod 600 "$md_path"
-
-  # JSON
-  render_report_json _war_data > "$json_path"
-  chmod 600 "$json_path"
-
-  # HTML
-  render_restore_drill_report_html _war_data > "$html_path"
-  chmod 600 "$html_path"
-}
-
-render_restore_drill_report_json() {
-  if (( $# == 1 )); then
-    # shellcheck disable=SC2178
-    local -n _rrj_ref="$1"
-    render_report_json _rrj_ref
-  else
-    local -A _tmp_rrj=(
-      [test_date]="$1"
-      [tester]="$2"
-      [primary_snap]="$3"
-      [primary_snap_time]="$4"
-      [target_dir]="$5"
-      [primary_size]="$6"
-      [primary_elapsed_seconds]="$7"
-      [primary_elapsed_str]="$8"
-      [rto_minutes]="$9"
-      [ciso]="${11}"
-    )
-    if [[ "${10}" == "만족" ]]; then
-      _tmp_rrj[primary_rto_satisfied]="true"
-    else
-      _tmp_rrj[primary_rto_satisfied]="false"
-    fi
-    if [[ -n "${12:-}" ]]; then
-      _tmp_rrj[secondary_snap]="${12}"
-      _tmp_rrj[secondary_snap_time]="${13}"
-      _tmp_rrj[secondary_size]="${14}"
-      _tmp_rrj[secondary_elapsed_seconds]="${15}"
-      _tmp_rrj[secondary_elapsed_str]="${16}"
-      if [[ "${17}" == "만족" ]]; then
-        _tmp_rrj[secondary_rto_satisfied]="true"
-      else
-        _tmp_rrj[secondary_rto_satisfied]="false"
-      fi
-    fi
-    if [[ -n "${18:-}" ]]; then
-      _tmp_rrj[db_type]="${18}"
-      _tmp_rrj[db_snap]="${19}"
-      _tmp_rrj[db_snap_time]="${20}"
-      _tmp_rrj[db_valid]="${21:-0}"
-    fi
-    render_report_json _tmp_rrj
-  fi
-}
-
-
-render_daily_audit_report_html() {
-  local cur_time="$1" hostname_val="$2" tester="$3" backend="$4" repo="$5" targets="$6"
-  local config_daily="$7" actual_daily="$8" config_daily_status="$9" actual_daily_status="${10}"
-  local config_weekly="${11}" actual_weekly="${12}" config_weekly_status="${13}" actual_weekly_status="${14}"
-  local config_monthly="${15}" actual_monthly="${16}" config_monthly_status="${17}" actual_monthly_status="${18}"
-  local etc_dir="${19}" etc_perm="${20}" etc_safe_str="${21}" env_file="${22}" env_perm="${23}" env_safe_str="${24}"
-  local check_status="${25}" snapshot_table_html="${26}"
+  local sec_snap="${_rd_html[secondary_snap]:-}"
+  local sec_time="${_rd_html[secondary_snap_time]:-}"
+  local sec_size_str="${_rd_html[secondary_size]:-}"
+  local sec_elapsed_str="${_rd_html[secondary_elapsed_str]:-}"
+  local s_ok="${_rd_html[secondary_rto_satisfied]:-false}"
+  local sec_rto_status; sec_rto_status="$([[ "$s_ok" == "true" ]] && echo "만족" || echo "초과 (미흡)")"
   
-  local backend_desc="SFTP (Synology NAS)"
-  if [[ "$backend" == "s3" ]]; then
-    backend_desc="S3 (S3 Bucket)"
-  fi
+  local db_type="${_rd_html[db_type]:-}"
+  local db_valid="${_rd_html[db_valid]:-0}"
 
-  cat <<EOF
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-  <meta charset="UTF-8">
-  <title>일일 백업 감사 결과 및 보안 설정 검토 보고서</title>
-  <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
-    body {
-      font-family: 'Inter', 'Malgun Gothic', sans-serif;
-      color: #1e293b;
-      margin: 0;
-      padding: 20px;
-      background-color: #f8fafc;
-    }
-    .report-card {
-      max-width: 800px;
-      margin: 0 auto;
-      background: #ffffff;
-      padding: 40px;
-      border: 1px solid #e2e8f0;
-      border-radius: 8px;
-      box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
-    }
-    header {
-      text-align: center;
-      border-bottom: 2px solid #0f172a;
-      padding-bottom: 20px;
-      margin-bottom: 30px;
-    }
-    h1 {
-      font-size: 20pt;
-      font-weight: 700;
-      margin: 0 0 10px 0;
-      color: #0f172a;
-    }
-    .meta-table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-bottom: 30px;
-    }
-    .meta-table td {
-      padding: 8px 12px;
-      font-size: 10pt;
-      border: 1px solid #cbd5e1;
-    }
-    .meta-table td.label {
-      background-color: #f1f5f9;
-      font-weight: 600;
-      width: 20%;
-    }
-    h2 {
-      font-size: 12pt;
-      font-weight: 600;
-      border-left: 4px solid #3b82f6;
-      padding-left: 10px;
-      margin: 25px 0 12px 0;
-      color: #1e293b;
-    }
-    .data-table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-bottom: 20px;
-    }
-    .data-table th, .data-table td {
-      border: 1px solid #cbd5e1;
-      padding: 8px 12px;
-      font-size: 9.5pt;
-      text-align: left;
-    }
-    .data-table th {
-      background-color: #f8fafc;
-      font-weight: 600;
-      color: #475569;
-    }
-    .badge {
-      display: inline-block;
-      padding: 2px 8px;
-      border-radius: 4px;
-      font-size: 8.5pt;
-      font-weight: 600;
-    }
-    .badge-success {
-      background-color: #dcfce7;
-      color: #15803d;
-    }
-    .badge-warning {
-      background-color: #fee2e2;
-      color: #b91c1c;
-    }
-    .signature-area {
-      margin-top: 40px;
-      display: flex;
-      justify-content: flex-end;
-      gap: 30px;
-    }
-    .signature-box {
-      border: 1px solid #cbd5e1;
-      width: 120px;
-      text-align: center;
-      font-size: 9.5pt;
-    }
-    .signature-box .title {
-      background-color: #f1f5f9;
-      padding: 4px;
-      font-weight: 600;
-      border-bottom: 1px solid #cbd5e1;
-    }
-    .signature-box .sign {
-      height: 50px;
-      line-height: 50px;
-      color: #94a3b8;
-    }
-    @media print {
-      body {
-        background-color: #ffffff;
-        padding: 0;
-        margin: 0;
-        font-size: 8.5pt;
-      }
-      .report-card {
-        border: none;
-        box-shadow: none;
-        padding: 0;
-        max-width: 100%;
-      }
-      header {
-        margin-bottom: 15px;
-        padding-bottom: 10px;
-      }
-      h1 {
-        font-size: 15pt;
-        margin: 0 0 5px 0;
-      }
-      h2 {
-        font-size: 10.5pt;
-        margin: 12px 0 6px 0;
-      }
-      .meta-table {
-        margin-bottom: 15px;
-      }
-      .meta-table td {
-        padding: 4px 8px;
-        font-size: 8.5pt;
-      }
-      .data-table {
-        margin-bottom: 12px;
-      }
-      .data-table th, .data-table td {
-        padding: 4px 8px;
-        font-size: 8pt;
-      }
-      .signature-area {
-        margin-top: 20px;
-      }
-      .signature-box {
-        width: 100px;
-        font-size: 8pt;
-      }
-      .signature-box .sign {
-        height: 35px;
-        line-height: 35px;
-      }
-      @page {
-        size: A4;
-        margin: 10mm;
-      }
-    }
-  </style>
-</head>
-<body>
-
-<div class="report-card">
-  <header>
-    <h1>일일 백업 감사 결과 및 보안 설정 검토 보고서</h1>
-    <div style="font-size: 9pt; color: #64748b;">정보보호 관리체계(ISMS) 백업 감사 증적 서류</div>
-  </header>
-
-  <table class="meta-table">
-    <tr>
-      <td class="label">보고서 생성일시</td>
-      <td>$cur_time</td>
-      <td class="label">대상 서버 호스트</td>
-      <td>$hostname_val</td>
-    </tr>
-    <tr>
-      <td class="label">백업 담당부서</td>
-      <td>$tester</td>
-      <td class="label">백업 백엔드</td>
-      <td>$backend_desc</td>
-    </tr>
-    <tr>
-      <td class="label">원격 저장소 주소</td>
-      <td colspan="3" style="word-break: break-all;">$repo</td>
-    </tr>
-    <tr>
-      <td class="label">1차 백업 대상</td>
-      <td colspan="3">$targets</td>
-    </tr>
-  </table>
-
-  <h2>1. 보존 정책 (Retention Rule) 검증</h2>
-  <table class="data-table">
-    <thead>
-      <tr>
-        <th>보관 구분</th>
-        <th>설정 요구사항</th>
-        <th>실제 보관 상태</th>
-        <th>만족 여부</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>일간 보관 (Keep-Daily)</td>
-        <td>설정: ${config_daily}개 (${config_daily_status})</td>
-        <td>실제: ${actual_daily}개</td>
-        <td><span class="badge $([[ "$actual_daily_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$actual_daily_status</span></td>
-      </tr>
-      <tr>
-        <td>주간 보관 (Keep-Weekly)</td>
-        <td>설정: ${config_weekly}개 (${config_weekly_status})</td>
-        <td>실제: ${actual_weekly}개</td>
-        <td><span class="badge $([[ "$actual_weekly_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$actual_weekly_status</span></td>
-      </tr>
-      <tr>
-        <td>월간 보관 (Keep-Monthly)</td>
-        <td>설정: ${config_monthly}개 (${config_monthly_status})</td>
-        <td>실제: ${actual_monthly}개</td>
-        <td><span class="badge $([[ "$actual_monthly_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$actual_monthly_status</span></td>
-      </tr>
-    </tbody>
-  </table>
-
-  <h2>2. 접근 통제 및 무결성 검사</h2>
-  <table class="data-table">
-    <thead>
-      <tr>
-        <th>점검 대상</th>
-        <th>보안 기준</th>
-        <th>현재 설정 권한</th>
-        <th>보안 평가</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>설정 디렉터리 ($etc_dir)</td>
-        <td>700 권장 (소유자 외 접근 제한)</td>
-        <td>$etc_perm</td>
-        <td><span class="badge $([[ "$etc_perm" == "700" ]] && echo "badge-success" || echo "badge-warning")">$etc_safe_str</span></td>
-      </tr>
-      <tr>
-        <td>자격증명 파일 ($env_file)</td>
-        <td>600 권장 (평문 노출 방지)</td>
-        <td>$env_perm</td>
-        <td><span class="badge $([[ "$env_perm" == "600" ]] && echo "badge-success" || echo "badge-warning")">$env_safe_str</span></td>
-      </tr>
-      <tr>
-        <td>저장소 무결성 (restic check)</td>
-        <td>정상 통과 (에러 없음)</td>
-        <td colspan="2">$check_status</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <h2>3. 최근 백업 성공 스냅샷 이력 (최근 3회)</h2>
-  <table class="data-table">
-    <thead>
-      <tr>
-        <th>ID</th>
-        <th>백업 완료 일시</th>
-        <th>호스트</th>
-        <th>경로 및 용량</th>
-      </tr>
-    </thead>
-    <tbody>
-      $snapshot_table_html
-    </tbody>
-  </table>
-
-  <div class="signature-area">
-    <div class="signature-box">
-      <div class="title">검토자</div>
-      <div class="sign">시스템 운영팀 (인)</div>
-    </div>
-    <div class="signature-box">
-      <div class="title">승인자</div>
-      <div class="sign">정보보안책임자 (서명생략)</div>
-    </div>
-  </div>
-</div>
-
-</body>
-</html>
-EOF
-}
-
-render_restore_drill_report_html() {
-  # nameref를 통한 연관 배열 키 동적 할당으로 정적 분석기 미인식 우회
-  # shellcheck disable=SC2154
-  if (( $# == 1 )); then
-    # shellcheck disable=SC2178
-    local -n _rr_html="$1"
-    local test_date="${_rr_html[test_date]:-}"
-    local tester="${_rr_html[tester]:-}"
-    local latest_snap="${_rr_html[primary_snap]:-}"
-    local latest_time="${_rr_html[primary_snap_time]:-}"
-    local target_dir="${_rr_html[target_dir]:-/tmp/restore_test}"
-    local size_str="${_rr_html[primary_size]:-0 B}"
-    local elapsed_str="${_rr_html[primary_elapsed_str]:-0초}"
-    local rto="${_rr_html[rto_minutes]:-120}"
-    local p_ok="${_rr_html[primary_rto_satisfied]:-false}"
-    local rto_status; rto_status="$([[ "$p_ok" == "true" ]] && echo "만족" || echo "초과 (미흡)")"
-    local ciso="${_rr_html[ciso]:-}"
-    local os_name="${_rr_html[os_name]:-Rocky Linux 9}"
-    local sec_snap="${_rr_html[secondary_snap]:-}"
-    local sec_time="${_rr_html[secondary_snap_time]:-}"
-    local sec_size_str="${_rr_html[secondary_size]:-}"
-    local sec_elapsed_str="${_rr_html[secondary_elapsed_str]:-}"
-    local s_ok="${_rr_html[secondary_rto_satisfied]:-false}"
-    local sec_rto_status; sec_rto_status="$([[ "$s_ok" == "true" ]] && echo "만족" || echo "초과 (미흡)")"
-    local db_type="${_rr_html[db_type]:-}"
-    local db_valid="${_rr_html[db_valid]:-0}"
-  else
-    local test_date="$1" tester="$2" latest_snap="$3" latest_time="$4" target_dir="$5"
-    local size_str="$6" elapsed_str="$7" rto="$8" rto_status="$9" ciso="${10}" os_name="${11}"
-    local sec_snap="${12:-}" sec_time="${13:-}" sec_size_str="${14:-}" sec_elapsed_str="${15:-}" sec_rto_status="${16:-}"
-    local db_type="${17:-}" db_valid="${18:-0}"
-  fi
-  
   cat <<EOF
 <!DOCTYPE html>
 <html lang="ko">
@@ -4246,48 +4081,6 @@ render_restore_drill_report_html() {
         border: none;
         box-shadow: none;
         padding: 0;
-        max-width: 100%;
-      }
-      header {
-        margin-bottom: 15px;
-        padding-bottom: 10px;
-      }
-      h1 {
-        font-size: 15pt;
-        margin: 0 0 5px 0;
-      }
-      h2 {
-        font-size: 10.5pt;
-        margin: 12px 0 6px 0;
-      }
-      .meta-table {
-        margin-bottom: 15px;
-      }
-      .meta-table td {
-        padding: 4px 8px;
-        font-size: 8.5pt;
-      }
-      .data-table {
-        margin-bottom: 12px;
-      }
-      .data-table th, .data-table td {
-        padding: 4px 8px;
-        font-size: 8pt;
-      }
-      .signature-area {
-        margin-top: 20px;
-      }
-      .signature-box {
-        width: 100px;
-        font-size: 8pt;
-      }
-      .signature-box .sign {
-        height: 35px;
-        line-height: 35px;
-      }
-      @page {
-        size: A4;
-        margin: 10mm;
       }
     }
   </style>
@@ -4297,101 +4090,71 @@ render_restore_drill_report_html() {
 <div class="report-card">
   <header>
     <h1>백업 데이터 복구 및 정합성 테스트 결과 보고서</h1>
-    <div style="font-size: 9pt; color: #64748b;">정보보호 관리체계(ISMS) 복구 모의훈련 증적 서류</div>
   </header>
 
   <table class="meta-table">
     <tr>
       <td class="label">테스트 일자</td>
       <td>$test_date</td>
-      <td class="label">모의 훈련자</td>
+      <td class="label">테 스 터</td>
       <td>$tester</td>
     </tr>
     <tr>
-      <td class="label">1차 대상 스냅샷</td>
-      <td>$latest_snap</td>
-      <td class="label">스냅샷 생성시점</td>
-      <td>$latest_time</td>
+      <td class="label">대상 시스템</td>
+      <td>$os_name (가상머신 복구 타깃)</td>
+      <td class="label">복구 경로</td>
+      <td>$target_dir</td>
+    </tr>
+    <tr>
+      <td class="label">1차 백업본</td>
+      <td>$latest_snap$([[ -n "$latest_time" ]] && echo " ($latest_time)")</td>
+      <td class="label">CISO 승인</td>
+      <td>$ciso (서명 날인 생략)</td>
     </tr>
 EOF
 
   if [[ -n "$sec_snap" ]]; then
     cat <<EOF
     <tr>
-      <td class="label">2차 대상 스냅샷</td>
-      <td>$sec_snap</td>
-      <td class="label">2차 생성시점</td>
-      <td>$sec_time</td>
+      <td class="label">2차 백업본</td>
+      <td colspan="3">$sec_snap$([[ -n "$sec_time" ]] && echo " ($sec_time)")</td>
     </tr>
 EOF
   fi
 
   cat <<EOF
-    <tr>
-      <td class="label">임시 복구 경로</td>
-      <td colspan="3" style="word-break: break-all;">$target_dir</td>
-    </tr>
   </table>
 
-  <h2>1. 테스트 목적 및 훈련 개요</h2>
+  <h2>1. 복구 테스트 목적</h2>
   <div style="font-size: 9.5pt; line-height: 1.6; margin-bottom: 20px;">
-    재해 재난 및 랜섬웨어 감염 시 백업 데이터로부터 실제 서비스 복구가 원활히 이루어지는지 검증하고, 목표 복구 시간(RTO) 내 복구 가능한지 점검함.
+    본 테스트는 당사의 재해복구 지침 및 정보보호체계(ISMS) 컴플라이언스에 의거하여, 원격 NAS 저장소에 보관된 백업 데이터로부터 실제 운영 체제 및 데이터 복구가 규정된 RTO(120분) 내에 완벽하게 완수될 수 있는지 정기 점검하고 무결성을 보장하는 데 그 목적이 있습니다.
   </div>
 
-  <h2>2. 테스트 시나리오 및 수행 내역</h2>
-  <table class="data-table">
-    <thead>
-      <tr>
-        <th style="width: 8%;">단계</th>
-        <th style="width: 25%;">수행 내용</th>
-        <th>상세 조치 사항</th>
-        <th style="width: 12%;">상태</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>1단계</td>
-        <td>복구 테스트 환경 구성</td>
-        <td>임시 가상머신 준비 및 $os_name 운영체제 상태 확인</td>
-        <td><span class="badge badge-success">완료</span></td>
-      </tr>
-      <tr>
-        <td>2단계</td>
-        <td>Restic 연결 및 전송</td>
-        <td>저장소 연결 테스트 통과 후 데이터 복구 다운로드 실행</td>
-        <td><span class="badge badge-success">완료</span></td>
-      </tr>
-      <tr>
-        <td>3단계</td>
-        <td>데이터베이스 복원 검증</td>
-        <td>데이터 정합성(Row 카운트 및 인코딩 깨짐 유무) 임의 검사 완료</td>
-        <td><span class="badge badge-success">완료</span></td>
-      </tr>
+  <h2>2. 테스트 시나리오 및 수행 절차</h2>
+  <ol style="font-size: 9.5pt; line-height: 1.6; padding-left: 20px; margin-bottom: 20px;">
+    <li>재해복구 시나리오 기반의 임시 타깃 VM 생성 및 OS 환경 구성</li>
+    <li>백업 데몬 환경 로드 및 원격 NAS 레포지토리 연계 활성화</li>
+    <li>Restic CLI 클라이언트를 활용하여 복구 Target 경로로 데이터 일괄 복원</li>
+    <li>데이터 복구 정합성 확인용 회원 row count 조회 및 파일 깨짐 여부 수동 검증</li>
 EOF
 
   if [[ -n "$sec_snap" ]]; then
     cat <<EOF
-      <tr>
-        <td>4단계</td>
-        <td>2차 소산지 복구 검증</td>
-        <td>2차 소산 저장소 스냅샷 연결 및 복구 무결성 검증 추가 수행</td>
-        <td><span class="badge badge-success">완료</span></td>
-      </tr>
+    <li>2차 소산지(S3 Bucket) 레포지토리로부터 복원 가동 테스트 및 데이터 정합성 검증 (양방향)</li>
 EOF
   fi
 
   cat <<EOF
-    </tbody>
-  </table>
+  </ol>
 
-  <h2>3. 복구 결과 및 소요 시간 검증</h2>
+  <h2>3. 상세 검증 결과</h2>
   <table class="data-table">
     <thead>
       <tr>
-        <th>구분</th>
-        <th>요구 기준</th>
-        <th>실제 측정치</th>
-        <th>평가 결과</th>
+        <th style="width: 25%;">검토 항목</th>
+        <th style="width: 35%;">보안 감사 및 기술 표준 기준</th>
+        <th style="width: 25%;">실제 측정 수치</th>
+        <th style="width: 15%;">결과 판정</th>
       </tr>
     </thead>
     <tbody>
@@ -4474,14 +4237,35 @@ EOF
 EOF
 }
 
-render_daily_audit_report() {
-  local cur_time="$1" hostname_val="$2" tester="$3" backend="$4" repo="$5" targets="$6"
-  local config_daily="$7" actual_daily="$8" config_daily_status="$9" actual_daily_status="${10}"
-  local config_weekly="${11}" actual_weekly="${12}" config_weekly_status="${13}" actual_weekly_status="${14}"
-  local config_monthly="${15}" actual_monthly="${16}" config_monthly_status="${17}" actual_monthly_status="${18}"
-  local etc_dir="${19}" etc_perm="${20}" etc_safe_str="${21}" env_file="${22}" env_perm="${23}" env_safe_str="${24}"
-  local check_status="${25}" snapshot_table="${26}"
-  
+render_daily_txt() {
+  local -n _d_txt="$1"
+  local cur_time="${_d_txt[cur_time]:-}"
+  local hostname_val="${_d_txt[hostname]:-}"
+  local tester="${_d_txt[tester]:-}"
+  local backend="${_d_txt[backend]:-}"
+  local repo="${_d_txt[repo]:-}"
+  local targets="${_d_txt[targets]:-}"
+  local config_daily="${_d_txt[config_daily]:-0}"
+  local actual_daily="${_d_txt[actual_daily]:-0}"
+  local config_daily_status="${_d_txt[config_daily_status]:-}"
+  local actual_daily_status="${_d_txt[actual_daily_status]:-}"
+  local config_weekly="${_d_txt[config_weekly]:-0}"
+  local actual_weekly="${_d_txt[actual_weekly]:-0}"
+  local config_weekly_status="${_d_txt[config_weekly_status]:-}"
+  local actual_weekly_status="${_d_txt[actual_weekly_status]:-}"
+  local config_monthly="${_d_txt[config_monthly]:-0}"
+  local actual_monthly="${_d_txt[actual_monthly]:-0}"
+  local config_monthly_status="${_d_txt[config_monthly_status]:-}"
+  local actual_monthly_status="${_d_txt[actual_monthly_status]:-}"
+  local etc_dir="${_d_txt[etc_dir]:-}"
+  local etc_perm="${_d_txt[etc_perm]:-}"
+  local etc_safe_str="${_d_txt[etc_safe_str]:-}"
+  local env_file="${_d_txt[env_file]:-}"
+  local env_perm="${_d_txt[env_perm]:-}"
+  local env_safe_str="${_d_txt[env_safe_str]:-}"
+  local check_status="${_d_txt[check_status]:-}"
+  local snapshot_table="${_d_txt[snapshot_table]:-}"
+
   local backend_desc="SFTP (Synology NAS)"
   if [[ "$backend" == "s3" ]]; then
     backend_desc="S3 (S3 Bucket)"
@@ -4520,14 +4304,31 @@ $snapshot_table
 EOF
 }
 
-render_daily_audit_report_json() {
-  local cur_time="$1" hostname_val="$2" tester="$3" backend="$4" repo="$5" targets="$6"
-  local config_daily="$7" actual_daily="$8" config_daily_status="$9" actual_daily_status="${10}"
-  local config_weekly="${11}" actual_weekly="${12}" config_weekly_status="${13}" actual_weekly_status="${14}"
-  local config_monthly="${15}" actual_monthly="${16}" config_monthly_status="${17}" actual_monthly_status="${18}"
-  local etc_dir="${19}" etc_perm="${20}" etc_safe_str="${21}" env_file="${22}" env_perm="${23}" env_safe_str="${24}"
-  local check_status="${25}" snapshots_json="${26}"
-  
+render_daily_json() {
+  local -n _d_json="$1"
+  local cur_time="${_d_json[cur_time]:-}"
+  local hostname_val="${_d_json[hostname]:-}"
+  local tester="${_d_json[tester]:-}"
+  local backend="${_d_json[backend]:-}"
+  local repo="${_d_json[repo]:-}"
+  local targets="${_d_json[targets]:-}"
+  local config_daily="${_d_json[config_daily]:-0}"
+  local actual_daily="${_d_json[actual_daily]:-0}"
+  local config_daily_status="${_d_json[config_daily_status]:-}"
+  local actual_daily_status="${_d_json[actual_daily_status]:-}"
+  local config_weekly="${_d_json[config_weekly]:-0}"
+  local actual_weekly="${_d_json[actual_weekly]:-0}"
+  local config_weekly_status="${_d_json[config_weekly_status]:-}"
+  local actual_weekly_status="${_d_json[actual_weekly_status]:-}"
+  local config_monthly="${_d_json[config_monthly]:-0}"
+  local actual_monthly="${_d_json[actual_monthly]:-0}"
+  local config_monthly_status="${_d_json[config_monthly_status]:-}"
+  local actual_monthly_status="${_d_json[actual_monthly_status]:-}"
+  local etc_perm="${_d_json[etc_perm]:-}"
+  local env_perm="${_d_json[env_perm]:-}"
+  local check_status="${_d_json[check_status]:-}"
+  local snapshots_json="${_d_json[snapshots_json]:-[]}"
+
   cat <<EOF
 {
   "hostname": "${hostname_val//\"/\\\"}",
@@ -4572,151 +4373,38 @@ render_daily_audit_report_json() {
 EOF
 }
 
-# ISMS 감사 대응용 통합 리포트. cmd_status는 빠른 운영 확인용이고, 이쪽은
-# 백업 정책/보존 정책/스케줄/접근 통제를 한 화면에 모은 컴플라이언스 리포트다.
-# BACKUP_TARGETS/BACKUP_EXCLUDES/KEEP_DAILY/KEEP_WEEKLY/KEEP_MONTHLY/
-# RESTIC_REPOSITORY/RESTIC_PASSWORD는 backup.env를 source한 호출자(cmd_audit)의
-# 전역값을 그대로 읽는다(render_resticprofile_config와 동일한 관례).
-render_audit_report() {
-  local backend="$1" on_calendar="$2" timer_enabled="$3" timer_active="$4" next_run="$5" etc_perm="$6" env_perm="$7"
+render_daily_html() {
+  local -n _d_html="$1"
+  local cur_time="${_d_html[cur_time]:-}"
+  local hostname_val="${_d_html[hostname]:-}"
+  local tester="${_d_html[tester]:-}"
+  local backend="${_d_html[backend]:-}"
+  local repo="${_d_html[repo]:-}"
+  local targets="${_d_html[targets]:-}"
+  local config_daily="${_d_html[config_daily]:-0}"
+  local actual_daily="${_d_html[actual_daily]:-0}"
+  local config_daily_status="${_d_html[config_daily_status]:-}"
+  local actual_daily_status="${_d_html[actual_daily_status]:-}"
+  local config_weekly="${_d_html[config_weekly]:-0}"
+  local actual_weekly="${_d_html[actual_weekly]:-0}"
+  local config_weekly_status="${_d_html[config_weekly_status]:-}"
+  local actual_weekly_status="${_d_html[actual_weekly_status]:-}"
+  local config_monthly="${_d_html[config_monthly]:-0}"
+  local actual_monthly="${_d_html[actual_monthly]:-0}"
+  local config_monthly_status="${_d_html[config_monthly_status]:-}"
+  local actual_monthly_status="${_d_html[actual_monthly_status]:-}"
+  local etc_dir="${_d_html[etc_dir]:-}"
+  local etc_perm="${_d_html[etc_perm]:-}"
+  local etc_safe_str="${_d_html[etc_safe_str]:-}"
+  local env_file="${_d_html[env_file]:-}"
+  local env_perm="${_d_html[env_perm]:-}"
+  local env_safe_str="${_d_html[env_safe_str]:-}"
+  local check_status="${_d_html[check_status]:-}"
+  local snapshot_table_html="${_d_html[snapshot_table_html]:-}"
 
-  local encrypted_note="AES-256 (restic 저장소 자체 암호화)"
-  if [[ -z "${RESTIC_PASSWORD:-}" ]]; then
-    encrypted_note="${encrypted_note} - 경고: 비밀번호 미설정"
-  fi
-
-  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-    # Beautiful ANSI styled output for interactive TTY
-    setup_colors
-
-    # Style backend value
-    local styled_backend="${C_BOLD}${C_BLUE}${backend}${C_RESET}"
-    
-    # Style repo
-    local styled_repo="${C_BOLD}${RESTIC_REPOSITORY:-알 수 없음}${C_RESET}"
-
-    # Style encryption note
-    local styled_crypto
-    if [[ -z "${RESTIC_PASSWORD:-}" ]]; then
-      styled_crypto="${C_RED}${encrypted_note}${C_RESET}"
-    else
-      styled_crypto="${C_GREEN}${encrypted_note}${C_RESET}"
-    fi
-
-    # Style targets/excludes
-    local styled_targets="${C_BOLD}${BACKUP_TARGETS:-알 수 없음}${C_RESET}"
-    local styled_excludes="${C_DIM}${BACKUP_EXCLUDES:-(없음)}${C_RESET}"
-
-    # Style retention
-    local styled_daily="${C_BOLD}${KEEP_DAILY:-?}${C_RESET}"
-    local styled_weekly="${C_BOLD}${KEEP_WEEKLY:-?}${C_RESET}"
-    local styled_monthly="${C_BOLD}${KEEP_MONTHLY:-?}${C_RESET}"
-
-    # Style schedule
-    local styled_on_calendar="${C_BOLD}${on_calendar}${C_RESET}"
-    
-    local styled_timer_enabled
-    if [[ "$timer_enabled" == "enabled" ]]; then
-      styled_timer_enabled="${C_GREEN}${timer_enabled}${C_RESET}"
-    elif [[ "$timer_enabled" == "disabled" ]]; then
-      styled_timer_enabled="${C_RED}${timer_enabled}${C_RESET}"
-    else
-      styled_timer_enabled="${C_GRAY}${timer_enabled}${C_RESET}"
-    fi
-
-    local styled_timer_active
-    if [[ "$timer_active" == "active" ]]; then
-      styled_timer_active="${C_GREEN}${timer_active}${C_RESET}"
-    elif [[ "$timer_active" == "inactive" ]]; then
-      styled_timer_active="${C_GRAY}${timer_active}${C_RESET}"
-    else
-      styled_timer_active="${C_RED}${timer_active}${C_RESET}"
-    fi
-
-    local styled_next_run="${C_BOLD}${next_run}${C_RESET}"
-
-    # Style permissions
-    local styled_etc_perm
-    if [[ "$etc_perm" == "700" ]]; then
-      styled_etc_perm="${C_GREEN}${etc_perm}${C_RESET} ${C_GRAY}(안전)${C_RESET}"
-    else
-      styled_etc_perm="${C_RED}${etc_perm}${C_RESET} ${C_YELLOW}(경고: 700 권장)${C_RESET}"
-    fi
-
-    local styled_env_perm
-    if [[ "$env_perm" == "600" ]]; then
-      styled_env_perm="${C_GREEN}${env_perm}${C_RESET} ${C_GRAY}(안전)${C_RESET}"
-    else
-      styled_env_perm="${C_RED}${env_perm}${C_RESET} ${C_YELLOW}(경고: 600 권장)${C_RESET}"
-    fi
-
-    printf '%b%b⚙  백업 정책 (Backup Policy)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
-    printf '%b├──%b 백엔드:    %b\n' "$C_GRAY" "$C_RESET" "$styled_backend"
-    printf '%b├──%b 저장소 위치: %b\n' "$C_GRAY" "$C_RESET" "$styled_repo"
-    printf '%b├──%b 암호화:    %b\n' "$C_GRAY" "$C_RESET" "$styled_crypto"
-    printf '%b├──%b 백업 대상: %b\n' "$C_GRAY" "$C_RESET" "$styled_targets"
-    printf '%b└──%b 제외 패턴: %b\n' "$C_GRAY" "$C_RESET" "$styled_excludes"
-    printf '\n'
-
-    printf '%b%b⚙  보존 정책 (Retention Policy)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
-    printf '%b├──%b 일간 보관: %b개\n' "$C_GRAY" "$C_RESET" "$styled_daily"
-    printf '%b├──%b 주간 보관: %b개\n' "$C_GRAY" "$C_RESET" "$styled_weekly"
-    printf '%b└──%b 월간 보관: %b개\n' "$C_GRAY" "$C_RESET" "$styled_monthly"
-    printf '\n'
-
-    printf '%b%b⚙  스케줄 (Schedule)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
-    printf '%b├──%b 반복 주기(OnCalendar): %b\n' "$C_GRAY" "$C_RESET" "$styled_on_calendar"
-    printf '%b├──%b 타이머 등록 상태:      %b\n' "$C_GRAY" "$C_RESET" "$styled_timer_enabled"
-    printf '%b├──%b 타이머 실행 상태:      %b\n' "$C_GRAY" "$C_RESET" "$styled_timer_active"
-    printf '%b└──%b 다음 실행 예정:        %b\n' "$C_GRAY" "$C_RESET" "$styled_next_run"
-    printf '\n'
-
-    printf '%b%b⚙  접근 통제 (Access Control)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
-    printf '%b├──%b %s 권한: %b\n' "$C_GRAY" "$C_RESET" "$RESTIC_ETC_DIR" "$styled_etc_perm"
-    printf '%b└──%b %s 권한: %b\n' "$C_GRAY" "$C_RESET" "$BACKUP_ENV_FILE" "$styled_env_perm"
-  else
-    # Simple plain-text fallback (matches original structure exactly for backward compatibility & tests)
-    printf '=== 백업 정책 ===\n'
-    printf '백엔드: %s\n' "$backend"
-    printf '저장소 위치: %s\n' "${RESTIC_REPOSITORY:-알 수 없음}"
-    printf '암호화: %s\n' "$encrypted_note"
-    printf '백업 대상: %s\n' "${BACKUP_TARGETS:-알 수 없음}"
-    printf '제외 패턴: %s\n' "${BACKUP_EXCLUDES:-(없음)}"
-    printf '\n'
-
-    printf '=== 보존 정책 ===\n'
-    printf '일간 보관: %s개\n' "${KEEP_DAILY:-?}"
-    printf '주간 보관: %s개\n' "${KEEP_WEEKLY:-?}"
-    printf '월간 보관: %s개\n' "${KEEP_MONTHLY:-?}"
-    printf '\n'
-
-    printf '=== 스케줄 ===\n'
-    printf '반복 주기(OnCalendar): %s\n' "$on_calendar"
-    printf '타이머 등록 상태: %s\n' "$timer_enabled"
-    printf '타이머 실행 상태: %s\n' "$timer_active"
-    printf '다음 실행 예정: %s\n' "$next_run"
-    printf '\n'
-
-    printf '=== 접근 통제 ===\n'
-    printf '%s 권한: %s\n' "$RESTIC_ETC_DIR" "$etc_perm"
-    printf '%s 권한: %s\n' "$BACKUP_ENV_FILE" "$env_perm"
-  fi
-}
-
-render_audit_report_html() {
-  local backend="$1" on_calendar="$2" timer_enabled="$3" timer_active="$4" next_run="$5"
-  local etc_perm="$6" env_perm="$7" snapshot_table_html="$8"
-  
   local backend_desc="SFTP (Synology NAS)"
   if [[ "$backend" == "s3" ]]; then
     backend_desc="S3 (S3 Bucket)"
-  fi
-  
-  local encrypted_note="AES-256 (restic 저장소 자체 암호화)"
-  local crypto_class="badge-success"
-  if [[ -z "${RESTIC_PASSWORD:-}" ]]; then
-    encrypted_note="${encrypted_note} - 경고: 비밀번호 미설정"
-    crypto_class="badge-warning"
   fi
 
   cat <<EOF
@@ -4724,7 +4412,7 @@ render_audit_report_html() {
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
-  <title>종합 백업 보안 설정 검토 보고서</title>
+  <title>일일 백업 감사 결과 및 보안 설정 검토 보고서</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
     body {
@@ -4768,12 +4456,12 @@ render_audit_report_html() {
     .meta-table td.label {
       background-color: #f1f5f9;
       font-weight: 600;
-      width: 20%;
+      width: 25%;
     }
     h2 {
       font-size: 12pt;
       font-weight: 600;
-      border-left: 4px solid #3b82f6;
+      border-left: 4px solid #10b981;
       padding-left: 10px;
       margin: 25px 0 12px 0;
       color: #1e293b;
@@ -4832,168 +4520,110 @@ render_audit_report_html() {
       line-height: 50px;
       color: #94a3b8;
     }
-    @media print {
-      body {
-        background-color: #ffffff;
-        padding: 0;
-        margin: 0;
-        font-size: 8.5pt;
-      }
-      .report-card {
-        border: none;
-        box-shadow: none;
-        padding: 0;
-        max-width: 100%;
-      }
-      header {
-        margin-bottom: 15px;
-        padding-bottom: 10px;
-      }
-      h1 {
-        font-size: 15pt;
-        margin: 0 0 5px 0;
-      }
-      h2 {
-        font-size: 10.5pt;
-        margin: 12px 0 6px 0;
-      }
-      .meta-table {
-        margin-bottom: 15px;
-      }
-      .meta-table td {
-        padding: 4px 8px;
-        font-size: 8.5pt;
-      }
-      .data-table {
-        margin-bottom: 12px;
-      }
-      .data-table th, .data-table td {
-        padding: 4px 8px;
-        font-size: 8pt;
-      }
-      .signature-area {
-        margin-top: 20px;
-      }
-      .signature-box {
-        width: 100px;
-        font-size: 8pt;
-      }
-      .signature-box .sign {
-        height: 35px;
-        line-height: 35px;
-      }
-      @page {
-        size: A4;
-        margin: 10mm;
-      }
-    }
   </style>
 </head>
 <body>
 
 <div class="report-card">
   <header>
-    <h1>종합 백업 보안 설정 검토 보고서</h1>
-    <div style="font-size: 9pt; color: #64748b;">정보보호 관리체계(ISMS) 백업 감사 증적 서류</div>
+    <h1>일일 백업 결과 및 보안 설정 검토 보고서</h1>
   </header>
 
   <table class="meta-table">
     <tr>
       <td class="label">보고서 생성일시</td>
-      <td>$(date "+%Y-%m-%d %H:%M:%S KST")</td>
+      <td>$cur_time</td>
       <td class="label">대상 서버 호스트</td>
-      <td>$(hostname 2>/dev/null || echo "unknown")</td>
+      <td>$hostname_val</td>
     </tr>
     <tr>
-      <td class="label">백업 백엔드</td>
-      <td>$backend_desc</td>
-      <td class="label">암호화 상태</td>
-      <td><span class="badge $crypto_class">$encrypted_note</span></td>
-    </tr>
-    <tr>
-      <td class="label">원격 저장소 주소</td>
-      <td colspan="3" style="word-break: break-all;">${RESTIC_REPOSITORY:-알 수 없음}</td>
-    </tr>
-    <tr>
-      <td class="label">백업 대상 경로</td>
-      <td colspan="3">${BACKUP_TARGETS:-알 수 없음} (제외 패턴: ${BACKUP_EXCLUDES:-(없음)})</td>
+      <td class="label">백업 담당부서</td>
+      <td>$tester</td>
+      <td class="label">데이터 암호화 방식</td>
+      <td>AES-256 (보안 비밀번호 키 적용)</td>
     </tr>
   </table>
 
-  <h2>1. 보존 정책 (Retention Rule)</h2>
+  <h2>1. 백업 정책 및 백엔드 정보</h2>
+  <table class="meta-table">
+    <tr>
+      <td class="label">백엔드 유형</td>
+      <td>$backend_desc</td>
+    </tr>
+    <tr>
+      <td class="label">저장소 주소</td>
+      <td>$repo</td>
+    </tr>
+    <tr>
+      <td class="label">1차 백업 대상</td>
+      <td>$targets</td>
+    </tr>
+  </table>
+
+  <h2>2. 보존 정책 (Retention Rule) 검증</h2>
   <table class="data-table">
     <thead>
       <tr>
-        <th>보관 정책 구분</th>
-        <th>설정된 보관 개수</th>
+        <th>보존 정책 구분</th>
+        <th>기준치</th>
+        <th>설정 상태</th>
+        <th>실제 스냅샷 일치 개수</th>
+        <th>판정</th>
       </tr>
     </thead>
     <tbody>
       <tr>
         <td>일간 보관 (Keep-Daily)</td>
-        <td>${KEEP_DAILY:-?}개</td>
+        <td>7일 이상</td>
+        <td>${config_daily}일</td>
+        <td>${actual_daily}개</td>
+        <td><span class="badge $([[ "$actual_daily_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$actual_daily_status</span></td>
       </tr>
       <tr>
         <td>주간 보관 (Keep-Weekly)</td>
-        <td>${KEEP_WEEKLY:-?}개</td>
+        <td>4주 이상</td>
+        <td>${config_weekly}주</td>
+        <td>${actual_weekly}개</td>
+        <td><span class="badge $([[ "$actual_weekly_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$actual_weekly_status</span></td>
       </tr>
       <tr>
-        <td>월간 보관 (Keep-Monthly)</td>
-        <td>${KEEP_MONTHLY:-?}개</td>
-      </tr>
-    </tbody>
-  </table>
-
-  <h2>2. 백업 스케줄링 (Systemd Timer) 상태</h2>
-  <table class="data-table">
-    <thead>
-      <tr>
-        <th>설정 항목</th>
-        <th>현재 상태 및 값</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>반복 주기 (OnCalendar)</td>
-        <td>$on_calendar</td>
-      </tr>
-      <tr>
-        <td>타이머 등록 여부</td>
-        <td><span class="badge $([[ "$timer_enabled" == "enabled" ]] && echo "badge-success" || echo "badge-warning")">$timer_enabled</span></td>
-      </tr>
-      <tr>
-        <td>타이머 활성화 여부</td>
-        <td><span class="badge $([[ "$timer_active" == "active" ]] && echo "badge-success" || echo "badge-warning")">$timer_active</span></td>
-      </tr>
-      <tr>
-        <td>다음 백업 실행 예정</td>
-        <td>$next_run</td>
+        <td>야간/월간 보관 (Keep-Monthly)</td>
+        <td>12개월 이상</td>
+        <td>${config_monthly}개월</td>
+        <td>${actual_monthly}개</td>
+        <td><span class="badge $([[ "$actual_monthly_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$actual_monthly_status</span></td>
       </tr>
     </tbody>
   </table>
 
-  <h2>3. 접근 통제 (Access Control)</h2>
+  <h2>3. 접근 통제 및 백업 무결성</h2>
   <table class="data-table">
     <thead>
       <tr>
-        <th>점검 대상</th>
-        <th>권장 기준</th>
-        <th>현재 권한</th>
-        <th>보안 평가</th>
+        <th>보안 감사 항목</th>
+        <th>규정 요구 사항</th>
+        <th>실제 설정 수치</th>
+        <th>보안 안전 진단</th>
       </tr>
     </thead>
     <tbody>
       <tr>
-        <td>설정 디렉터리 ($RESTIC_ETC_DIR)</td>
-        <td>700 권장</td>
+        <td>설정 디렉터리 ($etc_dir) 권한</td>
+        <td>700 권한 (소유자 외 접근불가)</td>
         <td>$etc_perm</td>
-        <td><span class="badge $([[ "$etc_perm" == "700" ]] && echo "badge-success" || echo "badge-warning")">$([[ "$etc_perm" == "700" ]] && echo "안전" || echo "경고")</span></td>
+        <td><span class="badge $([[ "$etc_perm" == "700" ]] && echo "badge-success" || echo "badge-warning")">$etc_safe_str</span></td>
       </tr>
       <tr>
-        <td>자격증명 파일 ($BACKUP_ENV_FILE)</td>
-        <td>600 권장</td>
+        <td>자격증명 파일 ($env_file) 권한</td>
+        <td>600 권한 (평문 노출 방지)</td>
         <td>$env_perm</td>
-        <td><span class="badge $([[ "$env_perm" == "600" ]] && echo "badge-success" || echo "badge-warning")">$([[ "$env_perm" == "600" ]] && echo "안전" || echo "경고")</span></td>
+        <td><span class="badge $([[ "$env_perm" == "600" ]] && echo "badge-success" || echo "badge-warning")">$env_safe_str</span></td>
+      </tr>
+      <tr>
+        <td>백업 저장소 무결성 (restic check)</td>
+        <td>에러 및 블록 손상 없음</td>
+        <td>-</td>
+        <td><span class="badge $([[ "$check_status" == *"SUCCESS"* ]] && echo "badge-success" || echo "badge-warning")">$check_status</span></td>
       </tr>
     </tbody>
   </table>
@@ -5030,8 +4660,135 @@ render_audit_report_html() {
 EOF
 }
 
-render_audit_report_json() {
-  local backend="$1" on_calendar="$2" timer_enabled="$3" timer_active="$4" next_run="$5" etc_perm="$6" env_perm="$7"
+render_general_txt() {
+  local -n _g_txt="$1"
+  local backend="${_g_txt[backend]:-}"
+  local on_calendar="${_g_txt[on_calendar]:-알 수 없음}"
+  local timer_enabled="${_g_txt[timer_enabled]:-unknown}"
+  local timer_active="${_g_txt[timer_active]:-unknown}"
+  local next_run="${_g_txt[next_run]:-알 수 없음}"
+  local etc_perm="${_g_txt[etc_perm]:-?}"
+  local env_perm="${_g_txt[env_perm]:-?}"
+
+  local encrypted_note="AES-256 (restic 저장소 자체 암호화)"
+  if [[ -z "${RESTIC_PASSWORD:-}" ]]; then
+    encrypted_note="${encrypted_note} - 경고: 비밀번호 미설정"
+  fi
+
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    setup_colors
+    local styled_backend="${C_BOLD}${C_BLUE}${backend}${C_RESET}"
+    local styled_repo="${C_BOLD}${RESTIC_REPOSITORY:-알 수 없음}${C_RESET}"
+    local styled_crypto
+    if [[ -z "${RESTIC_PASSWORD:-}" ]]; then
+      styled_crypto="${C_RED}${encrypted_note}${C_RESET}"
+    else
+      styled_crypto="${C_GREEN}${encrypted_note}${C_RESET}"
+    fi
+    local styled_targets="${C_BOLD}${BACKUP_TARGETS:-알 수 없음}${C_RESET}"
+    local styled_excludes="${C_DIM}${BACKUP_EXCLUDES:-(없음)}${C_RESET}"
+    local styled_daily="${C_BOLD}${KEEP_DAILY:-?}${C_RESET}"
+    local styled_weekly="${C_BOLD}${KEEP_WEEKLY:-?}${C_RESET}"
+    local styled_monthly="${C_BOLD}${KEEP_MONTHLY:-?}${C_RESET}"
+    local styled_on_calendar="${C_BOLD}${on_calendar}${C_RESET}"
+    
+    local styled_timer_enabled
+    if [[ "$timer_enabled" == "enabled" ]]; then
+      styled_timer_enabled="${C_GREEN}${timer_enabled}${C_RESET}"
+    elif [[ "$timer_enabled" == "disabled" ]]; then
+      styled_timer_enabled="${C_RED}${timer_enabled}${C_RESET}"
+    else
+      styled_timer_enabled="${C_GRAY}${timer_enabled}${C_RESET}"
+    fi
+
+    local styled_timer_active
+    if [[ "$timer_active" == "active" ]]; then
+      styled_timer_active="${C_GREEN}${timer_active}${C_RESET}"
+    elif [[ "$timer_active" == "inactive" ]]; then
+      styled_timer_active="${C_GRAY}${timer_active}${C_RESET}"
+    else
+      styled_timer_active="${C_RED}${timer_active}${C_RESET}"
+    fi
+
+    local styled_etc_perm
+    if [[ "$etc_perm" == "700" ]]; then
+      styled_etc_perm="${C_GREEN}${etc_perm}${C_RESET} ${C_GRAY}(안전)${C_RESET}"
+    else
+      styled_etc_perm="${C_RED}${etc_perm}${C_RESET} ${C_YELLOW}(경고: 700 권장)${C_RESET}"
+    fi
+
+    local styled_env_perm
+    if [[ "$env_perm" == "600" ]]; then
+      styled_env_perm="${C_GREEN}${env_perm}${C_RESET} ${C_GRAY}(안전)${C_RESET}"
+    else
+      styled_env_perm="${C_RED}${env_perm}${C_RESET} ${C_YELLOW}(경고: 600 권장)${C_RESET}"
+    fi
+
+    cat <<EOF
+======================================================================
+[보안 감사 증적] Restic 백업 환경 설정 및 상태 감사 보고서
+======================================================================
+1. 백업 정책 및 대상 경로 정보 [참고: PL-MIX-A / PL-MIX-F]
+  - 백엔드 유형: $styled_backend [Sourced from backup.env]
+  - 백업 저장소: $styled_repo
+  - 암호화 여부: $styled_crypto
+  - 백업 대상지: $styled_targets
+  - 백업 제외지: $styled_excludes
+
+2. 백업 보존 주기 정책 (Restic Forget Policy)
+  - 일간 백업 보존 개수 (Keep-Daily):   $styled_daily개
+  - 주간 백업 보존 개수 (Keep-Weekly):  $styled_weekly개
+  - 월간 백업 보존 개수 (Keep-Monthly): $styled_monthly개
+
+3. 시스템 스케줄러 (Systemd Timer) 상태 검증
+  - 자동 주기 실행 정책 (Calendar): $styled_on_calendar
+  - 타이머 데몬 활성화 (Enabled):   $styled_timer_enabled
+  - 타이머 프로세스 실행 (Active):    $styled_timer_active
+  - 다음 예약 실행 예정 (Next Run):  ${next_run}
+
+4. 시스템 디렉터리 접근 통제 보안 감사
+  - 설정 디렉터리 ($RESTIC_ETC_DIR) 권한: $styled_etc_perm
+  - 자격증명 파일 ($BACKUP_ENV_FILE) 권한: $styled_env_perm
+======================================================================
+EOF
+  else
+    printf '=== 백업 정책 ===\n'
+    printf '백엔드: %s\n' "$backend"
+    printf '저장소 위치: %s\n' "${RESTIC_REPOSITORY:-알 수 없음}"
+    printf '암호화: %s\n' "$encrypted_note"
+    printf '백업 대상: %s\n' "${BACKUP_TARGETS:-알 수 없음}"
+    printf '제외 패턴: %s\n' "${BACKUP_EXCLUDES:-(없음)}"
+    printf '\n'
+    printf '=== 보존 정책 ===\n'
+    printf '일간 보관: %s개\n' "${KEEP_DAILY:-?}개"
+    printf '주간 보관: %s개\n' "${KEEP_WEEKLY:-?}개"
+    printf '월간 보관: %s개\n' "${KEEP_MONTHLY:-?}개"
+    printf '\n'
+    printf '=== 스케줄 ===\n'
+    printf '반복 주기(OnCalendar): %s\n' "$on_calendar"
+    printf '타이머 등록 상태: %s\n' "$timer_enabled"
+    printf '타이머 실행 상태: %s\n' "$timer_active"
+    printf '다음 실행 예정: %s\n' "$next_run"
+    printf '\n'
+    printf '=== 접근 통제 ===\n'
+    local etc_safe_note="경고 - 700 권장"
+    [[ "$etc_perm" == "700" ]] && etc_safe_note="안전 - 소유자 외 접근불가"
+    local env_safe_note="경고 - 600 권장"
+    [[ "$env_perm" == "600" ]] && env_safe_note="안전 - 평문 노출 방지"
+    printf '%s 권한: %s (%s)\n' "$RESTIC_ETC_DIR" "$etc_perm" "$etc_safe_note"
+    printf '%s 권한: %s (%s)\n' "$BACKUP_ENV_FILE" "$env_perm" "$env_safe_note"
+  fi
+}
+
+render_general_json() {
+  local -n _g_json="$1"
+  local backend="${_g_json[backend]:-}"
+  local on_calendar="${_g_json[on_calendar]:-알 수 없음}"
+  local timer_enabled="${_g_json[timer_enabled]:-unknown}"
+  local timer_active="${_g_json[timer_active]:-unknown}"
+  local next_run="${_g_json[next_run]:-알 수 없음}"
+  local etc_perm="${_g_json[etc_perm]:-?}"
+  local env_perm="${_g_json[env_perm]:-?}"
 
   local hostname; hostname=$(hostname 2>/dev/null || echo "unknown")
   local timestamp; timestamp=$(date --iso-8601=seconds 2>/dev/null || date -Iseconds 2>/dev/null || date "+%Y-%m-%dT%H:%M:%S%z")
@@ -5100,6 +4857,269 @@ render_audit_report_json() {
 }
 EOF
 }
+
+render_general_html() {
+  local -n _g_html="$1"
+  local backend="${_g_html[backend]:-}"
+  local on_calendar="${_g_html[on_calendar]:-알 수 없음}"
+  local timer_enabled="${_g_html[timer_enabled]:-unknown}"
+  local timer_active="${_g_html[timer_active]:-unknown}"
+  local next_run="${_g_html[next_run]:-알 수 없음}"
+  local etc_perm="${_g_html[etc_perm]:-?}"
+  local env_perm="${_g_html[env_perm]:-?}"
+  local snapshot_table_html="${_g_html[snapshot_table_html]:-}"
+
+  local repo="${RESTIC_REPOSITORY:-}"
+  local targets="${BACKUP_TARGETS:-}"
+  local excludes_val="${BACKUP_EXCLUDES:-}"
+
+  local keep_daily="${KEEP_DAILY:-?}"
+  local keep_weekly="${KEEP_WEEKLY:-?}"
+  local keep_monthly="${KEEP_MONTHLY:-?}"
+
+  local etc_safe_str="경고 - 700 권장"; [[ "$etc_perm" == "700" ]] && etc_safe_str="안전"
+  local env_safe_str="경고 - 600 권장"; [[ "$env_perm" == "600" ]] && env_safe_str="안전"
+
+  cat <<EOF
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>종합 백업 보안 설정 검토 보고서</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+    body {
+      font-family: 'Inter', 'Malgun Gothic', sans-serif;
+      color: #1e293b;
+      margin: 0;
+      padding: 20px;
+      background-color: #f8fafc;
+    }
+    .report-card {
+      max-width: 800px;
+      margin: 0 auto;
+      background: #ffffff;
+      padding: 40px;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+    }
+    header {
+      text-align: center;
+      border-bottom: 2px solid #0f172a;
+      padding-bottom: 20px;
+      margin-bottom: 30px;
+    }
+    h1 {
+      font-size: 20pt;
+      font-weight: 700;
+      margin: 0 0 10px 0;
+      color: #0f172a;
+    }
+    .meta-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 30px;
+    }
+    .meta-table td {
+      padding: 8px 12px;
+      font-size: 10pt;
+      border: 1px solid #cbd5e1;
+    }
+    .meta-table td.label {
+      background-color: #f1f5f9;
+      font-weight: 600;
+      width: 25%;
+    }
+    h2 {
+      font-size: 12pt;
+      font-weight: 600;
+      border-left: 4px solid #0f172a;
+      padding-left: 10px;
+      margin: 25px 0 12px 0;
+      color: #1e293b;
+    }
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 20px;
+    }
+    .data-table th, .data-table td {
+      border: 1px solid #cbd5e1;
+      padding: 8px 12px;
+      font-size: 9.5pt;
+      text-align: left;
+    }
+    .data-table th {
+      background-color: #f8fafc;
+      font-weight: 600;
+      color: #475569;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 8.5pt;
+      font-weight: 600;
+    }
+    .badge-success {
+      background-color: #dcfce7;
+      color: #15803d;
+    }
+    .badge-warning {
+      background-color: #fee2e2;
+      color: #b91c1c;
+    }
+    .signature-area {
+      margin-top: 40px;
+      display: flex;
+      justify-content: flex-end;
+      gap: 30px;
+    }
+    .signature-box {
+      border: 1px solid #cbd5e1;
+      width: 120px;
+      text-align: center;
+      font-size: 9.5pt;
+    }
+    .signature-box .title {
+      background-color: #f1f5f9;
+      padding: 4px;
+      font-weight: 600;
+      border-bottom: 1px solid #cbd5e1;
+    }
+    .signature-box .sign {
+      height: 50px;
+      line-height: 50px;
+      color: #94a3b8;
+    }
+  </style>
+</head>
+<body>
+
+<div class="report-card">
+  <header>
+    <h1>종합 백업 보안 설정 검토 보고서</h1>
+  </header>
+
+  <table class="meta-table">
+    <tr>
+      <td class="label">보고서 생성일시</td>
+      <td>$(date "+%Y-%m-%d %H:%M:%S KST")</td>
+      <td class="label">대상 서버 호스트</td>
+      <td>$(hostname 2>/dev/null || echo "unknown")</td>
+    </tr>
+  </table>
+
+  <h2>1. 백업 정책 및 대상 경로 정보</h2>
+  <table class="meta-table">
+    <tr>
+      <td class="label">백엔드 유형</td>
+      <td>$backend</td>
+    </tr>
+    <tr>
+      <td class="label">저장소 주소</td>
+      <td>$repo</td>
+    </tr>
+    <tr>
+      <td class="label">1차 백업 대상</td>
+      <td>$targets</td>
+    </tr>
+    <tr>
+      <td class="label">백업 제외 경로</td>
+      <td>${excludes_val:-없음}</td>
+    </tr>
+  </table>
+
+  <h2>2. 백업 보존 주기 정책 (Restic Forget Policy)</h2>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>보존 주기 구분</th>
+        <th>설정 보존 개수</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>일간 백업 보존 (Keep-Daily)</td>
+        <td>${keep_daily}개</td>
+      </tr>
+      <tr>
+        <td>주간 백업 보존 (Keep-Weekly)</td>
+        <td>${keep_weekly}개</td>
+      </tr>
+      <tr>
+        <td>월간 백업 보존 (Keep-Monthly)</td>
+        <td>${keep_monthly}개</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>3. 시스템 스케줄러 & 접근 통제</h2>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>보안 감사 항목</th>
+        <th>설정 내역 및 상태</th>
+        <th>보안 안전 진단</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>자동 실행 스케줄 (Calendar)</td>
+        <td>$on_calendar</td>
+        <td><span class="badge badge-success">정상</span></td>
+      </tr>
+      <tr>
+        <td>타이머 데몬 상태 (Enabled / Active)</td>
+        <td>$timer_enabled / $timer_active (다음 실행: $next_run)</td>
+        <td><span class="badge $([[ "$timer_active" == "active" ]] && echo "badge-success" || echo "badge-warning")">$timer_active</span></td>
+      </tr>
+      <tr>
+        <td>설정 디렉터리 ($RESTIC_ETC_DIR) 권한</td>
+        <td>$etc_perm</td>
+        <td><span class="badge $([[ "$etc_perm" == "700" ]] && echo "badge-success" || echo "badge-warning")">$etc_safe_str</span></td>
+      </tr>
+      <tr>
+        <td>자격증명 파일 ($BACKUP_ENV_FILE) 권한</td>
+        <td>$env_perm</td>
+        <td><span class="badge $([[ "$env_perm" == "600" ]] && echo "badge-success" || echo "badge-warning")">$env_safe_str</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>4. 백업 이력 (Snapshots)</h2>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>백업 완료 일시</th>
+        <th>호스트</th>
+        <th>경로 및 용량</th>
+      </tr>
+    </thead>
+    <tbody>
+      $snapshot_table_html
+    </tbody>
+  </table>
+
+  <div class="signature-area">
+    <div class="signature-box">
+      <div class="title">검토자</div>
+      <div class="sign">시스템 운영팀 (인)</div>
+    </div>
+    <div class="signature-box">
+      <div class="title">승인자</div>
+      <div class="sign">정보보안책임자 (서명생략)</div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
+EOF
+}
+
 
 cmd_audit() {
   if has_help_flag "$@"; then

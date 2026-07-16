@@ -380,5 +380,56 @@ EOF
   [[ "$output" == *"설정 정합성 검증에 실패했습니다"* ]]
 }
 
+@test "escape_single_quotes preserves hyphen-prefixed strings like -n and -e" {
+  run escape_single_quotes "-n"
+  [ "$status" -eq 0 ]
+  [ "$output" = "-n" ]
+
+  run escape_single_quotes "-e"
+  [ "$status" -eq 0 ]
+  [ "$output" = "-e" ]
+
+  run escape_single_quotes "-nhello"
+  [ "$status" -eq 0 ]
+  [ "$output" = "-nhello" ]
+}
+
+@test "save_profile_config preserves passwords starting with hyphens" {
+  mkdir -p "$RESTIC_ETC_DIR"
+  chmod 700 "$RESTIC_ETC_DIR"
+
+  local -A resolved=()
+  resolved[backend]="sftp"
+  resolved[host]="127.0.0.1"
+  resolved[port]="22"
+  resolved[user]="backup"
+  resolved[password]="-nSecretPassword"
+  resolved[targets]="/etc"
+  resolved[excludes_csv]=""
+  resolved[keep_daily]="7"
+  resolved[keep_weekly]="4"
+  resolved[keep_monthly]="12"
+  resolved[profile_name]="test-hyphen"
+  resolved[on_calendar]="*-*-* 03:00:00"
+
+  # Mock SSH key generation & systemctl
+  stub_command "ssh-keygen" "touch ${BACKUP_SSH_KEY} ${BACKUP_SSH_KEY}.pub"
+  stub_command "systemctl" '
+    case "$1" in
+      is-enabled) exit 1 ;;
+      *) exit 0 ;;
+    esac
+  '
+
+  run save_profile_config resolved
+  [ "$status" -eq 0 ]
+
+  # Now read it back and verify it matches
+  declare -A read_back=()
+  declare -a errors=()
+  load_and_validate_config "test-hyphen" read_back errors
+  [ "${read_back[password]}" = "-nSecretPassword" ]
+}
+
 
 
