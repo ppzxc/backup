@@ -93,6 +93,16 @@ DEFAULT_KEEP_MONTHLY=12
 DEFAULT_ON_CALENDAR="*-*-* 02:00:00"
 DEFAULT_SFTP_PORT=22
 BACKUP_VERBOSE="${BACKUP_VERBOSE:-0}"
+
+# 구버전 -> 신버전 환경변수 매핑 정의
+# shellcheck disable=SC2034
+declare -A COMPATIBILITY_MAP=(
+  ["BACKUP_EXCLUDE_PATHS"]="BACKUP_EXCLUDES"
+  ["BACKUP_SFTP_HOST"]="RCLONE_CONFIG_SYNO_BACKUP_HOST"
+  ["BACKUP_SFTP_PORT"]="RCLONE_CONFIG_SYNO_BACKUP_PORT"
+  ["BACKUP_SFTP_USER"]="RCLONE_CONFIG_SYNO_BACKUP_USER"
+)
+
 # --- Configuration Registry Schema ---
 CONFIG_FIELDS=()
 # 스키마 키-환경변수 매핑 테이블로, 동적 쿼리 및 유효성 검사 루프에서 참조되어 경고 예외 처리
@@ -467,6 +477,16 @@ require_backup_env() {
     done
     die "설정 파일 파싱 실패: $BACKUP_ENV_FILE" 1
   fi
+
+  # 구버전 키 호환성 검증 및 맵핑 적용
+  local old_key new_key
+  for old_key in "${!COMPATIBILITY_MAP[@]}"; do
+    new_key="${COMPATIBILITY_MAP[$old_key]}"
+    if [[ -n "${file_config[$old_key]:-}" && -z "${file_config[$new_key]:-}" ]]; then
+      log_warn "구버전 설정 키(${old_key})가 감지되었습니다. '${new_key}' 값으로 자동 맵핑되어 실행되지만, 정상적인 유지를 위해 'backup.sh upgrade'를 실행해 주십시오."
+      file_config["$new_key"]="${file_config[$old_key]}"
+    fi
+  done
 
   local k
   for k in "${!file_config[@]}"; do
