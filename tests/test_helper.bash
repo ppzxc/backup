@@ -5,8 +5,9 @@ setup_backup_sh_env() {
   mkdir -p "$TEST_ROOT"
 
   export RESTIC_ETC_DIR="${TEST_ROOT}/etc/restic"
-  export BACKUP_ENV_FILE="${RESTIC_ETC_DIR}/backup.env"
-  export BACKUP_SSH_KEY="${RESTIC_ETC_DIR}/backup_key"
+  export BACKUP_ETC_DIR="${TEST_ROOT}/etc/backup"
+  export BACKUP_ENV_FILE="${BACKUP_ETC_DIR}/backup.env"
+  export BACKUP_SSH_KEY="${BACKUP_ETC_DIR}/backup_key"
   export BACKUP_SCRIPT_INSTALL_PATH="${TEST_ROOT}/usr/local/sbin/backup.sh"
   export RESTIC_INSTALL_PATH="${TEST_ROOT}/usr/local/bin/restic"
   export RCLONE_INSTALL_PATH="${TEST_ROOT}/usr/local/bin/rclone"
