@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.42"
+BACKUP_SCRIPT_VERSION="0.0.43"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -728,9 +728,9 @@ load_and_validate_config() {
   fi
 
   if [[ -z "$backend" && -f "$BACKUP_ENV_FILE" ]]; then
-    if grep -q -E "AWS_ACCESS_KEY_ID=" "$BACKUP_ENV_FILE" || grep -q -E 'RESTIC_REPOSITORY=["'\'' ]s3:' "$BACKUP_ENV_FILE"; then
+    if grep -q -E "AWS_ACCESS_KEY_ID=" "$BACKUP_ENV_FILE" || grep -q -E 'RESTIC_REPOSITORY=.*s3:' "$BACKUP_ENV_FILE"; then
       backend="s3"
-    elif grep -q -E "RCLONE_CONFIG_SYNO_BACKUP_TYPE=['\"]sftp['\"]" "$BACKUP_ENV_FILE" || grep -q -E 'RESTIC_REPOSITORY=["'\'' ]rclone:syno_backup' "$BACKUP_ENV_FILE"; then
+    elif grep -q -E "RCLONE_CONFIG_SYNO_BACKUP_TYPE=" "$BACKUP_ENV_FILE" || grep -q -E 'RESTIC_REPOSITORY=.*rclone:syno_backup' "$BACKUP_ENV_FILE"; then
       backend="sftp"
     fi
   fi
@@ -842,7 +842,7 @@ resolve_and_validate_config() {
   local file_secondary_backend="" file_secondary_password="" file_secondary_keep_daily="" file_secondary_keep_weekly="" file_secondary_keep_monthly=""
   local file_secondary_endpoint="" file_secondary_bucket="" file_secondary_access_key="" file_secondary_secret_key=""
   local file_secondary_host="" file_secondary_port="" file_secondary_user="" file_secondary_repo=""
-  local file_db_type="" file_db_command="" file_db_filename="" file_db_schedule="" file_db_keep_daily="" file_db_keep_weekly="" file_db_keep_monthly=""
+  local file_db_type="" file_db_command="" file_db_filename="" file_db_schedule="" file_db_keep_daily="" file_db_keep_weekly="" file_db_keep_monthly="" file_chrony_report=""
   if [[ -f "${BACKUP_ENV_FILE:-}" ]]; then
     declare -A file_config=()
     if ! load_backup_env_to_array "$BACKUP_ENV_FILE" file_config _errors; then
@@ -883,6 +883,7 @@ resolve_and_validate_config() {
     file_db_keep_daily="${file_config[KEEP_DB_DAILY]:-}"
     file_db_keep_weekly="${file_config[KEEP_DB_WEEKLY]:-}"
     file_db_keep_monthly="${file_config[KEEP_DB_MONTHLY]:-}"
+    file_chrony_report="${file_config[BACKUP_CHRONY_REPORT]:-}"
   fi
 
 
@@ -909,6 +910,7 @@ resolve_and_validate_config() {
   local env_db_keep_daily="${KEEP_DB_DAILY:-}"
   local env_db_keep_weekly="${KEEP_DB_WEEKLY:-}"
   local env_db_keep_monthly="${KEEP_DB_MONTHLY:-}"
+  local env_chrony_report="${BACKUP_CHRONY_REPORT:-}"
 
   # Resolve values with priority: CLI option > Env variable > Config file > Default value
   local cli_targets="${_opts[targets]:-}"
@@ -964,7 +966,7 @@ resolve_and_validate_config() {
   local cli_chrony_report="${_opts[chrony-report]:-}"
   # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
   # shellcheck disable=SC2154
-  _resolved[chrony_report]=$(resolve_value "$cli_chrony_report" "${BACKUP_CHRONY_REPORT:-}" "${file_config[BACKUP_CHRONY_REPORT]:-}" "" || true)
+  _resolved[chrony_report]=$(resolve_value "$cli_chrony_report" "$env_chrony_report" "$file_chrony_report" "" || true)
 
   # DB 타입별 기본 명령어 채우기
   if [[ -n "${_resolved[db_type]:-}" ]]; then
@@ -5418,34 +5420,16 @@ render_chrony_html() {
 HTMLEOF
 }
 
-write_chrony_systemd_assets() {
-  local chrony_on_calendar="${1:-$DEFAULT_CHRONY_ON_CALENDAR}"
-
-  mkdir -p "$SYSTEMD_UNIT_DIR"
-
-  cat > "$SYSTEMD_UNIT_DIR/backup-chrony-report.service" <<EOF
-[Unit]
-Description=ISMS-P 2.9.3 NTP Sync Evidence Report
-After=network.target chronyd.service
-
-[Service]
-Type=oneshot
-ExecStart=$BACKUP_SCRIPT_INSTALL_PATH chrony --report
-EOF
-  chmod 644 "$SYSTEMD_UNIT_DIR/backup-chrony-report.service"
-
-  cat > "$SYSTEMD_UNIT_DIR/backup-chrony-report.timer" <<EOF
-[Unit]
-Description=Run ISMS-P NTP Sync Evidence Report Timer
-
-[Timer]
-OnCalendar=$chrony_on_calendar
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-  chmod 644 "$SYSTEMD_UNIT_DIR/backup-chrony-report.timer"
+# backup.env에 BACKUP_CHRONY_REPORT 플래그를 직접 추가/갱신한다
+_chrony_set_flag_in_env() {
+  local flag_val="$1"
+  require_backup_env
+  if grep -q "BACKUP_CHRONY_REPORT=" "$BACKUP_ENV_FILE"; then
+    sed -i "s/BACKUP_CHRONY_REPORT='[01]'/BACKUP_CHRONY_REPORT='${flag_val}'/" "$BACKUP_ENV_FILE"
+  else
+    printf "\n# ==========================================\n# Chrony NTP 시각 동기화 증적 생성 설정\n# ==========================================\nBACKUP_CHRONY_REPORT='%s'\n" "$flag_val" >> "$BACKUP_ENV_FILE"
+  fi
+  chmod 600 "$BACKUP_ENV_FILE" 2>/dev/null || true
 }
 
 cmd_chrony() {
@@ -5475,6 +5459,7 @@ HELPEOF
   case "$action" in
     setup)
       require_root
+      require_backup_env
 
       # 1. 기존 설정 파일 백업
       if [[ -f "$CHRONY_CONF_PATH" ]]; then
@@ -5500,16 +5485,22 @@ HELPEOF
       log_info "=== chronyc sources -v ==="
       chronyc sources -v || true
 
-      # 6. backup.env에 BACKUP_CHRONY_REPORT=1 기록 (Configuration Registry 활용)
-      # nameref 전달용 변수 — shellcheck 경고 우회
+      # 6. backup.env에 BACKUP_CHRONY_REPORT=1 기록 (Configuration Registry 우선 적용 및 폴백)
+      # nameref 인자 전달용 설정 배열 선언
       # shellcheck disable=SC2034
       local -A chrony_cfg=()
+      # nameref 인자 전달용 에러 배열 선언
       # shellcheck disable=SC2034
       local -A chrony_errs=()
-      load_and_validate_config opts chrony_cfg chrony_errs 2>/dev/null || true
-      # shellcheck disable=SC2034
-      chrony_cfg[chrony_report]="1"
-      save_profile_config chrony_cfg >/dev/null
+
+      if load_and_validate_config "" chrony_cfg chrony_errs 2>/dev/null; then
+        # nameref 인자 변수 수정 분석 경고 우회
+        # shellcheck disable=SC2034
+        chrony_cfg[chrony_report]="1"
+        save_profile_config chrony_cfg >/dev/null
+      else
+        _chrony_set_flag_in_env "1"
+      fi
       log_info "BACKUP_CHRONY_REPORT=1 이 backup.env에 저장되었습니다."
       ;;
 
@@ -5855,7 +5846,7 @@ except Exception as e:
       fi
 
       log_info "감사 보고서가 동시 저장되었습니다:"
-      log_info "  - 텍스트 보고서: ${base_path}.txt"
+      log_info "  - 텍스트 보고서: $report_file"
       log_info "  - JSON 보고서: ${base_path}.json"
       log_info "  - HTML 보고서: ${base_path}.html"
     fi
