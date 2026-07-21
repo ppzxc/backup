@@ -2732,14 +2732,15 @@ scheduler_systemd_register() {
   local drill_on_calendar="${_sys_cfg[on-calendar-drill]:-*-*-01 01:30:00}"
   local daily="${_sys_cfg[daily]:-0}"
   local restore_drill="${_sys_cfg[restore-drill]:-0}"
+  local chrony_report="${_sys_cfg[chrony_report]:-${BACKUP_CHRONY_REPORT:-}}"
 
   if (( daily )); then
-    write_audit_systemd_assets "$daily_on_calendar" "$drill_on_calendar"
+    write_systemd_timer_unit "backup-audit-daily" "Restic Daily Backup Audit Report" "Run Restic Daily Backup Audit Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH audit --daily --report" "$daily_on_calendar"
     systemd_reload_daemon
     systemd_enable_unit "backup-audit-daily.timer"
     log_info "schedule enable 완료 (daily: ${daily_on_calendar})"
   elif (( restore_drill )); then
-    write_audit_systemd_assets "$daily_on_calendar" "$drill_on_calendar"
+    write_systemd_timer_unit "backup-audit-restore-drill" "Restic Restore Drill Report" "Run Restic Restore Drill Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH audit --restore-drill --report" "$drill_on_calendar"
     systemd_reload_daemon
     systemd_enable_unit "backup-audit-restore-drill.timer"
     log_info "schedule enable 완료 (drill: ${drill_on_calendar})"
@@ -2748,9 +2749,10 @@ scheduler_systemd_register() {
     if [[ -n "${BACKUP_DB_TYPE:-}" ]]; then
       resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "${profile_name}-db" schedule
     fi
-    write_audit_systemd_assets "$daily_on_calendar" "$drill_on_calendar"
-    if [[ "${BACKUP_CHRONY_REPORT:-}" == "1" ]]; then
-      write_chrony_systemd_assets
+    write_systemd_timer_unit "backup-audit-daily" "Restic Daily Backup Audit Report" "Run Restic Daily Backup Audit Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH audit --daily --report" "$daily_on_calendar"
+    write_systemd_timer_unit "backup-audit-restore-drill" "Restic Restore Drill Report" "Run Restic Restore Drill Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH audit --restore-drill --report" "$drill_on_calendar"
+    if [[ "$chrony_report" == "1" ]]; then
+      write_systemd_timer_unit "backup-chrony-report" "ISMS-P 2.9.3 NTP Sync Evidence Report" "Run ISMS-P NTP Sync Evidence Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH chrony --report" "${DEFAULT_CHRONY_ON_CALENDAR}"
       systemd_enable_unit "backup-chrony-report.timer"
       log_info "chrony NTP 증적 타이머도 등록했습니다 (${DEFAULT_CHRONY_ON_CALENDAR})"
     fi
@@ -2828,63 +2830,38 @@ systemd_disable_unit() {
   systemctl disable --now "$unit" 2>/dev/null || true
 }
 
-write_audit_systemd_assets() {
-  local daily_on_calendar="$1"
-  local drill_on_calendar="$2"
+write_systemd_timer_unit() {
+  local unit_name="$1"
+  local service_desc="$2"
+  local timer_desc="$3"
+  local exec_cmd="$4"
+  local calendar_spec="$5"
 
   mkdir -p "$SYSTEMD_UNIT_DIR"
 
-  # 1. Daily review service
-  cat > "$SYSTEMD_UNIT_DIR/backup-audit-daily.service" <<EOF
+  cat > "$SYSTEMD_UNIT_DIR/${unit_name}.service" <<EOF
 [Unit]
-Description=Restic Daily Backup Audit Report
+Description=${service_desc}
 After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=$BACKUP_SCRIPT_INSTALL_PATH audit --daily --report
+ExecStart=${exec_cmd}
 EOF
-  chmod 644 "$SYSTEMD_UNIT_DIR/backup-audit-daily.service"
+  chmod 644 "$SYSTEMD_UNIT_DIR/${unit_name}.service"
 
-  # 2. Daily review timer
-  cat > "$SYSTEMD_UNIT_DIR/backup-audit-daily.timer" <<EOF
+  cat > "$SYSTEMD_UNIT_DIR/${unit_name}.timer" <<EOF
 [Unit]
-Description=Run Restic Daily Backup Audit Report Timer
+Description=${timer_desc}
 
 [Timer]
-OnCalendar=$daily_on_calendar
+OnCalendar=${calendar_spec}
 Persistent=true
 
 [Install]
 WantedBy=timers.target
 EOF
-  chmod 644 "$SYSTEMD_UNIT_DIR/backup-audit-daily.timer"
-
-  # 3. Restore drill service
-  cat > "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.service" <<EOF
-[Unit]
-Description=Restic Restore Drill Report
-After=network.target
-
-[Service]
-Type=oneshot
-ExecStart=$BACKUP_SCRIPT_INSTALL_PATH audit --restore-drill --report
-EOF
-  chmod 644 "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.service"
-
-  # 4. Restore drill timer
-  cat > "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.timer" <<EOF
-[Unit]
-Description=Run Restic Restore Drill Report Timer
-
-[Timer]
-OnCalendar=$drill_on_calendar
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-  chmod 644 "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.timer"
+  chmod 644 "$SYSTEMD_UNIT_DIR/${unit_name}.timer"
 }
 
 # nameref로 인자를 전달하여 사용되지 않는 것으로 오인받는 변수 우회
@@ -3556,35 +3533,53 @@ render_audit_report_unified() {
   esac
 }
 
-write_audit_reports() {
-  local -n _war_data="$1"
-  local md_path="$2"
-  
+# nameref 전달 인자 미사용 오탐 우회
+# shellcheck disable=SC2034
+write_evidence_report_bundle() {
+  local -n _werb_data="$1"
+  local report_file="$2"
+  local report_type="$3"
+
   local base_path
-  if [[ "$md_path" == *.md ]]; then
-    base_path="${md_path%.md}"
-  elif [[ "$md_path" == *.txt ]]; then
-    base_path="${md_path%.txt}"
+  if [[ "$report_file" == *.md ]]; then
+    base_path="${report_file%.md}"
+  elif [[ "$report_file" == *.txt ]]; then
+    base_path="${report_file%.txt}"
+  elif [[ "$report_file" == *.json ]]; then
+    base_path="${report_file%.json}"
+  elif [[ "$report_file" == *.html ]]; then
+    base_path="${report_file%.html}"
   else
-    base_path="$md_path"
+    base_path="$report_file"
   fi
 
+  local txt_path="${base_path}.txt"
+  if [[ "$report_file" == *.md ]]; then
+    txt_path="$report_file"
+  fi
   local json_path="${base_path}.json"
   local html_path="${base_path}.html"
 
-  mkdir -p "$(dirname "$md_path")"
+  mkdir -p "$(dirname "$base_path")"
+  chmod 700 "$(dirname "$base_path")" 2>/dev/null || true
 
-  # txt / markdown
-  render_audit_report_unified "restore_drill" "txt" _war_data > "$md_path"
-  chmod 600 "$md_path"
+  if [[ "$report_type" == "chrony" ]]; then
+    render_chrony_txt _werb_data > "$txt_path"
+    render_chrony_json _werb_data > "$json_path"
+    render_chrony_html _werb_data > "$html_path"
+  else
+    render_audit_report_unified "$report_type" "txt" _werb_data > "$txt_path"
+    render_audit_report_unified "$report_type" "json" _werb_data > "$json_path"
+    render_audit_report_unified "$report_type" "html" _werb_data > "$html_path"
+  fi
 
-  # JSON
-  render_audit_report_unified "restore_drill" "json" _war_data > "$json_path"
-  chmod 600 "$json_path"
+  chmod 600 "$txt_path" "$json_path" "$html_path" 2>/dev/null || true
+}
 
-  # HTML
-  render_audit_report_unified "restore_drill" "html" _war_data > "$html_path"
-  chmod 600 "$html_path"
+write_audit_reports() {
+  local -n _war_data="$1"
+  local md_path="$2"
+  write_evidence_report_bundle _war_data "$md_path" "restore_drill"
 }
 
 # Compatibility wrappers
@@ -5453,18 +5448,6 @@ EOF
   chmod 644 "$SYSTEMD_UNIT_DIR/backup-chrony-report.timer"
 }
 
-# backup.env에 BACKUP_CHRONY_REPORT 플래그를 직접 추가/갱신한다
-_chrony_set_flag_in_env() {
-  local flag_val="$1"
-  require_backup_env
-  if grep -q "BACKUP_CHRONY_REPORT=" "$BACKUP_ENV_FILE"; then
-    sed -i "s/BACKUP_CHRONY_REPORT='[01]'/BACKUP_CHRONY_REPORT='${flag_val}'/" "$BACKUP_ENV_FILE"
-  else
-    printf "\n# ==========================================\n# Chrony NTP 시각 동기화 증적 생성 설정\n# ==========================================\nBACKUP_CHRONY_REPORT='%s'\n" "$flag_val" >> "$BACKUP_ENV_FILE"
-  fi
-  chmod 600 "$BACKUP_ENV_FILE" 2>/dev/null || true
-}
-
 cmd_chrony() {
   if has_help_flag "$@"; then
     cat <<'HELPEOF'
@@ -5517,8 +5500,16 @@ HELPEOF
       log_info "=== chronyc sources -v ==="
       chronyc sources -v || true
 
-      # 6. backup.env에 BACKUP_CHRONY_REPORT=1 기록
-      _chrony_set_flag_in_env "1"
+      # 6. backup.env에 BACKUP_CHRONY_REPORT=1 기록 (Configuration Registry 활용)
+      # nameref 전달용 변수 — shellcheck 경고 우회
+      # shellcheck disable=SC2034
+      local -A chrony_cfg=()
+      # shellcheck disable=SC2034
+      local -A chrony_errs=()
+      load_and_validate_config opts chrony_cfg chrony_errs 2>/dev/null || true
+      # shellcheck disable=SC2034
+      chrony_cfg[chrony_report]="1"
+      save_profile_config chrony_cfg >/dev/null
       log_info "BACKUP_CHRONY_REPORT=1 이 backup.env에 저장되었습니다."
       ;;
 
@@ -5530,9 +5521,6 @@ HELPEOF
       local date_suffix; date_suffix=$(date +%Y%m%d)
       local report_file="${report_opts[report-file]:-${BACKUP_REPORTS_DIR}/ntp_sync_evidence_${date_suffix}.txt}"
       local base_path="${report_file%.txt}"
-
-      mkdir -p "$(dirname "$report_file")"
-      chmod 700 "$(dirname "$report_file")" 2>/dev/null || true
 
       # 상태 수집
       local svc_enabled svc_active sources_out tracking_out conf_perm_out
@@ -5557,10 +5545,7 @@ HELPEOF
         [conf_perm]="$conf_perm_out"
       )
 
-      render_chrony_txt  chrony_data > "$report_file"
-      render_chrony_json chrony_data > "${base_path}.json"
-      render_chrony_html chrony_data > "${base_path}.html"
-      chmod 600 "$report_file" "${base_path}.json" "${base_path}.html" 2>/dev/null || true
+      write_evidence_report_bundle chrony_data "$report_file" "chrony"
 
       log_info "NTP 증적 보고서가 생성되었습니다:"
       log_info "  - TXT:  $report_file"
@@ -5819,60 +5804,60 @@ except Exception as e:
     print("<tr><td colspan=\"4\">(스냅샷 정보 해석 실패: %s)</td></tr>" % e)
 ' <<< "$snapshots_json")
 
-    # Render Report Function
+    # nameref 전달용 daily 데이터 조립
+    # shellcheck disable=SC2034
+    local -A daily_data=(
+      [cur_time]="$cur_time"
+      [hostname]="$hostname_val"
+      [tester]="$tester"
+      [backend]="$backend"
+      [repo]="$RESTIC_REPOSITORY"
+      [targets]="$BACKUP_TARGETS"
+      [config_daily]="$config_daily"
+      [actual_daily]="$actual_daily"
+      [config_daily_status]="$config_daily_status"
+      [actual_daily_status]="$actual_daily_status"
+      [config_weekly]="$config_weekly"
+      [actual_weekly]="$actual_weekly"
+      [config_weekly_status]="$config_weekly_status"
+      [actual_weekly_status]="$actual_weekly_status"
+      [config_monthly]="$config_monthly"
+      [actual_monthly]="$actual_monthly"
+      [config_monthly_status]="$config_monthly_status"
+      [actual_monthly_status]="$actual_monthly_status"
+      [etc_dir]="$RESTIC_ETC_DIR"
+      [etc_perm]="$etc_perm"
+      [etc_safe_str]="$etc_safe_str"
+      [env_file]="$BACKUP_ENV_FILE"
+      [env_perm]="$env_perm"
+      [env_safe_str]="$env_safe_str"
+      [check_status]="$check_status"
+      [snapshot_table]="$snapshot_table"
+      [snapshot_table_html]="$snapshot_table_html"
+      [snapshots_json]="$snapshots_json"
+    )
+
     render_daily_audit_report "$cur_time" "$hostname_val" "$tester" "$backend" "$RESTIC_REPOSITORY" \
       "$BACKUP_TARGETS" "$config_daily" "$actual_daily" "$config_daily_status" "$actual_daily_status" \
       "$config_weekly" "$actual_weekly" "$config_weekly_status" "$actual_weekly_status" \
       "$config_monthly" "$actual_monthly" "$config_monthly_status" "$actual_monthly_status" \
       "$RESTIC_ETC_DIR" "$etc_perm" "$etc_safe_str" "$BACKUP_ENV_FILE" "$env_perm" "$env_safe_str" \
       "$check_status" "$snapshot_table"
-      
+
     if [[ -n "$report_file" ]]; then
-      mkdir -p "$(dirname "$report_file")"
-      chmod 700 "$(dirname "$report_file")" 2>/dev/null || true
-      
-      render_daily_audit_report "$cur_time" "$hostname_val" "$tester" "$backend" "$RESTIC_REPOSITORY" \
-        "$BACKUP_TARGETS" "$config_daily" "$actual_daily" "$config_daily_status" "$actual_daily_status" \
-        "$config_weekly" "$actual_weekly" "$config_weekly_status" "$actual_weekly_status" \
-        "$config_monthly" "$actual_monthly" "$config_monthly_status" "$actual_monthly_status" \
-        "$RESTIC_ETC_DIR" "$etc_perm" "$etc_safe_str" "$BACKUP_ENV_FILE" "$env_perm" "$env_safe_str" \
-        "$check_status" "$snapshot_table" > "$report_file"
-      chmod 600 "$report_file"
+      write_evidence_report_bundle daily_data "$report_file" "daily"
 
-      local json_report_file
+      local base_path
       if [[ "$report_file" =~ \.(txt|md)$ ]]; then
-        json_report_file="${report_file%.*}.json"
+        base_path="${report_file%.*}"
       else
-        json_report_file="${report_file}.json"
+        base_path="$report_file"
       fi
 
-      render_daily_audit_report_json "$cur_time" "$hostname_val" "$tester" "$backend" "$RESTIC_REPOSITORY" \
-        "$BACKUP_TARGETS" "$config_daily" "$actual_daily" "$config_daily_status" "$actual_daily_status" \
-        "$config_weekly" "$actual_weekly" "$config_weekly_status" "$actual_weekly_status" \
-        "$config_monthly" "$actual_monthly" "$config_monthly_status" "$actual_monthly_status" \
-        "$RESTIC_ETC_DIR" "$etc_perm" "$etc_safe_str" "$BACKUP_ENV_FILE" "$env_perm" "$env_safe_str" \
-        "$check_status" "$snapshots_json" > "$json_report_file"
-      chmod 600 "$json_report_file"
-
-      local html_report_file
-      if [[ "$report_file" =~ \.(txt|md)$ ]]; then
-        html_report_file="${report_file%.*}.html"
-      else
-        html_report_file="${report_file}.html"
-      fi
-
-      render_daily_audit_report_html "$cur_time" "$hostname_val" "$tester" "$backend" "$RESTIC_REPOSITORY" \
-        "$BACKUP_TARGETS" "$config_daily" "$actual_daily" "$config_daily_status" "$actual_daily_status" \
-        "$config_weekly" "$actual_weekly" "$config_weekly_status" "$actual_weekly_status" \
-        "$config_monthly" "$actual_monthly" "$config_monthly_status" "$actual_monthly_status" \
-        "$RESTIC_ETC_DIR" "$etc_perm" "$etc_safe_str" "$BACKUP_ENV_FILE" "$env_perm" "$env_safe_str" \
-        "$check_status" "$snapshot_table_html" > "$html_report_file"
-      chmod 600 "$html_report_file"
-      
       log_info "감사 보고서가 동시 저장되었습니다:"
-      log_info "  - 텍스트 보고서: $report_file"
-      log_info "  - JSON 보고서: $json_report_file"
-      log_info "  - HTML 보고서: $html_report_file"
+      log_info "  - 텍스트 보고서: ${base_path}.txt"
+      log_info "  - JSON 보고서: ${base_path}.json"
+      log_info "  - HTML 보고서: ${base_path}.html"
     fi
 
     return 0
