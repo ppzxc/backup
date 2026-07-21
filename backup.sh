@@ -961,6 +961,11 @@ resolve_and_validate_config() {
   local cli_db_keep_monthly="${_opts[db-keep-monthly]:-}"
   _resolved[db_keep_monthly]=$(resolve_value "$cli_db_keep_monthly" "$env_db_keep_monthly" "$file_db_keep_monthly" "" || true)
 
+  local cli_chrony_report="${_opts[chrony-report]:-}"
+  # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
+  # shellcheck disable=SC2154
+  _resolved[chrony_report]=$(resolve_value "$cli_chrony_report" "${BACKUP_CHRONY_REPORT:-}" "${file_config[BACKUP_CHRONY_REPORT]:-}" "" || true)
+
   # DB 타입별 기본 명령어 채우기
   if [[ -n "${_resolved[db_type]:-}" ]]; then
     if [[ -z "${_resolved[db_command]:-}" ]]; then
@@ -5243,8 +5248,8 @@ leapsectz right/UTC'
 # shellcheck disable=SC2034
 render_chrony_txt() {
   local -n _ct_ref="$1"
-  local hostname_val="${_ct_ref[hostname]:-$(hostname)}"
-  local report_date="${_ct_ref[report_date]:-$(date '+%Y-%m-%d %H:%M:%S %Z')}"
+  local hostname_val="${_ct_ref[hostname]:-unknown}"
+  local report_date="${_ct_ref[report_date]:-unknown}"
   local service_enabled="${_ct_ref[service_enabled]:-unknown}"
   local service_active="${_ct_ref[service_active]:-unknown}"
   local sources_output="${_ct_ref[sources_output]:-}"
@@ -5280,8 +5285,8 @@ EOF
 # shellcheck disable=SC2034
 render_chrony_json() {
   local -n _cj_ref="$1"
-  local hostname_val="${_cj_ref[hostname]:-$(hostname)}"
-  local report_date="${_cj_ref[report_date]:-$(date '+%Y-%m-%d %H:%M:%S %Z')}"
+  local hostname_val="${_cj_ref[hostname]:-unknown}"
+  local report_date="${_cj_ref[report_date]:-unknown}"
   local service_enabled="${_cj_ref[service_enabled]:-unknown}"
   local service_active="${_cj_ref[service_active]:-unknown}"
   local sources_output="${_cj_ref[sources_output]:-}"
@@ -5310,8 +5315,8 @@ EOF
 # shellcheck disable=SC2034
 render_chrony_html() {
   local -n _ch_ref="$1"
-  local hostname_val="${_ch_ref[hostname]:-$(hostname)}"
-  local report_date="${_ch_ref[report_date]:-$(date '+%Y-%m-%d %H:%M:%S %Z')}"
+  local hostname_val="${_ch_ref[hostname]:-unknown}"
+  local report_date="${_ch_ref[report_date]:-unknown}"
   local service_enabled="${_ch_ref[service_enabled]:-unknown}"
   local service_active="${_ch_ref[service_active]:-unknown}"
   local sources_output="${_ch_ref[sources_output]:-}"
@@ -5457,6 +5462,7 @@ _chrony_set_flag_in_env() {
   else
     printf "\n# ==========================================\n# Chrony NTP 시각 동기화 증적 생성 설정\n# ==========================================\nBACKUP_CHRONY_REPORT='%s'\n" "$flag_val" >> "$BACKUP_ENV_FILE"
   fi
+  chmod 600 "$BACKUP_ENV_FILE" 2>/dev/null || true
 }
 
 cmd_chrony() {
@@ -6919,14 +6925,12 @@ cmd_wizard() {
   local chrony_choice; read -r chrony_choice || true
 
   if [[ "$chrony_choice" =~ ^[Yy]$ ]]; then
-    local chrony_installed=0
+    local chrony_ready=0
     if type -P chronyc > /dev/null 2>&1 && systemctl is-active chronyd > /dev/null 2>&1; then
-      chrony_installed=1
-    elif type -P chronyc > /dev/null 2>&1; then
-      chrony_installed=1
+      chrony_ready=1
     fi
 
-    if (( chrony_installed )); then
+    if (( chrony_ready )); then
       cmd_chrony setup
       chrony_setup_done=1
     else
@@ -6962,6 +6966,12 @@ cmd_wizard() {
     repo_location="${file_config[RESTIC_REPOSITORY]:-}"
   fi
 
+  local ntp_report_active=0
+  local chrony_env_var="BACKUP_CHRONY_REPORT"
+  if (( chrony_setup_done )) || [[ "${file_config[$chrony_env_var]:-}" == "1" || "${!chrony_env_var:-}" == "1" ]]; then
+    ntp_report_active=1
+  fi
+
   if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
     printf '\n%b%b=========================================%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
     printf ' %b%b⚙  설정이 완료되었습니다 (Configuration Completed)%b\n' "$C_GREEN" "$C_BOLD" "$C_RESET"
@@ -6972,8 +6982,10 @@ cmd_wizard() {
       printf ' %b├──%b 정기 백업:    %b등록됨 (%s)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "$DEFAULT_ON_CALENDAR" "$C_RESET"
       printf ' %b├──%b 일일 검토 보고: %b등록됨 (%s)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "*-*-* 01:00:00" "$C_RESET"
       printf ' %b├──%b 복구 테스트 보고: %b등록됨 (%s)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "*-*-01 01:30:00" "$C_RESET"
-      if (( chrony_setup_done )); then
+      if (( ntp_report_active )); then
         printf ' %b├──%b NTP 증적 보고:  %b등록됨 (%s)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "$DEFAULT_CHRONY_ON_CALENDAR" "$C_RESET"
+      else
+        printf ' %b├──%b NTP 증적 보고:  %b미등록 (backup.sh chrony setup으로 설정 가능)%b\n' "$C_GRAY" "$C_RESET" "$C_GRAY" "$C_RESET"
       fi
     else
       printf ' %b├──%b 정기 백업:    %b등록하지 않음 (필요시 backup.sh schedule enable 실행)%b\n' "$C_GRAY" "$C_RESET" "$C_GRAY" "$C_RESET"
@@ -6990,8 +7002,10 @@ cmd_wizard() {
       printf ' 정기 백업: 등록됨 (%s)\n' "$DEFAULT_ON_CALENDAR"
       printf ' 일일 검토 보고: 등록됨 (*-*-* 01:00:00)\n'
       printf ' 복구 테스트 보고: 등록됨 (*-*-01 01:30:00)\n'
-      if (( chrony_setup_done )); then
+      if (( ntp_report_active )); then
         printf ' NTP 증적 보고: 등록됨 (%s)\n' "$DEFAULT_CHRONY_ON_CALENDAR"
+      else
+        printf ' NTP 증적 보고: 미등록 (backup.sh chrony setup으로 설정 가능)\n'
       fi
     else
       printf ' 정기 백업: 등록하지 않음 (필요시 backup.sh schedule enable 실행)\n'
