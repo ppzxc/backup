@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.40"
+BACKUP_SCRIPT_VERSION="0.0.42"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -91,8 +91,11 @@ DEFAULT_KEEP_DAILY=7
 DEFAULT_KEEP_WEEKLY=4
 DEFAULT_KEEP_MONTHLY=12
 DEFAULT_ON_CALENDAR="*-*-* 02:00:00"
+DEFAULT_CHRONY_ON_CALENDAR="*-*-* 00:30:00"
 DEFAULT_SFTP_PORT=22
 BACKUP_VERBOSE="${BACKUP_VERBOSE:-0}"
+CHRONY_CONF_PATH="${CHRONY_CONF_PATH:-/etc/chrony.conf}"
+BACKUP_REPORTS_DIR="${BACKUP_REPORTS_DIR:-/data/backup/reports}"
 
 # 구버전 -> 신버전 환경변수 매핑 정의
 # shellcheck disable=SC2034
@@ -177,6 +180,9 @@ init_config_schema() {
   register_config_field "keep_db_daily" "KEEP_DB_DAILY" "" ""
   register_config_field "keep_db_weekly" "KEEP_DB_WEEKLY" "" ""
   register_config_field "keep_db_monthly" "KEEP_DB_MONTHLY" "" ""
+
+  # Chrony NTP 속성
+  register_config_field "chrony_report" "BACKUP_CHRONY_REPORT" "" ""
 }
 
 init_config_schema
@@ -1429,7 +1435,7 @@ resticprofile_timer_unit_name() {
 }
 
 escape_single_quotes() {
-  echo -n "$1" | sed "s/'/'\\\\''/g"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
 }
 
 render_notification_env_block() {
@@ -1481,7 +1487,18 @@ EOF
   fi
 }
 
+render_chrony_env_block() {
+  local -n _res_chrony="$1"
+  if [[ -n "${_res_chrony[chrony_report]:-}" ]]; then
+    cat <<EOF
 
+# ==========================================
+# Chrony NTP 시각 동기화 증적 생성 설정
+# ==========================================
+BACKUP_CHRONY_REPORT='$(escape_single_quotes "${_res_chrony[chrony_report]:-}")'
+EOF
+  fi
+}
 
 build_notification_payload_slack() {
   local status="$1" hostname="$2" profile_name="$3" err_msg="$4"
@@ -2385,6 +2402,7 @@ EOF
   _out_env+="$(render_notification_env_block _resolved)"
   _out_env+="$(render_audit_env_block _resolved)"
   _out_env+="$(render_db_env_block _resolved)"
+  _out_env+="$(render_chrony_env_block _resolved)"
 
   # Render Notice
   _out_notice=$(cat <<EOF
@@ -2440,6 +2458,7 @@ EOF
   _out_env+="$(render_notification_env_block _resolved)"
   _out_env+="$(render_audit_env_block _resolved)"
   _out_env+="$(render_db_env_block _resolved)"
+  _out_env+="$(render_chrony_env_block _resolved)"
 
   # Render Notice
   _out_notice=$(cat <<EOF
@@ -2630,6 +2649,9 @@ scheduler_mock_register() {
       local db_cal="${BACKUP_DB_SCHEDULE:-$on_cal}"
       printf 'db_backup_schedule=%s\ndb_backup_enabled=1\n' "$db_cal" >> "$state_file"
     fi
+    if [[ "${BACKUP_CHRONY_REPORT:-}" == "1" ]]; then
+      printf 'chrony_report_enabled=1\n' >> "$state_file"
+    fi
   fi
 }
 
@@ -2722,6 +2744,11 @@ scheduler_systemd_register() {
       resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "${profile_name}-db" schedule
     fi
     write_audit_systemd_assets "$daily_on_calendar" "$drill_on_calendar"
+    if [[ "${BACKUP_CHRONY_REPORT:-}" == "1" ]]; then
+      write_chrony_systemd_assets
+      systemd_enable_unit "backup-chrony-report.timer"
+      log_info "chrony NTP 증적 타이머도 등록했습니다 (${DEFAULT_CHRONY_ON_CALENDAR})"
+    fi
     systemd_reload_daemon
     systemd_enable_unit "backup-audit-daily.timer"
     systemd_enable_unit "backup-audit-restore-drill.timer"
@@ -2752,10 +2779,13 @@ scheduler_systemd_unregister() {
     fi
     systemd_disable_unit "backup-audit-daily.timer"
     systemd_disable_unit "backup-audit-restore-drill.timer"
+    systemd_disable_unit "backup-chrony-report.timer"
     rm -f "$SYSTEMD_UNIT_DIR/backup-audit-daily.service"
     rm -f "$SYSTEMD_UNIT_DIR/backup-audit-daily.timer"
     rm -f "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.service"
     rm -f "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.timer"
+    rm -f "$SYSTEMD_UNIT_DIR/backup-chrony-report.service"
+    rm -f "$SYSTEMD_UNIT_DIR/backup-chrony-report.timer"
     systemd_reload_daemon
     log_info "schedule disable 완료"
   fi
@@ -4071,17 +4101,36 @@ render_restore_drill_html() {
       color: #94a3b8;
     }
     @media print {
+      @page {
+        size: A4;
+        margin: 12mm 15mm 12mm 15mm;
+      }
       body {
         background-color: #ffffff;
         padding: 0;
         margin: 0;
-        font-size: 8.5pt;
+        font-size: 8pt;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
       }
       .report-card {
         border: none;
         box-shadow: none;
         padding: 0;
+        max-width: 100%;
       }
+      .data-table th, .data-table td {
+        padding: 5px 7px;
+        font-size: 8pt;
+      }
+      .meta-table td {
+        padding: 5px 8px;
+        font-size: 8.5pt;
+      }
+      h1 { font-size: 15pt; }
+      h2 { font-size: 10pt; margin: 15px 0 8px 0; }
+      .badge { font-size: 7.5pt; padding: 1px 5px; }
+      .signature-area { margin-top: 20px; }
     }
   </style>
 </head>
@@ -4519,6 +4568,38 @@ render_daily_html() {
       height: 50px;
       line-height: 50px;
       color: #94a3b8;
+    }
+    @media print {
+      @page {
+        size: A4;
+        margin: 12mm 15mm 12mm 15mm;
+      }
+      body {
+        background-color: #ffffff;
+        padding: 0;
+        margin: 0;
+        font-size: 8pt;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+      .report-card {
+        border: none;
+        box-shadow: none;
+        padding: 0;
+        max-width: 100%;
+      }
+      .data-table th, .data-table td {
+        padding: 5px 7px;
+        font-size: 8pt;
+      }
+      .meta-table td {
+        padding: 5px 8px;
+        font-size: 8.5pt;
+      }
+      h1 { font-size: 15pt; }
+      h2 { font-size: 10pt; margin: 15px 0 8px 0; }
+      .badge { font-size: 7.5pt; padding: 1px 5px; }
+      .signature-area { margin-top: 20px; }
     }
   </style>
 </head>
@@ -5118,6 +5199,373 @@ render_general_html() {
 </body>
 </html>
 EOF
+}
+
+
+
+# ============================================================
+# chrony NTP 시각 동기화 설정 및 증적 생성
+# ============================================================
+
+CHRONY_CONF_CONTENT='# KRNIC (우선 적용)
+server time.krnic.net iburst prefer
+
+# 한국표준과학연구원
+server time.kriss.re.kr iburst
+
+# Google (Leap Smearing 지원)
+server time.google.com iburst
+
+# NTP Pool Korea
+server 0.kr.pool.ntp.org iburst
+
+# 2. 시스템 시각 급변 허용 (최초 3회 동안 1초 이상 오차 시 즉시 정정)
+makestep 1.0 3
+
+# 3. 하드웨어 시계(RTC) 자동 동기화
+rtcsync
+
+# 4. [선택 - Master 서버 역할 시] 내부 사설망 대역의 NTP 요청 허용
+#allow 10.0.0.0/8
+
+# 5. [선택 - Master 서버 역할 시] 외부 인터넷 차단 시에도 자체 시각 제공
+#local stratum 10
+
+# 6. 로그 보관 및 기본 설정
+logdir /var/log/chrony
+sourcedir /run/chrony-dhcp
+driftfile /var/lib/chrony/drift
+keyfile /etc/chrony.keys
+ntsdumpdir /var/lib/chrony
+leapsectz right/UTC'
+
+# nameref 전달 변수 미사용 경고 우회
+# shellcheck disable=SC2034
+render_chrony_txt() {
+  local -n _ct_ref="$1"
+  local hostname_val="${_ct_ref[hostname]:-$(hostname)}"
+  local report_date="${_ct_ref[report_date]:-$(date '+%Y-%m-%d %H:%M:%S %Z')}"
+  local service_enabled="${_ct_ref[service_enabled]:-unknown}"
+  local service_active="${_ct_ref[service_active]:-unknown}"
+  local sources_output="${_ct_ref[sources_output]:-}"
+  local tracking_output="${_ct_ref[tracking_output]:-}"
+  local conf_perm="${_ct_ref[conf_perm]:-}"
+
+  cat <<EOF
+======================================================================
+[보안 감사 증적] ISMS-P 2.9.3 시각 동기화 점검 보고서
+======================================================================
+- 점검 일시: $report_date
+- 호스트명:  $hostname_val
+
+[1. Chrony 서비스 상태]
+- 자동 시작(Enabled): $service_enabled
+- 현재 실행(Active):  $service_active
+
+[2. 타임서버 연동 목록 (chronyc sources -v)]
+$sources_output
+
+[3. 시각 오차 상세 (chronyc tracking)]
+$tracking_output
+
+[4. 설정 파일 권한 확인]
+$conf_perm
+
+본 보고서는 ISMS-P 2.9.3(시각 동기화) 항목 감사 증적용으로
+시스템 스케줄러에 의해 자동 생성되었습니다.
+======================================================================
+EOF
+}
+
+# shellcheck disable=SC2034
+render_chrony_json() {
+  local -n _cj_ref="$1"
+  local hostname_val="${_cj_ref[hostname]:-$(hostname)}"
+  local report_date="${_cj_ref[report_date]:-$(date '+%Y-%m-%d %H:%M:%S %Z')}"
+  local service_enabled="${_cj_ref[service_enabled]:-unknown}"
+  local service_active="${_cj_ref[service_active]:-unknown}"
+  local sources_output="${_cj_ref[sources_output]:-}"
+  local tracking_output="${_cj_ref[tracking_output]:-}"
+  local conf_perm="${_cj_ref[conf_perm]:-}"
+
+  local sources_json; sources_json=$(printf '%s' "$sources_output" | sed 's/"/\\"/g')
+  local tracking_json; tracking_json=$(printf '%s' "$tracking_output" | sed 's/"/\\"/g')
+
+  cat <<EOF
+{
+  "report_type": "isms_p_2.9.3_ntp_sync",
+  "hostname": "${hostname_val//\"/\\\"}",
+  "report_date": "${report_date}",
+  "chrony_service": {
+    "enabled": "${service_enabled//\"/\\\"}",
+    "active": "${service_active//\"/\\\"}"
+  },
+  "sources": "${sources_json}",
+  "tracking": "${tracking_json}",
+  "conf_permission": "${conf_perm//\"/\\\"}"
+}
+EOF
+}
+
+# shellcheck disable=SC2034
+render_chrony_html() {
+  local -n _ch_ref="$1"
+  local hostname_val="${_ch_ref[hostname]:-$(hostname)}"
+  local report_date="${_ch_ref[report_date]:-$(date '+%Y-%m-%d %H:%M:%S %Z')}"
+  local service_enabled="${_ch_ref[service_enabled]:-unknown}"
+  local service_active="${_ch_ref[service_active]:-unknown}"
+  local sources_output="${_ch_ref[sources_output]:-}"
+  local tracking_output="${_ch_ref[tracking_output]:-}"
+  local conf_perm="${_ch_ref[conf_perm]:-}"
+
+  local svc_badge_class="badge-success"
+  if [[ "$service_active" != *"running"* && "$service_active" != "active"* ]]; then
+    svc_badge_class="badge-warning"
+  fi
+
+  cat <<HTMLEOF
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>ISMS-P 2.9.3 시각 동기화 점검 보고서</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+    body { font-family: 'Inter','Malgun Gothic',sans-serif; color:#1e293b; margin:0; padding:20px; background:#f8fafc; }
+    .report-card { max-width:800px; margin:0 auto; background:#fff; padding:40px; border:1px solid #e2e8f0; border-radius:8px; box-shadow:0 4px 6px -1px rgb(0 0 0/0.1); }
+    header { text-align:center; border-bottom:2px solid #0f172a; padding-bottom:20px; margin-bottom:30px; }
+    h1 { font-size:18pt; font-weight:700; margin:0 0 8px 0; color:#0f172a; }
+    h2 { font-size:11pt; font-weight:600; border-left:4px solid #6366f1; padding-left:10px; margin:22px 0 10px 0; color:#1e293b; }
+    .meta-table { width:100%; border-collapse:collapse; margin-bottom:24px; }
+    .meta-table td { padding:7px 12px; font-size:9.5pt; border:1px solid #cbd5e1; }
+    .meta-table td.label { background:#f1f5f9; font-weight:600; width:25%; }
+    .data-table { width:100%; border-collapse:collapse; margin-bottom:18px; }
+    .data-table th,.data-table td { border:1px solid #cbd5e1; padding:7px 12px; font-size:9pt; text-align:left; }
+    .data-table th { background:#f8fafc; font-weight:600; color:#475569; }
+    .pre-block { background:#0f172a; color:#94a3b8; font-family:'Courier New',monospace; font-size:8pt; padding:12px; border-radius:4px; white-space:pre-wrap; word-break:break-all; margin-bottom:18px; }
+    .badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:8pt; font-weight:600; }
+    .badge-success { background:#dcfce7; color:#15803d; }
+    .badge-warning { background:#fee2e2; color:#b91c1c; }
+    .signature-area { margin-top:36px; display:flex; justify-content:flex-end; gap:30px; }
+    .signature-box { border:1px solid #cbd5e1; width:120px; text-align:center; font-size:9pt; }
+    .signature-box .title { background:#f1f5f9; padding:4px; font-weight:600; border-bottom:1px solid #cbd5e1; }
+    .signature-box .sign { height:50px; line-height:50px; color:#94a3b8; }
+    @media print {
+      @page { size:A4; margin:12mm 15mm 12mm 15mm; }
+      body { background:#fff; padding:0; margin:0; font-size:8pt; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+      .report-card { border:none; box-shadow:none; padding:0; max-width:100%; }
+      .data-table th,.data-table td { padding:5px 7px; font-size:8pt; }
+      .meta-table td { padding:5px 8px; font-size:8.5pt; }
+      h1 { font-size:14pt; } h2 { font-size:10pt; margin:14px 0 7px 0; }
+      .badge { font-size:7.5pt; padding:1px 5px; }
+      .signature-area { margin-top:18px; }
+    }
+  </style>
+</head>
+<body>
+<div class="report-card">
+  <header>
+    <h1>ISMS-P 2.9.3 시각 동기화 점검 보고서</h1>
+    <div style="font-size:9pt;color:#64748b;">정보보호관리체계 인증 감사 증적 서류 (NTP 동기화 상태)</div>
+  </header>
+  <table class="meta-table">
+    <tr>
+      <td class="label">점검 일시</td><td>$report_date</td>
+      <td class="label">호스트명</td><td>$hostname_val</td>
+    </tr>
+  </table>
+  <h2>1. Chrony 서비스 상태</h2>
+  <table class="data-table">
+    <thead><tr><th>점검 항목</th><th>ISMS 합격 기준</th><th>현재 상태</th><th>결과</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>자동 시작 (Enabled)</td>
+        <td>enabled (재부팅 시 자동 실행)</td>
+        <td>$service_enabled</td>
+        <td><span class="badge $([[ "$service_enabled" == "enabled" ]] && echo "badge-success" || echo "badge-warning")">$service_enabled</span></td>
+      </tr>
+      <tr>
+        <td>서비스 실행 (Active)</td>
+        <td>active (running)</td>
+        <td>$service_active</td>
+        <td><span class="badge $svc_badge_class">$([[ "$svc_badge_class" == "badge-success" ]] && echo "정상" || echo "이상")</span></td>
+      </tr>
+    </tbody>
+  </table>
+  <h2>2. 타임서버 연동 목록 (chronyc sources -v)</h2>
+  <div class="pre-block">$sources_output</div>
+  <h2>3. 시각 오차 상세 (chronyc tracking)</h2>
+  <div class="pre-block">$tracking_output</div>
+  <h2>4. 설정 파일 권한 확인</h2>
+  <table class="data-table">
+    <thead><tr><th>파일</th><th>ISMS 합격 기준</th><th>실제 권한</th><th>결과</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>${CHRONY_CONF_PATH}</td>
+        <td>root:root, 644 이하</td>
+        <td>$conf_perm</td>
+        <td><span class="badge $([[ "$conf_perm" == *"root"* ]] && echo "badge-success" || echo "badge-warning")">$([[ "$conf_perm" == *"root"* ]] && echo "적합" || echo "확인 필요")</span></td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="signature-area">
+    <div class="signature-box"><div class="title">점검자</div><div class="sign">시스템 운영팀 (인)</div></div>
+    <div class="signature-box"><div class="title">승인자</div><div class="sign">(서명생략)</div></div>
+  </div>
+</div>
+</body>
+</html>
+HTMLEOF
+}
+
+write_chrony_systemd_assets() {
+  local chrony_on_calendar="${1:-$DEFAULT_CHRONY_ON_CALENDAR}"
+
+  mkdir -p "$SYSTEMD_UNIT_DIR"
+
+  cat > "$SYSTEMD_UNIT_DIR/backup-chrony-report.service" <<EOF
+[Unit]
+Description=ISMS-P 2.9.3 NTP Sync Evidence Report
+After=network.target chronyd.service
+
+[Service]
+Type=oneshot
+ExecStart=$BACKUP_SCRIPT_INSTALL_PATH chrony --report
+EOF
+  chmod 644 "$SYSTEMD_UNIT_DIR/backup-chrony-report.service"
+
+  cat > "$SYSTEMD_UNIT_DIR/backup-chrony-report.timer" <<EOF
+[Unit]
+Description=Run ISMS-P NTP Sync Evidence Report Timer
+
+[Timer]
+OnCalendar=$chrony_on_calendar
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  chmod 644 "$SYSTEMD_UNIT_DIR/backup-chrony-report.timer"
+}
+
+# backup.env에 BACKUP_CHRONY_REPORT 플래그를 직접 추가/갱신한다
+_chrony_set_flag_in_env() {
+  local flag_val="$1"
+  require_backup_env
+  if grep -q "BACKUP_CHRONY_REPORT=" "$BACKUP_ENV_FILE"; then
+    sed -i "s/BACKUP_CHRONY_REPORT='[01]'/BACKUP_CHRONY_REPORT='${flag_val}'/" "$BACKUP_ENV_FILE"
+  else
+    printf "\n# ==========================================\n# Chrony NTP 시각 동기화 증적 생성 설정\n# ==========================================\nBACKUP_CHRONY_REPORT='%s'\n" "$flag_val" >> "$BACKUP_ENV_FILE"
+  fi
+}
+
+cmd_chrony() {
+  if has_help_flag "$@"; then
+    cat <<'HELPEOF'
+사용법: backup.sh chrony <subcommand> [options]
+
+서브커맨드:
+  setup      Chrony 설정 파일 적용 및 서비스 재시작 + 상태 검증
+  --report   ISMS-P 2.9.3 시각 동기화 증적 보고서 생성 (txt/json/html)
+
+옵션 (--report):
+  --report-file <path>  증적 파일 출력 경로
+                        (기본: /data/backup/reports/ntp_sync_evidence_YYYYMMDD.txt)
+
+예시:
+  backup.sh chrony setup
+  backup.sh chrony --report
+  backup.sh chrony --report --report-file /tmp/ntp_check.txt
+HELPEOF
+    return 0
+  fi
+
+  local action="${1:-}"
+  shift || true
+
+  case "$action" in
+    setup)
+      require_root
+
+      # 1. 기존 설정 파일 백업
+      if [[ -f "$CHRONY_CONF_PATH" ]]; then
+        local bak_path; bak_path="$(dirname "$CHRONY_CONF_PATH")/chrony.conf.bak.$(date +%Y%m%d)"
+        cp "$CHRONY_CONF_PATH" "$bak_path"
+        log_info "기존 chrony.conf를 백업했습니다: $bak_path"
+      fi
+
+      # 2. 설정 파일 작성
+      printf '%s\n' "$CHRONY_CONF_CONTENT" > "$CHRONY_CONF_PATH"
+      chmod 644 "$CHRONY_CONF_PATH"
+      log_info "chrony 설정 파일을 작성했습니다: $CHRONY_CONF_PATH"
+
+      # 3. chronyd 재시작
+      systemctl restart chronyd
+      log_info "chronyd 서비스를 재시작했습니다."
+
+      # 4. 구문 에러 유무 로그 확인
+      log_info "=== journalctl -u chronyd -n 20 ==="
+      journalctl -u chronyd -n 20 --no-pager || true
+
+      # 5. 타임서버 동기화 상태 점검
+      log_info "=== chronyc sources -v ==="
+      chronyc sources -v || true
+
+      # 6. backup.env에 BACKUP_CHRONY_REPORT=1 기록
+      _chrony_set_flag_in_env "1"
+      log_info "BACKUP_CHRONY_REPORT=1 이 backup.env에 저장되었습니다."
+      ;;
+
+    --report)
+      require_backup_env
+
+      local -A report_opts=()
+      parse_opts_into report_opts "report-file:" -- "$@"
+      local date_suffix; date_suffix=$(date +%Y%m%d)
+      local report_file="${report_opts[report-file]:-${BACKUP_REPORTS_DIR}/ntp_sync_evidence_${date_suffix}.txt}"
+      local base_path="${report_file%.txt}"
+
+      mkdir -p "$(dirname "$report_file")"
+      chmod 700 "$(dirname "$report_file")" 2>/dev/null || true
+
+      # 상태 수집
+      local svc_enabled svc_active sources_out tracking_out conf_perm_out
+      svc_enabled=$(systemctl is-enabled chronyd 2>/dev/null || echo "unknown")
+      svc_active=$(systemctl is-active chronyd 2>/dev/null || echo "unknown")
+      sources_out=$(chronyc sources -v 2>/dev/null || echo "(chronyc 실행 불가)")
+      tracking_out=$(chronyc tracking 2>/dev/null || echo "(chronyc 실행 불가)")
+      conf_perm_out=$(ls -l "$CHRONY_CONF_PATH" 2>/dev/null || echo "(파일 없음)")
+
+      local report_date; report_date=$(date '+%Y-%m-%d %H:%M:%S %Z')
+      local hostname_val; hostname_val=$(hostname 2>/dev/null || echo "unknown")
+
+      # nameref 전달용 변수 — shellcheck 경고 우회
+      # shellcheck disable=SC2034
+      local -A chrony_data=(
+        [hostname]="$hostname_val"
+        [report_date]="$report_date"
+        [service_enabled]="$svc_enabled"
+        [service_active]="$svc_active"
+        [sources_output]="$sources_out"
+        [tracking_output]="$tracking_out"
+        [conf_perm]="$conf_perm_out"
+      )
+
+      render_chrony_txt  chrony_data > "$report_file"
+      render_chrony_json chrony_data > "${base_path}.json"
+      render_chrony_html chrony_data > "${base_path}.html"
+      chmod 600 "$report_file" "${base_path}.json" "${base_path}.html" 2>/dev/null || true
+
+      log_info "NTP 증적 보고서가 생성되었습니다:"
+      log_info "  - TXT:  $report_file"
+      log_info "  - JSON: ${base_path}.json"
+      log_info "  - HTML: ${base_path}.html"
+      ;;
+
+    *)
+      die "chrony는 'setup' 또는 '--report'만 지원합니다 (입력값: '${action}')"
+      ;;
+  esac
 }
 
 
@@ -6456,6 +6904,42 @@ cmd_wizard() {
 
   cmd_init
 
+  # ── chrony NTP 시각 동기화 설정 ──────────────────────────────────────────
+  local chrony_setup_done=0
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    setup_colors
+    printf '\n%b%b⚙  시각 동기화 설정 (NTP / Chrony)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+    printf '%bISMS-P 2.9.3 시각 동기화 항목 대응을 위해 chrony NTP 설정을 적용할 수 있습니다.%b\n' "$C_DIM" "$C_RESET"
+    printf '%b시각 동기화 설정을 적용할까요? [y/%bN%b]: %b' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_RESET"
+  else
+    printf '\n--- 시각 동기화 설정 (NTP / Chrony) ---\n'
+    printf 'ISMS-P 2.9.3 시각 동기화 항목 대응을 위해 chrony NTP 설정을 적용할 수 있습니다.\n'
+    printf '시각 동기화 설정을 적용할까요? [y/N]: '
+  fi
+  local chrony_choice; read -r chrony_choice || true
+
+  if [[ "$chrony_choice" =~ ^[Yy]$ ]]; then
+    local chrony_installed=0
+    if type -P chronyc > /dev/null 2>&1 && systemctl is-active chronyd > /dev/null 2>&1; then
+      chrony_installed=1
+    elif type -P chronyc > /dev/null 2>&1; then
+      chrony_installed=1
+    fi
+
+    if (( chrony_installed )); then
+      cmd_chrony setup
+      chrony_setup_done=1
+    else
+      if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+        printf '%b안내: chrony(chronyd)가 설치되어 있지 않거나 실행 중이지 않습니다. 먼저 chrony를 설치하고 실행한 뒤\n        backup.sh chrony setup 을 단독으로 실행하세요.%b\n' "$C_YELLOW" "$C_RESET"
+      else
+        printf '안내: chrony(chronyd)가 설치되어 있지 않거나 실행 중이지 않습니다.\n'
+        printf '      먼저 chrony를 설치한 뒤 backup.sh chrony setup 을 실행하세요.\n'
+      fi
+    fi
+  fi
+
+  # ── 정기 백업 스케줄 등록 ─────────────────────────────────────────────────
   if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
     printf '%b지금 정기 백업 스케줄을 등록할까요? 기본값은 매일 새벽 2시입니다. [%bY%b/n]: %b' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_RESET"
   else
@@ -6488,6 +6972,9 @@ cmd_wizard() {
       printf ' %b├──%b 정기 백업:    %b등록됨 (%s)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "$DEFAULT_ON_CALENDAR" "$C_RESET"
       printf ' %b├──%b 일일 검토 보고: %b등록됨 (%s)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "*-*-* 01:00:00" "$C_RESET"
       printf ' %b├──%b 복구 테스트 보고: %b등록됨 (%s)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "*-*-01 01:30:00" "$C_RESET"
+      if (( chrony_setup_done )); then
+        printf ' %b├──%b NTP 증적 보고:  %b등록됨 (%s)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "$DEFAULT_CHRONY_ON_CALENDAR" "$C_RESET"
+      fi
     else
       printf ' %b├──%b 정기 백업:    %b등록하지 않음 (필요시 backup.sh schedule enable 실행)%b\n' "$C_GRAY" "$C_RESET" "$C_GRAY" "$C_RESET"
     fi
@@ -6503,6 +6990,9 @@ cmd_wizard() {
       printf ' 정기 백업: 등록됨 (%s)\n' "$DEFAULT_ON_CALENDAR"
       printf ' 일일 검토 보고: 등록됨 (*-*-* 01:00:00)\n'
       printf ' 복구 테스트 보고: 등록됨 (*-*-01 01:30:00)\n'
+      if (( chrony_setup_done )); then
+        printf ' NTP 증적 보고: 등록됨 (%s)\n' "$DEFAULT_CHRONY_ON_CALENDAR"
+      fi
     else
       printf ' 정기 백업: 등록하지 않음 (필요시 backup.sh schedule enable 실행)\n'
     fi
@@ -7005,6 +7495,7 @@ restic 기반 백업 설치, 운영, 모니터링 및 감사 관리를 자동화
   run            수동 백업 즉시 실행 (resticprofile backup)
   status         저장소 연결성, 보안 권한 상태 및 최근 백업 스냅샷 요약 조회
   audit          ISMS/ISO 27001 컴플라이언스 감사 대응용 보고서 출력 및 저장
+  chrony         Chrony NTP 시각 동기화 설정(setup) 및 ISMS-P 2.9.3 증적 생성(--report)
   uninstall      정기 스케줄 제거 및 설치된 바이너리/스크립트 삭제
   migrate        기존 저장소 백업 데이터를 새로운 스토리지 백엔드로 데이터 복제 및 설정 이관
   config         기존 백업 설정(backup.env) 수정 및 관련 자산 동기화
@@ -7103,6 +7594,11 @@ main() {
     upgrade)
       shift
       cmd_upgrade "$@"
+      return $?
+      ;;
+    chrony)
+      shift
+      cmd_chrony "$@"
       return $?
       ;;
     *)
