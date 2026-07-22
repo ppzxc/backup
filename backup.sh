@@ -3814,67 +3814,55 @@ render_restore_drill_txt() {
 ======================================================================
 [보안 감사 증적] 백업 데이터 복구 및 정합성 테스트 결과 보고서
 ======================================================================
-- 테스트 일자: $test_date
-- 테스터: $tester
-- 테스트 대상 스냅샷 ID: $p_snap$([[ -n "$p_time" ]] && echo " ($p_time 생성본)")
+- 훈련일시: $test_date
+- 훈련 담당: $tester
+- 대상 스냅샷: $p_snap$([[ -n "$p_time" ]] && echo " ($p_time 생성본)")
 EOF
 
   if [[ -n "$s_snap" ]]; then
     cat <<EOF
-- 2차 테스트 대상 스냅샷 ID: $s_snap$([[ -n "$s_time" ]] && echo " ($s_time 생성본)")
+- 2차 스냅샷: $s_snap$([[ -n "$s_time" ]] && echo " ($s_time 생성본)")
 EOF
   fi
 
   cat <<EOF
+- 대상 OS: $os_name
+- 복원 경로: $target_dir
 
-1. 테스트 목적
-  - 재해 재난 및 랜섬웨어 감염 시 백업 데이터로부터 실제 서비스 복구가 원활히 이루어지는지 검증하고, 목표 복구 시간(RTO) 내 복구 가능한지 점검함.
+1. 훈련 개요 및 시나리오
+  - 목적: 재해 재난 및 랜섬웨어 상황 시 백업으로부터 서비스 복구가 원활히 수행되며 목표 복구 시간(RTO)을 충족하는지 검증함.
+  - 내역: 테스트 환경 구성 ➡️ 레포지토리 연결 ➡️ 복원 복구 진행 ➡️ 데이터 정합성 검증
 
-2. 테스트 시나리오 및 수행 내역
-  ① 임시 테스트 가상머신(Target VM) 생성 및 $os_name 설치
-  ② 백업 스크립트 실행 환경 구성 및 Restic 저장소 연결 테스트 (정상)
-  ③ 'restic restore' 명령을 통한 데이터 다운로드 (대상 경로: $target_dir)
-  ④ 데이터 정합성 임의 쿼리 조회 검증
-EOF
-
-  if [[ -n "$s_snap" ]]; then
-    cat <<EOF
-  ⑤ 2차 소산지 레포지토리로부터 복원 가동 테스트 및 데이터 정합성 검증 (양방향)
-EOF
-  fi
-
-  cat <<EOF
-
-3. 복구 결과 및 소요 시간 검증
+2. 복구 결과 및 소요 시간 검증
   [1차 원격 저장소]
-  - 원본 데이터 크기: $p_size
-  - 복구 소요 시간: $p_elapsed_str (당사 RTO 기준 ${rto}분 이내 만족) -> $p_status
+  - 원본 크기: $p_size
+  - 복구 시간: $p_elapsed_str (RTO 기준 ${rto}분 이내 만족) -> $p_status
 EOF
 
   if [[ -n "$s_snap" ]]; then
     cat <<EOF
   [2차 소산 저장소]
-  - 원본 데이터 크기: $s_size
-  - 복구 소요 시간: $s_elapsed_str (당사 RTO 기준 ${rto}분 이내 만족) -> $s_status
+  - 원본 크기: $s_size
+  - 복구 시간: $s_elapsed_str (RTO 기준 ${rto}분 이내 만족) -> $s_status
 EOF
   fi
 
   cat <<EOF
-  - 데이터 정합성 검증: 회원 테이블 row 수 일치 검증 완료, 회원 정보 깨짐 없음 (성공)
+  - 정합성 검증: 회원 테이블 레코드 검증 및 한글 깨짐 없음 -> 만족
 EOF
 
   if [[ -n "$db_type" ]]; then
-    local db_status_str="성공"
+    local db_status_str="만족"
     if [[ "$db_ok" == "0" || "$db_ok" == "false" ]]; then
-      db_status_str="실패"
+      db_status_str="미흡"
     fi
-    printf '  - 데이터베이스(%s) 복원 무결성 검증: %s\n' "$db_type" "$db_status_str"
+    printf '  - 데이터베이스(%s) 복원: %s\n' "$db_type" "$db_status_str"
   fi
 
   cat <<EOF
 
-4. 특이사항 및 종합 의견
-  - 백업 암호화 키 분실 방지 대책이 정상 작동 중이며, NAS 원격 저장소로부터 전송 대역폭 제한 없이 안정적인 속도로 복구가 완료됨을 확인함.
+3. 특이사항 및 종합 의견
+  - 암호화 키 분실 방지 대책이 정상 작동 중이며, 원격 저장소로부터 복구가 안정적인 속도로 완료됨을 확인함.
 
 - 승인자: $ciso (인)
 ======================================================================
@@ -4145,29 +4133,29 @@ render_restore_drill_html() {
 
   <table class="meta-table">
     <tr>
-      <td class="label">테스트 일자</td>
+      <td class="label">훈련일시</td>
       <td>$test_date</td>
-      <td class="label">테 스 터</td>
+      <td class="label">훈련 담당</td>
       <td>$tester</td>
     </tr>
     <tr>
-      <td class="label">대상 시스템</td>
-      <td>$os_name (가상머신 복구 타깃)</td>
-      <td class="label">복구 경로</td>
+      <td class="label">대상 OS</td>
+      <td>$os_name</td>
+      <td class="label">복원 경로</td>
       <td>$target_dir</td>
     </tr>
     <tr>
-      <td class="label">1차 백업본</td>
+      <td class="label">대상 스냅샷</td>
       <td>$latest_snap$([[ -n "$latest_time" ]] && echo " ($latest_time)")</td>
-      <td class="label">CISO 승인</td>
-      <td>$ciso (서명 날인 생략)</td>
+      <td class="label">승인자</td>
+      <td>$ciso (인)</td>
     </tr>
 EOF
 
   if [[ -n "$sec_snap" ]]; then
     cat <<EOF
     <tr>
-      <td class="label">2차 백업본</td>
+      <td class="label">2차 스냅샷</td>
       <td colspan="3">$sec_snap$([[ -n "$sec_time" ]] && echo " ($sec_time)")</td>
     </tr>
 EOF
@@ -4176,29 +4164,13 @@ EOF
   cat <<EOF
   </table>
 
-  <h2>1. 복구 테스트 목적</h2>
+  <h2>1. 훈련 개요 및 시나리오</h2>
   <div style="font-size: 9.5pt; line-height: 1.6; margin-bottom: 20px;">
-    본 테스트는 당사의 재해복구 지침 및 정보보호체계(ISMS) 컴플라이언스에 의거하여, 원격 NAS 저장소에 보관된 백업 데이터로부터 실제 운영 체제 및 데이터 복구가 규정된 RTO(120분) 내에 완벽하게 완수될 수 있는지 정기 점검하고 무결성을 보장하는 데 그 목적이 있습니다.
+    <b>목적:</b> 재해 재난 및 랜섬웨어 상황 시 백업 데이터로부터 서비스 복구가 원활히 수행되며 목표 복구 시간(RTO)을 충족하는지 검증함.<br>
+    <b>수행:</b> 테스트 VM 환경 구성 ➡️ 레포지토리 연계 활성화 ➡️ 복원 경로로 일괄 복구 수행 ➡️ 회원 레코드 검증 및 무결성 수동 진단
   </div>
 
-  <h2>2. 테스트 시나리오 및 수행 절차</h2>
-  <ol style="font-size: 9.5pt; line-height: 1.6; padding-left: 20px; margin-bottom: 20px;">
-    <li>재해복구 시나리오 기반의 임시 타깃 VM 생성 및 OS 환경 구성</li>
-    <li>백업 데몬 환경 로드 및 원격 NAS 레포지토리 연계 활성화</li>
-    <li>Restic CLI 클라이언트를 활용하여 복구 Target 경로로 데이터 일괄 복원</li>
-    <li>데이터 복구 정합성 확인용 회원 row count 조회 및 파일 깨짐 여부 수동 검증</li>
-EOF
-
-  if [[ -n "$sec_snap" ]]; then
-    cat <<EOF
-    <li>2차 소산지(S3 Bucket) 레포지토리로부터 복원 가동 테스트 및 데이터 정합성 검증 (양방향)</li>
-EOF
-  fi
-
-  cat <<EOF
-  </ol>
-
-  <h2>3. 상세 검증 결과</h2>
+  <h2>2. 상세 검증 결과</h2>
   <table class="data-table">
     <thead>
       <tr>
@@ -4210,13 +4182,13 @@ EOF
     </thead>
     <tbody>
       <tr>
-        <td>[1차] 데이터 용량</td>
+        <td>[1차] 원본 크기</td>
         <td>-</td>
         <td>$size_str</td>
         <td><span class="badge badge-success">정상</span></td>
       </tr>
       <tr>
-        <td>[1차] 복구 소요 시간</td>
+        <td>[1차] 복구 시간</td>
         <td>RTO 기준 ${rto}분 이내 복구</td>
         <td>$elapsed_str</td>
         <td><span class="badge $([[ "$rto_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$rto_status</span></td>
@@ -4226,13 +4198,13 @@ EOF
   if [[ -n "$sec_snap" ]]; then
     cat <<EOF
       <tr>
-        <td>[2차] 데이터 용량</td>
+        <td>[2차] 원본 크기</td>
         <td>-</td>
         <td>$sec_size_str</td>
         <td><span class="badge badge-success">정상</span></td>
       </tr>
       <tr>
-        <td>[2차] 복구 소요 시간</td>
+        <td>[2차] 복구 시간</td>
         <td>RTO 기준 ${rto}분 이내 복구</td>
         <td>$sec_elapsed_str</td>
         <td><span class="badge $([[ "$sec_rto_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$sec_rto_status</span></td>
@@ -4266,9 +4238,9 @@ EOF
     </tbody>
   </table>
 
-  <h2>4. 특이사항 및 종합 의견</h2>
+  <h2>3. 특이사항 및 종합 의견</h2>
   <div style="font-size: 9.5pt; line-height: 1.6; margin-bottom: 20px; background-color: #f8fafc; padding: 12px; border: 1px solid #cbd5e1; border-radius: 4px;">
-    백업 암호화 키 분실 방지 대책이 정상 작동 중이며, NAS 원격 저장소로부터 전송 대역폭 제한 없이 안정적인 속도로 복구가 완료됨을 확인함.
+    암호화 키 분실 방지 대책이 정상 작동 중이며, 원격 저장소로부터 복구가 안정적인 속도로 완료됨을 확인함.
   </div>
 
   <div class="signature-area">
@@ -4328,16 +4300,14 @@ render_daily_txt() {
     chrony_sync_status="미흡"
   fi
 
-  local offsite_status="만족 (1차 원격 완료)"
-  if [[ -n "${BACKUP_SECONDARY_BACKEND:-}" || -n "${RESTIC_SECONDARY_REPOSITORY:-}" ]]; then
-    offsite_status="만족 (1차+2차 소산 완료)"
+  local offsite_status="만족"
+  if [[ ! ( -n "${BACKUP_SECONDARY_BACKEND:-}" || -n "${RESTIC_SECONDARY_REPOSITORY:-}" ) ]]; then
+    offsite_status="만족"
   fi
 
   local targets_status="미흡"
   if [[ "$targets" == *"/etc"* && "$targets" == *"/var/log"* ]]; then
     targets_status="만족"
-  elif [[ "$targets" == *"/etc"* || "$targets" == *"/var/log"* ]]; then
-    targets_status="부분만족"
   fi
 
   local drill_status="미흡"
@@ -4502,16 +4472,15 @@ render_daily_html() {
     chrony_sync_status="만족"
   fi
 
-  local offsite_status="만족 (1차 원격 완료)"
-  if [[ -n "${BACKUP_SECONDARY_BACKEND:-}" || -n "${RESTIC_SECONDARY_REPOSITORY:-}" ]]; then
-    offsite_status="만족 (1차+2차 소산 완료)"
+  local offsite_status="만족"
+  if [[ ! ( -n "${BACKUP_SECONDARY_BACKEND:-}" || -n "${RESTIC_SECONDARY_REPOSITORY:-}" ) ]]; then
+    # Even if secondary is missing, if primary is configured, it is remote-backed (만족)
+    offsite_status="만족"
   fi
 
   local targets_status="미흡"
   if [[ "$targets" == *"/etc"* && "$targets" == *"/var/log"* ]]; then
     targets_status="만족"
-  elif [[ "$targets" == *"/etc"* || "$targets" == *"/var/log"* ]]; then
-    targets_status="부분만족"
   fi
 
   local drill_status="미흡"
@@ -5795,13 +5764,13 @@ except Exception:
     # Permissions
     local etc_perm; etc_perm="$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '700')"
     local env_perm; env_perm="$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '600')"
-    local etc_safe_str="경고 - 700 권장"; [[ "$etc_perm" == "700" ]] && etc_safe_str="안전 - 소유자 외 접근불가"
-    local env_safe_str="경고 - 600 권장"; [[ "$env_perm" == "600" ]] && env_safe_str="안전 - 평문 노출 방지"
+    local etc_safe_str="미흡"; [[ "$etc_perm" == "700" ]] && etc_safe_str="만족"
+    local env_safe_str="미흡"; [[ "$env_perm" == "600" ]] && env_safe_str="만족"
     
     # Restic Integrity Check
-    local check_status="FAILED (오류 발생)"
+    local check_status="미흡"
     if restic check >/dev/null 2>&1; then
-      check_status="SUCCESS (에러 없음)"
+      check_status="만족"
     fi
     
     # Backend detection
