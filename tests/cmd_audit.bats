@@ -460,7 +460,7 @@ ENV
   run render_audit_report_unified "daily" "txt" daily_data
   [ "$status" -eq 0 ]
   [[ "$output" == *"[보안 감사 증적] 일일 백업 수행 결과"* ]]
-  [[ "$output" == *"- 대상 서버 호스트: test-host"* ]]
+  [[ "$output" == *"- 대상 호스트: test-host"* ]]
 }
 
 
