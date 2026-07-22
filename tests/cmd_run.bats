@@ -163,4 +163,15 @@ ENV
   [[ "$output" == *"backup"* ]]
 }
 
+@test "run_pipeline_execute runs backup pipeline directly and renders assets" {
+  stub_command "resticprofile" '
+    echo "resticprofile $*" >> "'"${STUB_BIN}"'/resticprofile.calls"
+    exit 0
+  '
+  run run_pipeline_execute "web01"
+  [ "$status" -eq 0 ]
+  [ -f "$RESTICPROFILE_CONFIG_FILE" ]
+  run cat "${STUB_BIN}/resticprofile.calls"
+  [[ "$output" == *"--config ${RESTICPROFILE_CONFIG_FILE} --name web01 backup"* ]]
+}
 
