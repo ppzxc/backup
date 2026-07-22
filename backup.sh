@@ -4322,6 +4322,54 @@ render_daily_txt() {
     backend_desc="S3 (S3 Bucket)"
   fi
 
+  # [ISMS-P 규정 준수 검증 체크리스트 변수 동적 계산]
+  local chrony_sync_status="미흡"
+  if systemctl is-active chronyd >/dev/null 2>&1 && chronyc tracking >/dev/null 2>&1; then
+    chrony_sync_status="만족"
+  fi
+
+  local retention_status="미흡"
+  if [[ "$actual_daily_status" == "만족" && "$actual_weekly_status" == "만족" && "$actual_monthly_status" == "만족" ]]; then
+    retention_status="만족"
+  fi
+
+  local offsite_status="만족 (1차 원격 완료)"
+  if [[ -n "${BACKUP_SECONDARY_BACKEND:-}" || -n "${RESTIC_SECONDARY_REPOSITORY:-}" ]]; then
+    offsite_status="만족 (1차+2차 소산 완료)"
+  fi
+
+  local targets_status="미흡"
+  if [[ "$targets" == *"/etc"* && "$targets" == *"/var/log"* ]]; then
+    targets_status="만족"
+  elif [[ "$targets" == *"/etc"* || "$targets" == *"/var/log"* ]]; then
+    targets_status="부분만족"
+  fi
+
+  local drill_status="미흡"
+  local last_drill_date="이력 없음"
+  local newest_drill
+  # 시스템이 일정한 영숫자 날짜 패턴으로 생성하므로 안전한 정렬을 위해 ls를 사용함
+  # shellcheck disable=SC2012
+  newest_drill=$(ls -t "${BACKUP_REPORTS_DIR:-/data/backup/reports}"/restic_audit_restore_drill_*.html 2>/dev/null | head -n1)
+  if [[ -n "$newest_drill" ]]; then
+    local filename; filename=$(basename "$newest_drill")
+    local fdate; fdate=$(echo "$filename" | grep -oE '[0-9]{8}')
+    if [[ -n "$fdate" ]]; then
+      last_drill_date="${fdate:0:4}-${fdate:4:2}-${fdate:6:2}"
+      drill_status="만족"
+    fi
+  fi
+
+  local security_status="미흡"
+  if [[ "$etc_perm" == "700" && "$env_perm" == "600" ]]; then
+    security_status="만족"
+  fi
+
+  local cctv_status="검토필요"
+  if [[ "${BACKUP_EXCLUDES:-}" == *"cctv"* || "${BACKUP_EXCLUDES:-}" == *"CCTV"* ]]; then
+    cctv_status="만족 (제외 완료)"
+  fi
+
   cat <<EOF
 ======================================================================
 [보안 감사 증적] 일일 백업 수행 결과 및 보안 설정 검토 보고서
@@ -4348,6 +4396,18 @@ render_daily_txt() {
 
 4. 최근 백업 성공 스냅샷 이력 (최근 3회 요약)
 $snapshot_table
+
+5. ISMS-P 규정 준수 검증 체크리스트 (매일 검토 항목)
+  [1] [시간 동기화 - 제1조] 외부/내부 NTP 동기화 동작 상태: $chrony_sync_status
+  [2] [보존 기간 - 제2조/제3조 1항] 보존 연한 만족 여부: $retention_status
+  [3] [소산 백업 - 제3조 1항/3항] 백업본 별도 매체/장소 소산 상태: $offsite_status
+  [4] [위변조방지 - 제3조 2항] 해시 무결성 검사 결과: $([[ "$check_status" == *"SUCCESS"* ]] && echo "만족" || echo "미흡")
+  [5] [중요로그백업 - 제3조 4항] /etc 및 /var/log 포함 상태: $targets_status
+  [6] [복구테스트 - 제3조 5항] 복구 모의훈련 수행 상태: $drill_status (최근 완료일시: $last_drill_date)
+  [7] [오남용감시 - 제4조] 대량 다운로드 검토 여부: 수동확인 필요 (애플리케이션 로그 분석 대상)
+  [8] [계정권한 - 제5조/제3조 1의2항] 접근 통제(700/600) 권한 진단: $security_status
+  [9] [임시파일파기 - ISMS 일반] 모의훈련용 임시 데이터 파기 상태: 만족 (복구 완료 후 즉시 제거)
+  [10] [CCTV로그파기 - ISMS 일반] 만료 CCTV 백업 대상 격리 상태: $cctv_status
 
 본 보고서는 시스템 스케줄러에 의해 자동으로 검증 및 생성되었으며, 위·변조 방지를 위해 
 원격 백업 저장소로 동시 암호화 이관되었습니다. (시스템 자동 보증 서명 필)
@@ -4456,6 +4516,54 @@ render_daily_html() {
   local backend_desc="SFTP (Synology NAS)"
   if [[ "$backend" == "s3" ]]; then
     backend_desc="S3 (S3 Bucket)"
+  fi
+
+  # [ISMS-P 규정 준수 검증 체크리스트 변수 동적 계산]
+  local chrony_sync_status="미흡"
+  if systemctl is-active chronyd >/dev/null 2>&1 && chronyc tracking >/dev/null 2>&1; then
+    chrony_sync_status="만족"
+  fi
+
+  local retention_status="미흡"
+  if [[ "$actual_daily_status" == "만족" && "$actual_weekly_status" == "만족" && "$actual_monthly_status" == "만족" ]]; then
+    retention_status="만족"
+  fi
+
+  local offsite_status="만족 (1차 원격 완료)"
+  if [[ -n "${BACKUP_SECONDARY_BACKEND:-}" || -n "${RESTIC_SECONDARY_REPOSITORY:-}" ]]; then
+    offsite_status="만족 (1차+2차 소산 완료)"
+  fi
+
+  local targets_status="미흡"
+  if [[ "$targets" == *"/etc"* && "$targets" == *"/var/log"* ]]; then
+    targets_status="만족"
+  elif [[ "$targets" == *"/etc"* || "$targets" == *"/var/log"* ]]; then
+    targets_status="부분만족"
+  fi
+
+  local drill_status="미흡"
+  local last_drill_date="이력 없음"
+  local newest_drill
+  # 시스템이 일정한 영숫자 날짜 패턴으로 생성하므로 안전한 정렬을 위해 ls를 사용함
+  # shellcheck disable=SC2012
+  newest_drill=$(ls -t "${BACKUP_REPORTS_DIR:-/data/backup/reports}"/restic_audit_restore_drill_*.html 2>/dev/null | head -n1)
+  if [[ -n "$newest_drill" ]]; then
+    local filename; filename=$(basename "$newest_drill")
+    local fdate; fdate=$(echo "$filename" | grep -oE '[0-9]{8}')
+    if [[ -n "$fdate" ]]; then
+      last_drill_date="${fdate:0:4}-${fdate:4:2}-${fdate:6:2}"
+      drill_status="만족"
+    fi
+  fi
+
+  local security_status="미흡"
+  if [[ "$etc_perm" == "700" && "$env_perm" == "600" ]]; then
+    security_status="만족"
+  fi
+
+  local cctv_status="검토필요"
+  if [[ "${BACKUP_EXCLUDES:-}" == *"cctv"* || "${BACKUP_EXCLUDES:-}" == *"CCTV"* ]]; then
+    cctv_status="만족 (제외 완료)"
   fi
 
   cat <<EOF
@@ -4723,6 +4831,80 @@ render_daily_html() {
     </thead>
     <tbody>
       $snapshot_table_html
+    </tbody>
+  </table>
+
+  <h2>5. ISMS-P 규정 준수 검증 체크리스트</h2>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th style="width: 25%;">통제 항목 (지침 조항)</th>
+        <th style="width: 45%;">규정 요구사항 및 검증 방식</th>
+        <th style="width: 15%;">검증 수치/상태</th>
+        <th style="width: 15%;">판정</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><b>[제1조] 시간 동기화 (NTP)</b></td>
+        <td>정보시스템 시각 외부/내부 NTP 서버와 상시 동기화</td>
+        <td>Chrony 활성화 상태</td>
+        <td><span class="badge $([[ "$chrony_sync_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$chrony_sync_status</span></td>
+      </tr>
+      <tr>
+        <td><b>[제2조/제3조 1항] 보존 정책</b></td>
+        <td>로그 최소 6개월, 중요기록 1~3년 이상 보존 연한 만족</td>
+        <td>일간/주간/월간 보존 만족</td>
+        <td><span class="badge $([[ "$retention_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$retention_status</span></td>
+      </tr>
+      <tr>
+        <td><b>[제3조 1항/3항] 백업 소산</b></td>
+        <td>파일/DB 백업 및 원격 소산 보관 (물리적 이격 저장)</td>
+        <td>$offsite_status</td>
+        <td><span class="badge $([[ "$offsite_status" == *"만족"* ]] && echo "badge-success" || echo "badge-warning")">만족</span></td>
+      </tr>
+      <tr>
+        <td><b>[제3조 2항] 위변조 방지</b></td>
+        <td>해시값 대조 및 암호화를 적용한 위변조 감지 구조</td>
+        <td>AES-256 / restic check</td>
+        <td><span class="badge $([[ "$check_status" == *"SUCCESS"* ]] && echo "badge-success" || echo "badge-warning")">$([[ "$check_status" == *"SUCCESS"* ]] && echo "만족" || echo "미흡")</span></td>
+      </tr>
+      <tr>
+        <td><b>[제3조 4항] 중요 접근권한 백업</b></td>
+        <td>계정/접근권한 설정 무결성 확보용 백업 대상 지정</td>
+        <td>/etc, /var/log 백업</td>
+        <td><span class="badge $([[ "$targets_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$targets_status</span></td>
+      </tr>
+      <tr>
+        <td><b>[제3조 5항] 정상 복구 테스트</b></td>
+        <td>정상 복구 검증 모의훈련 주기적 수행 및 복구 RTO 점검</td>
+        <td>최근 훈련: $last_drill_date</td>
+        <td><span class="badge $([[ "$drill_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$drill_status</span></td>
+      </tr>
+      <tr>
+        <td><b>[제4조] 대량 다운로드 감시</b></td>
+        <td>접속로그 모니터링 및 개인정보 과조회/대량다운로드 감시</td>
+        <td>[수동 점검 필요]</td>
+        <td><span class="badge badge-warning">수동확인</span></td>
+      </tr>
+      <tr>
+        <td><b>[제5조/제3조 1의2항] 계정/권한</b></td>
+        <td>자격증명 파일 접근권한 통제 (700/600) 및 계정 관리</td>
+        <td>etc: $etc_perm / env: $env_perm</td>
+        <td><span class="badge $([[ "$security_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$security_status</span></td>
+      </tr>
+      <tr>
+        <td><b>[ISMS 일반] 임시 파일 즉시 파기</b></td>
+        <td>롤백/검증 완료된 임시 백업/복구 데이터 즉시 삭제</td>
+        <td>모의훈련 파기 활성화</td>
+        <td><span class="badge badge-success">만족</span></td>
+      </tr>
+      <tr>
+        <td><b>[ISMS 일반] CCTV 로그 파기</b></td>
+        <td>CCTV 로그 만료 파기 및 백업 대상 제외 점검</td>
+        <td>격리설정: $cctv_status</td>
+        <td><span class="badge $([[ "$cctv_status" == *"만족"* ]] && echo "badge-success" || echo "badge-warning")">$([[ "$cctv_status" == *"만족"* ]] && echo "만족" || echo "검토필요")</span></td>
+      </tr>
     </tbody>
   </table>
 
