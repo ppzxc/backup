@@ -4317,15 +4317,15 @@ render_daily_txt() {
   local check_status="${_d_txt[check_status]:-}"
   local snapshot_table="${_d_txt[snapshot_table]:-}"
 
-  local backend_desc="SFTP (Synology NAS)"
+  local backend_desc="SFTP"
   if [[ "$backend" == "s3" ]]; then
-    backend_desc="S3 (S3 Bucket)"
+    backend_desc="S3"
   fi
 
   # [ISMS-P 규정 준수 검증 체크리스트 변수 동적 계산]
-  local chrony_sync_status="미흡"
-  if systemctl is-active chronyd >/dev/null 2>&1 && chronyc tracking >/dev/null 2>&1; then
-    chrony_sync_status="만족"
+  local chrony_sync_status="만족"
+  if ! (systemctl is-active chronyd >/dev/null 2>&1 && chronyc tracking >/dev/null 2>&1); then
+    chrony_sync_status="미흡"
   fi
 
   local offsite_status="만족 (1차 원격 완료)"
@@ -4359,13 +4359,13 @@ render_daily_txt() {
 ======================================================================
 [보안 감사 증적] 일일 백업 수행 결과 및 보안 설정 검토 보고서
 ======================================================================
-- 보고서 생성일시: $cur_time
-- 대상 서버 호스트: $hostname_val
-- 백업 담당부서: $tester
-- 백엔드 유형: $backend_desc [Sourced from backup.env]
-- 저장소 주소: $repo
-- 데이터 암호화 방식: AES-256 (보안 비밀번호 키 적용 완료)
-- 1차 백업 대상 경로: $targets
+- 생성일시: $cur_time
+- 대상 호스트: $hostname_val
+- 담당 부서: $tester
+- 저장소 유형: $backend_desc
+- 저장소 경로: $repo
+- 암호화 방식: AES-256
+- 백업 대상: $targets
 
 1. 보존 정책 (Retention Rule) 검증 [법적 기준 만족 여부]
   - 일간 보관(Keep-Daily): ${config_daily}개 (설정: ${config_daily}개 -> ${config_daily_status}, 실제: ${actual_daily}개 -> ${actual_daily_status})
@@ -4373,8 +4373,8 @@ render_daily_txt() {
   - 월간 보관(Keep-Monthly): ${config_monthly}개 (설정: ${config_monthly}개 -> ${config_monthly_status}, 실제: ${actual_monthly}개 -> ${actual_monthly_status})
 
 2. 접근 통제 및 무결성 검사
-  - 설정 디렉터리 ($etc_dir) 권한: $etc_perm ($etc_safe_str)
-  - 자격증명 파일 ($env_file) 권한: $env_perm ($env_safe_str)
+  - $etc_dir 권한: $etc_perm ($etc_safe_str)
+  - $env_file 권한: $env_perm ($env_safe_str)
   - 백업본 무결성 검증 (restic check) 결과: $check_status
 
 3. 최근 백업 성공 스냅샷 이력 (최근 3회 요약)
@@ -4491,9 +4491,9 @@ render_daily_html() {
   local check_status="${_d_html[check_status]:-}"
   local snapshot_table_html="${_d_html[snapshot_table_html]:-}"
 
-  local backend_desc="SFTP (Synology NAS)"
+  local backend_desc="SFTP"
   if [[ "$backend" == "s3" ]]; then
-    backend_desc="S3 (S3 Bucket)"
+    backend_desc="S3"
   fi
 
   # [ISMS-P 규정 준수 검증 체크리스트 변수 동적 계산]
@@ -4685,25 +4685,25 @@ render_daily_html() {
 
   <table class="meta-table">
     <tr>
-      <td class="label">보고서 생성일시</td>
+      <td class="label">생성일시</td>
       <td>$cur_time</td>
-      <td class="label">대상 서버 호스트</td>
+      <td class="label">대상 호스트</td>
       <td>$hostname_val</td>
     </tr>
     <tr>
-      <td class="label">백업 담당부서</td>
+      <td class="label">담당 부서</td>
       <td>$tester</td>
-      <td class="label">데이터 암호화 방식</td>
+      <td class="label">암호화 방식</td>
       <td>AES-256 (보안 비밀번호 키 적용 완료)</td>
     </tr>
     <tr>
-      <td class="label">백엔드 유형</td>
+      <td class="label">저장소 유형</td>
       <td>$backend_desc</td>
-      <td class="label">저장소 주소</td>
+      <td class="label">저장소 경로</td>
       <td>$repo</td>
     </tr>
     <tr>
-      <td class="label">1차 백업 대상</td>
+      <td class="label">백업 대상</td>
       <td colspan="3">$targets</td>
     </tr>
   </table>
@@ -4756,13 +4756,13 @@ render_daily_html() {
     </thead>
     <tbody>
       <tr>
-        <td>설정 디렉터리 ($etc_dir) 권한</td>
+        <td>$etc_dir 권한</td>
         <td>700 권한 (소유자 외 접근불가)</td>
         <td>$etc_perm</td>
         <td><span class="badge $([[ "$etc_perm" == "700" ]] && echo "badge-success" || echo "badge-warning")">$etc_safe_str</span></td>
       </tr>
       <tr>
-        <td>자격증명 파일 ($env_file) 권한</td>
+        <td>$env_file 권한</td>
         <td>600 권한 (평문 노출 방지)</td>
         <td>$env_perm</td>
         <td><span class="badge $([[ "$env_perm" == "600" ]] && echo "badge-success" || echo "badge-warning")">$env_safe_str</span></td>

@@ -177,7 +177,7 @@ ENV
   [[ "$output" == *"2. 접근 통제 및 무결성 검사"* ]]
   [[ "$output" == *"3. 최근 백업 성공 스냅샷 이력"* ]]
   [[ "$output" == *"4. ISMS-P 규정 준수 검증 체크리스트"* ]]
-  [[ "$output" == *"설정 디렉터리"* ]]
+  [[ "$output" == *"권한"* ]]
 }
 
 @test "cmd_audit --restore-drill performs restore and outputs drill report" {
