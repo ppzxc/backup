@@ -4365,11 +4365,6 @@ render_daily_txt() {
     security_status="만족"
   fi
 
-  local cctv_status="검토필요"
-  if [[ "${BACKUP_EXCLUDES:-}" == *"cctv"* || "${BACKUP_EXCLUDES:-}" == *"CCTV"* ]]; then
-    cctv_status="만족 (제외 완료)"
-  fi
-
   cat <<EOF
 ======================================================================
 [보안 감사 증적] 일일 백업 수행 결과 및 보안 설정 검토 보고서
@@ -4406,8 +4401,6 @@ $snapshot_table
   [6] [복구테스트 - 제3조 5항] 복구 모의훈련 수행 상태: $drill_status (최근 완료일시: $last_drill_date)
   [7] [오남용감시 - 제4조] 대량 다운로드 검토 여부: 수동확인 필요 (애플리케이션 로그 분석 대상)
   [8] [계정권한 - 제5조/제3조 1의2항] 접근 통제(700/600) 권한 진단: $security_status
-  [9] [임시파일파기 - ISMS 일반] 모의훈련용 임시 데이터 파기 상태: 만족 (복구 완료 후 즉시 제거)
-  [10] [CCTV로그파기 - ISMS 일반] 만료 CCTV 백업 대상 격리 상태: $cctv_status
 
 본 보고서는 시스템 스케줄러에 의해 자동으로 검증 및 생성되었으며, 위·변조 방지를 위해 
 원격 백업 저장소로 동시 암호화 이관되었습니다. (시스템 자동 보증 서명 필)
@@ -4559,11 +4552,6 @@ render_daily_html() {
   local security_status="미흡"
   if [[ "$etc_perm" == "700" && "$env_perm" == "600" ]]; then
     security_status="만족"
-  fi
-
-  local cctv_status="검토필요"
-  if [[ "${BACKUP_EXCLUDES:-}" == *"cctv"* || "${BACKUP_EXCLUDES:-}" == *"CCTV"* ]]; then
-    cctv_status="만족 (제외 완료)"
   fi
 
   cat <<EOF
@@ -4892,18 +4880,6 @@ render_daily_html() {
         <td>자격증명 파일 접근권한 통제 (700/600) 및 계정 관리</td>
         <td>etc: $etc_perm / env: $env_perm</td>
         <td><span class="badge $([[ "$security_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$security_status</span></td>
-      </tr>
-      <tr>
-        <td><b>[ISMS 일반] 임시 파일 즉시 파기</b></td>
-        <td>롤백/검증 완료된 임시 백업/복구 데이터 즉시 삭제</td>
-        <td>모의훈련 파기 활성화</td>
-        <td><span class="badge badge-success">만족</span></td>
-      </tr>
-      <tr>
-        <td><b>[ISMS 일반] CCTV 로그 파기</b></td>
-        <td>CCTV 로그 만료 파기 및 백업 대상 제외 점검</td>
-        <td>격리설정: $cctv_status</td>
-        <td><span class="badge $([[ "$cctv_status" == *"만족"* ]] && echo "badge-success" || echo "badge-warning")">$([[ "$cctv_status" == *"만족"* ]] && echo "만족" || echo "검토필요")</span></td>
       </tr>
     </tbody>
   </table>
