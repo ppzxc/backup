@@ -1,0 +1,14 @@
+FROM centos:6
+
+# Configure CentOS 6 Vault repo
+RUN sed -i 's/enabled=1/enabled=0/g' /etc/yum/pluginconf.d/fastestmirror.conf || true \
+ && sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-*.repo \
+ && sed -i 's/#baseurl=http:\/\/mirror.centos.org\/centos\/\$releasever/baseurl=http:\/\/vault.centos.org\/6.10/g' /etc/yum.repos.d/CentOS-*.repo
+
+# Install epel for python3 and required testing utilities
+RUN yum install -y epel-release || true \
+ && sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/epel*.repo \
+ && sed -i 's/#baseurl=http:\/\/download.fedoraproject.org\/pub\/epel/baseurl=http:\/\/archives.fedoraproject.org\/pub\/archive\/epel/g' /etc/yum.repos.d/epel*.repo
+
+RUN yum install -y openssh-clients cronie ntp python34 tar git \
+ && yum clean all

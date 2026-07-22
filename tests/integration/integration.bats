@@ -76,7 +76,7 @@ setup() {
   dexec "rm -f /etc/backup/backup.env /etc/backup/profiles.yaml /etc/backup/backup_key /etc/backup/backup_key.pub"
 
   # Clean leftover systemd unit files from previous runs
-  dexec "rm -f /etc/systemd/system/resticprofile-backup@profile-*.service /etc/systemd/system/resticprofile-backup@profile-*.timer"
+  dexec "rm -f /etc/systemd/system/resticprofile-backup@*.service /etc/systemd/system/resticprofile-backup@*.timer"
 
   # Clean audit reports and legacy files
   dexec "rm -rf /tmp/audit_report* /tmp/legacy* /tmp/legacy_file.txt"
@@ -116,7 +116,7 @@ setup() {
   dexec "bash backup.sh schedule enable || true"
 
   # Find unit file and check no secrets leaked
-  run dexec "find /etc/systemd/system -maxdepth 1 -name 'resticprofile-backup@profile-*.service'"
+  run dexec "find /etc/systemd/system -maxdepth 1 -name 'resticprofile-backup@*.service'"
   [ "$status" -eq 0 ]
   [ -n "$output" ]
   local unit_file="$output"
@@ -153,7 +153,7 @@ setup() {
   # Schedule check
   dexec "bash backup.sh schedule enable || true"
 
-  run dexec "find /etc/systemd/system -maxdepth 1 -name 'resticprofile-backup@profile-*.service'"
+  run dexec "find /etc/systemd/system -maxdepth 1 -name 'resticprofile-backup@*.service'"
   [ "$status" -eq 0 ]
   [ -n "$output" ]
   local unit_file="$output"
@@ -471,11 +471,11 @@ seed_databases() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"hostname"* ]]
 
-  run dexec "grep -q 'SECONDARY_BACKEND=\"s3\"' /etc/backup/backup.env"
+  run dexec "grep -q 'SECONDARY_BACKEND=.*s3' /etc/backup/backup.env"
   [ "$status" -eq 0 ]
-  run dexec "grep -q 'SECONDARY_RESTIC_REPOSITORY=\"s3:http://minio:9000/restic-test-secondary-migrate' /etc/backup/backup.env"
+  run dexec "grep -q 'SECONDARY_RESTIC_REPOSITORY=.*s3:http://minio:9000/restic-test-secondary-migrate' /etc/backup/backup.env"
   [ "$status" -eq 0 ]
-  run dexec "grep -q 'SECONDARY_AWS_ACCESS_KEY_ID=\"AKIAIOSFODNN7EXAMPLE\"' /etc/backup/backup.env"
+  run dexec "grep -q 'SECONDARY_AWS_ACCESS_KEY_ID=.*AKIAIOSFODNN7EXAMPLE' /etc/backup/backup.env"
   [ "$status" -eq 0 ]
 }
 

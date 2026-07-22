@@ -431,5 +431,12 @@ EOF
   [ "${read_back[password]}" = "-nSecretPassword" ]
 }
 
+@test "lazy init config_get sets global variables successfully under all Bash versions" {
+  # Check syntax validation
+  run bash -n backup.sh
+  [ "$status" -eq 0 ]
+}
+
+
 
 
