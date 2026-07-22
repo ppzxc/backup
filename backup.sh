@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.53"
+BACKUP_SCRIPT_VERSION="0.0.54"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -258,14 +258,14 @@ migrate_env_file_if_needed() {
 # shellcheck disable=SC2034
 load_backup_env_to_array() {
   local env_file="$1"
-  local -n __load_env_dest_ref="$2"
+  local __load_env_dest_ref_name="$2"
   local errs_ref_name="${3:-}"
   
   if [[ -n "$errs_ref_name" ]]; then
-    local -n __load_env_errors_ref="$errs_ref_name"
+  local __load_env_errors_ref_name="$errs_ref_name"
   else
     local -a _dummy_errors=()
-    local -n __load_env_errors_ref="_dummy_errors"
+  local __load_env_errors_ref_name="_dummy_errors"
   fi
 
   if [[ ! -f "$env_file" ]]; then
@@ -292,7 +292,7 @@ load_backup_env_to_array() {
           local chunk="${BASH_REMATCH[1]}"
           multiline_val+=$'\n'"$chunk"
           local val="${multiline_val//\'\\\'\'/\'}"
-          __load_env_dest_ref["$multiline_key"]="$val"
+          ref_set "${__load_env_dest_ref_name}" "$multiline_key" "$val"
           in_multiline=0
           multiline_key=""
           multiline_val=""
@@ -306,7 +306,7 @@ load_backup_env_to_array() {
         if [[ "$line" =~ ^(.*)\"[[:space:]]*$ ]]; then
           local chunk="${BASH_REMATCH[1]}"
           multiline_val+=$'\n'"$chunk"
-          __load_env_dest_ref["$multiline_key"]="$multiline_val"
+          ref_set "${__load_env_dest_ref_name}" "$multiline_key" "$multiline_val"
           in_multiline=0
           multiline_key=""
           multiline_val=""
@@ -344,7 +344,7 @@ load_backup_env_to_array() {
       key="${BASH_REMATCH[2]}"
       raw_val="${BASH_REMATCH[3]}"
       val="${raw_val//\'\\\'\'/\'}"
-      __load_env_dest_ref["$key"]="$val"
+      ref_set "${__load_env_dest_ref_name}" "$key" "$val"
     elif [[ "$trimmed_line" =~ ^(export[[:space:]]+)?([A-Za-z0-9_]+)=\'(.*)$ ]]; then
       in_multiline=1
       multiline_key="${BASH_REMATCH[2]}"
@@ -353,7 +353,7 @@ load_backup_env_to_array() {
     elif [[ "$trimmed_line" =~ ^(export[[:space:]]+)?([A-Za-z0-9_]+)=\"(.*)\"[[:space:]]*$ ]]; then
       key="${BASH_REMATCH[2]}"
       val="${BASH_REMATCH[3]}"
-      __load_env_dest_ref["$key"]="$val"
+      ref_set "${__load_env_dest_ref_name}" "$key" "$val"
     elif [[ "$trimmed_line" =~ ^(export[[:space:]]+)?([A-Za-z0-9_]+)=\"(.*)$ ]]; then
       in_multiline=1
       multiline_key="${BASH_REMATCH[2]}"
@@ -365,12 +365,12 @@ load_backup_env_to_array() {
       val="${val%%#*}"
       val="${val#[[:space:]]}"
       val="${val%[[:space:]]}"
-      __load_env_errors_ref+=("라인 ${line_num}: 올바르지 않은 설정 형식입니다 (KEY='VALUE' 규격 위반)")
+      eval "${__load_env_errors_ref_name}+=(\"라인 ${line_num}: 올바르지 않은 설정 형식입니다 (KEY='VALUE' 규격 위반)\")"
       return 1
     fi
 
     if [[ -n "$key" ]]; then
-      __load_env_dest_ref["$key"]="$val"
+      ref_set "${__load_env_dest_ref_name}" "$key" "$val"
     fi
   done < "$env_file"
 
@@ -430,6 +430,22 @@ config_get() {
 }
 
 C_RESET="" C_BOLD="" C_DIM="" C_RED="" C_GREEN="" C_YELLOW="" C_BLUE="" C_CYAN="" C_GRAY=""
+
+ref_get() {
+  local map_name="${1:-}"
+  local key="${2:-}"
+  local out_var="${3:-}"
+  eval "${out_var}=\${${map_name}[${key}]:-}"
+}
+
+ref_set() {
+  local map_name="${1:-}"
+  local key="${2:-}"
+  local value="${3:-}"
+  local _tmp_ref_val
+  _tmp_ref_val="$value"
+  eval "${map_name}[${key}]=\${_tmp_ref_val}"
+}
 
 setup_colors() {
   if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
@@ -752,10 +768,13 @@ validate_absolute_path() {
     printf '%s이(가) 비어 있습니다\n' "$name"
     return 1
   fi
+  local -a paths=()
+  IFS=',' read -r -a paths <<< "$value"
   local p
-  for p in ${value//,/ }; do
+  for p in "${paths[@]}"; do
     p="${p#"${p%%[![:space:]]*}"}"
     p="${p%"${p##*[![:space:]]}"}"
+    [[ -z "$p" ]] && continue
     if [[ ! "$p" =~ ^/ ]]; then
       printf '%s "%s"은(는) 올바른 절대 경로가 아닙니다 (/로 시작해야 합니다)\n' "$name" "$p"
       return 1
@@ -765,74 +784,74 @@ validate_absolute_path() {
 }
 
 validate_resolved_config() {
-  local -n resolved_ref="$1"
-  local -n errors_ref="$2"
+  local resolved_ref_name="$1"
+  local errors_ref_name="$2"
   
   # 1. 1차 백엔드 검증
-  local backend="${resolved_ref[backend]:-}"
+  local backend; eval "backend=\"\${${resolved_ref_name}[backend]:-}\""
   if [[ -n "$backend" ]]; then
     declare -g -A _validate_primary_fields=()
-    _validate_primary_fields[host]="${resolved_ref[host]:-}"
-    _validate_primary_fields[port]="${resolved_ref[port]:-}"
-    _validate_primary_fields[user]="${resolved_ref[user]:-}"
-    _validate_primary_fields[endpoint]="${resolved_ref[endpoint]:-}"
-    _validate_primary_fields[bucket]="${resolved_ref[bucket]:-}"
-    _validate_primary_fields[access_key]="${resolved_ref[access_key]:-}"
-    _validate_primary_fields[secret_key]="${resolved_ref[secret_key]:-}"
+    _validate_primary_fields[host]="$(eval echo "\${${resolved_ref_name}[host]:-}")"
+    _validate_primary_fields[port]="$(eval echo "\${${resolved_ref_name}[port]:-}")"
+    _validate_primary_fields[user]="$(eval echo "\${${resolved_ref_name}[user]:-}")"
+    _validate_primary_fields[endpoint]="$(eval echo "\${${resolved_ref_name}[endpoint]:-}")"
+    _validate_primary_fields[bucket]="$(eval echo "\${${resolved_ref_name}[bucket]:-}")"
+    _validate_primary_fields[access_key]="$(eval echo "\${${resolved_ref_name}[access_key]:-}")"
+    _validate_primary_fields[secret_key]="$(eval echo "\${${resolved_ref_name}[secret_key]:-}")"
     
     local primary_err
     if has_function "backend_${backend}_validate"; then
       if ! primary_err=$("backend_${backend}_validate" _validate_primary_fields 2>&1); then
-        errors_ref+=("$primary_err")
+        eval "${errors_ref_name}+=(\"$primary_err\")"
       fi
     else
-      errors_ref+=("지원하지 않는 백엔드 유형입니다: $backend")
+      eval "${errors_ref_name}+=(\"지원하지 않는 백엔드 유형입니다: $backend\")"
     fi
     unset _validate_primary_fields
   fi
   
   # 2. 2차 백엔드 검증
-  local sec_backend="${resolved_ref[secondary_backend]:-}"
+  local sec_backend; eval "sec_backend=\"\${${resolved_ref_name}[secondary_backend]:-}\""
   if [[ -n "$sec_backend" ]]; then
     declare -g -A _validate_sec_fields=()
-    _validate_sec_fields[host]="${resolved_ref[secondary_host]:-}"
-    _validate_sec_fields[port]="${resolved_ref[secondary_port]:-}"
-    _validate_sec_fields[user]="${resolved_ref[secondary_user]:-}"
-    _validate_sec_fields[endpoint]="${resolved_ref[secondary_endpoint]:-}"
-    _validate_sec_fields[bucket]="${resolved_ref[secondary_bucket]:-}"
-    _validate_sec_fields[access_key]="${resolved_ref[secondary_access_key]:-}"
-    _validate_sec_fields[secret_key]="${resolved_ref[secondary_secret_key]:-}"
+    _validate_sec_fields[host]="$(eval echo "\${${resolved_ref_name}[secondary_host]:-}")"
+    _validate_sec_fields[port]="$(eval echo "\${${resolved_ref_name}[secondary_port]:-}")"
+    _validate_sec_fields[user]="$(eval echo "\${${resolved_ref_name}[secondary_user]:-}")"
+    _validate_sec_fields[endpoint]="$(eval echo "\${${resolved_ref_name}[secondary_endpoint]:-}")"
+    _validate_sec_fields[bucket]="$(eval echo "\${${resolved_ref_name}[secondary_bucket]:-}")"
+    _validate_sec_fields[access_key]="$(eval echo "\${${resolved_ref_name}[secondary_access_key]:-}")"
+    _validate_sec_fields[secret_key]="$(eval echo "\${${resolved_ref_name}[secondary_secret_key]:-}")"
     
     local sec_err
     if has_function "backend_${sec_backend}_validate"; then
       if ! sec_err=$("backend_${sec_backend}_validate" _validate_sec_fields 2>&1); then
-        errors_ref+=("Secondary backend error: $sec_err")
+        eval "${errors_ref_name}+=(\"Secondary backend error: $sec_err\")"
       fi
     else
-      errors_ref+=("Secondary backend error: 지원하지 않는 백엔드 유형입니다: $sec_backend")
+      eval "${errors_ref_name}+=(\"Secondary backend error: 지원하지 않는 백엔드 유형입니다: $sec_backend\")"
     fi
     unset _validate_sec_fields
   fi
 
   # 3. 백업 대상 경로(targets) 절대경로 여부 검증
-  local targets="${resolved_ref[targets]:-}"
+  local targets; eval "targets=\"\${${resolved_ref_name}[targets]:-}\""
   if [[ -n "$targets" ]]; then
     local path_err
     if ! path_err=$(validate_absolute_path "$targets" "백업 대상 경로" 2>&1); then
-      errors_ref+=("$path_err")
+      eval "${errors_ref_name}+=(\"$path_err\")"
     fi
   fi
 
   # 4. 데이터베이스 백업 유효성 검증
-  local db_type="${resolved_ref[db_type]:-}"
+  local db_type; eval "db_type=\"\${${resolved_ref_name}[db_type]:-}\""
   if [[ -n "$db_type" ]]; then
     if ! has_function "database_${db_type}_default_command"; then
-      errors_ref+=("지원하지 않는 데이터베이스 엔진 유형입니다: ${db_type}")
+      eval "${errors_ref_name}+=(\"지원하지 않는 데이터베이스 엔진 유형입니다: ${db_type}\")"
     else
       if has_function "database_${db_type}_validate_config"; then
         local db_err
-        if ! db_err=$("database_${db_type}_validate_config" resolved_ref 2>&1); then
-          errors_ref+=("$db_err")
+        if ! db_err=$("database_${db_type}_validate_config" "${resolved_ref_name}" 2>&1); then
+          eval "${errors_ref_name}+=(\"$db_err\")"
         fi
       fi
     fi
@@ -855,14 +874,14 @@ load_and_validate_config() {
     errors_ref_name="$3"
   fi
 
-  local -n _out_resolved="$resolved_ref_name"
-  local -n _out_errors="$errors_ref_name"
+  local _out_resolved_name="$resolved_ref_name"
+  local _out_errors_name="$errors_ref_name"
 
   # Determine backend from backup.env or CLI options
   local backend=""
   if [[ -n "$cli_opts_ref_name" ]]; then
-    local -n _cli_opts_ref="$cli_opts_ref_name"
-    backend="${_cli_opts_ref[backend]:-}"
+  local _cli_opts_ref_name="$cli_opts_ref_name"
+    backend="$(eval echo "\${${_cli_opts_ref_name}[backend]:-}")"
   fi
 
   if [[ -z "$backend" && -f "$BACKUP_ENV_FILE" ]]; then
@@ -876,9 +895,13 @@ load_and_validate_config() {
   # Create a unified local options copy
   local -A local_opts=()
   if [[ -n "$cli_opts_ref_name" ]]; then
-    local k
-    for k in "${!_cli_opts_ref[@]}"; do
-      local_opts["$k"]="${_cli_opts_ref[$k]}"
+    local _cli_opts_ref_name="$cli_opts_ref_name"
+    local -a keys=()
+    eval "keys=(\"\${!${_cli_opts_ref_name}[@]}\")"
+    local k val=""
+    for k in "${keys[@]}"; do
+      ref_get "${_cli_opts_ref_name}" "$k" val
+      local_opts["$k"]="$val"
     done
   fi
 
@@ -889,10 +912,10 @@ load_and_validate_config() {
     local_opts[profile-name]="$profile_name"
   fi
 
-  resolve_and_validate_config local_opts _out_resolved _out_errors
+  resolve_and_validate_config local_opts "${_out_resolved_name}" "${_out_errors_name}"
   local res=$?
 
-  if [[ ${#_out_errors[@]} -gt 0 ]]; then
+  if [[ $(eval echo "\${#${_out_errors_name}[@]}") -gt 0 ]]; then
     return 1
   fi
   return $res
@@ -900,15 +923,15 @@ load_and_validate_config() {
 
 save_profile_config() {
   local resolved_arr_name="$1"
-  local -n _res_ref="$resolved_arr_name"
+  local _res_ref_name="$resolved_arr_name"
 
-  local backend="${_res_ref[backend]:-}"
+  local backend; eval "backend=\"\${${_res_ref_name}[backend]:-}\""
   if [[ -z "$backend" ]]; then
     return 1
   fi
 
   # Determine schedule calendar
-  local on_calendar="${_res_ref[on_calendar]:-}"
+  local on_calendar; eval "on_calendar=\"\${${_res_ref_name}[on_calendar]:-}\""
   if [[ -z "$on_calendar" ]]; then
     if [[ -f "$RESTICPROFILE_CONFIG_FILE" ]]; then
       local parsed_schedule
@@ -947,15 +970,18 @@ save_profile_config() {
     fi
     local k
     for k in "${!file_config[@]}"; do
-      declare -g "$k"="${file_config[$k]}"
+      export "$k"="${file_config[$k]}"
     done
-    write_resticprofile_assets "${_res_ref[profile_name]}" "$on_calendar"
+    local profile_name=""
+    ref_get "${_res_ref_name}" profile_name profile_name
+    [[ -z "$profile_name" ]] && profile_name="${file_config[BACKUP_PROFILE_NAME]:-$(hostname)}"
+    write_resticprofile_assets "$profile_name" "$on_calendar"
 
     local timer_name
-    timer_name=$(resticprofile_timer_unit_name "${_res_ref[profile_name]}")
+    timer_name=$(resticprofile_timer_unit_name "$profile_name")
     if systemctl is-enabled "$timer_name" >/dev/null 2>&1; then
       log_info "정기 백업 스케줄 타이머(${timer_name})가 활성화되어 있어 설정을 자동 리로드합니다."
-      resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "${_res_ref[profile_name]}" schedule
+      resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" schedule
     fi
   ) || return 1
 
@@ -969,9 +995,9 @@ save_profile_config() {
 # nameref로 인자를 받거나 다른 함수로 동적 연관 배열을 전달하여 사용하지 않는 것으로 오인받는 변수가 있으므로 우회
 # shellcheck disable=SC2034
 resolve_and_validate_config() {
-  local -n _opts="$1"
-  local -n _resolved="$2"
-  local -n _errors="$3"
+  local _opts_name="$1"
+  local _resolved_name="$2"
+  local _errors_name="$3"
 
   # Sourcing current configuration from file
   local file_targets="" file_keep_daily="" file_keep_weekly="" file_keep_monthly="" file_excludes="" file_profile_name="" file_password=""
@@ -983,7 +1009,7 @@ resolve_and_validate_config() {
   local file_db_type="" file_db_command="" file_db_filename="" file_db_schedule="" file_db_keep_daily="" file_db_keep_weekly="" file_db_keep_monthly="" file_ntp_report=""
   if [[ -f "${BACKUP_ENV_FILE:-}" ]]; then
     declare -A file_config=()
-    if ! load_backup_env_to_array "$BACKUP_ENV_FILE" file_config _errors; then
+    if ! load_backup_env_to_array "$BACKUP_ENV_FILE" file_config "${_errors_name}"; then
       return 1
     fi
     file_targets="${file_config[BACKUP_TARGETS]:-}"
@@ -1051,28 +1077,28 @@ resolve_and_validate_config() {
   local env_ntp_report="${BACKUP_NTP_REPORT:-${BACKUP_CHRONY_REPORT:-}}"
 
   # Resolve values with priority: CLI option > Env variable > Config file > Default value
-  local cli_targets="${_opts[targets]:-}"
-  _resolved[targets]=$(resolve_value "$cli_targets" "$env_targets" "$file_targets" "${DEFAULT_TARGETS:-}")
+  local cli_targets; eval "cli_targets=\"\${${_opts_name}[targets]:-}\""
+  ref_set "${_resolved_name}" targets "$(resolve_value "$cli_targets" "$env_targets" "$file_targets" "${DEFAULT_TARGETS:-}")"
 
-  local cli_keep_daily="${_opts[keep-daily]:-}"
-  _resolved[keep_daily]=$(resolve_value "$cli_keep_daily" "$env_keep_daily" "$file_keep_daily" "${DEFAULT_KEEP_DAILY:-}")
+  local cli_keep_daily; eval "cli_keep_daily=\"\${${_opts_name}[keep-daily]:-}\""
+  ref_set "${_resolved_name}" keep_daily "$(resolve_value "$cli_keep_daily" "$env_keep_daily" "$file_keep_daily" "${DEFAULT_KEEP_DAILY:-}")"
 
-  local cli_keep_weekly="${_opts[keep-weekly]:-}"
-  _resolved[keep_weekly]=$(resolve_value "$cli_keep_weekly" "$env_keep_weekly" "$file_keep_weekly" "${DEFAULT_KEEP_WEEKLY:-}")
+  local cli_keep_weekly; eval "cli_keep_weekly=\"\${${_opts_name}[keep-weekly]:-}\""
+  ref_set "${_resolved_name}" keep_weekly "$(resolve_value "$cli_keep_weekly" "$env_keep_weekly" "$file_keep_weekly" "${DEFAULT_KEEP_WEEKLY:-}")"
 
-  local cli_keep_monthly="${_opts[keep-monthly]:-}"
-  _resolved[keep_monthly]=$(resolve_value "$cli_keep_monthly" "$env_keep_monthly" "$file_keep_monthly" "${DEFAULT_KEEP_MONTHLY:-}")
+  local cli_keep_monthly; eval "cli_keep_monthly=\"\${${_opts_name}[keep-monthly]:-}\""
+  ref_set "${_resolved_name}" keep_monthly "$(resolve_value "$cli_keep_monthly" "$env_keep_monthly" "$file_keep_monthly" "${DEFAULT_KEEP_MONTHLY:-}")"
 
-  local cli_password="${_opts[password]:-}"
-  _resolved[password]=$(resolve_value "$cli_password" "$env_password" "$file_password" "")
+  local cli_password; eval "cli_password=\"\${${_opts_name}[password]:-}\""
+  ref_set "${_resolved_name}" password "$(resolve_value "$cli_password" "$env_password" "$file_password" "")"
 
-  local cli_profile_name="${_opts[profile-name]:-}"
-  _resolved[profile_name]=$(resolve_value "$cli_profile_name" "$env_profile_name" "$file_profile_name" "$(hostname)")
+  local cli_profile_name; eval "cli_profile_name=\"\${${_opts_name}[profile-name]:-}\""
+  ref_set "${_resolved_name}" profile_name "$(resolve_value "$cli_profile_name" "$env_profile_name" "$file_profile_name" "$(hostname)")"
 
-  local cli_db_type="${_opts[db-type]:-}"
-  _resolved[db_type]=$(resolve_value "$cli_db_type" "$env_db_type" "$file_db_type" "" || true)
+  local cli_db_type; eval "cli_db_type=\"\${${_opts_name}[db-type]:-}\""
+  ref_set "${_resolved_name}" db_type "$(resolve_value "$cli_db_type" "$env_db_type" "$file_db_type" "" || true)"
 
-  if [[ -n "${_resolved[db_type]:-}" && "${_resolved[db_type]}" != "$file_db_type" ]]; then
+  if [[ -n "$(eval echo "\${${_resolved_name}[db_type]:-}")" && "$(eval echo "\${${_resolved_name}[db_type]}")" != "$file_db_type" ]]; then
     file_db_command=""
     file_db_filename=""
     file_db_schedule=""
@@ -1081,170 +1107,171 @@ resolve_and_validate_config() {
     file_db_keep_monthly=""
   fi
 
-  local cli_db_command="${_opts[db-command]:-}"
+  local cli_db_command; eval "cli_db_command=\"\${${_opts_name}[db-command]:-}\""
   # shellcheck disable=SC2154
-  _resolved[db_command]=$(resolve_value "$cli_db_command" "$env_db_command" "$file_db_command" "" || true)
+  ref_set "${_resolved_name}" db_command "$(resolve_value "$cli_db_command" "$env_db_command" "$file_db_command" "" || true)"
 
-  local cli_db_filename="${_opts[db-filename]:-}"
+  local cli_db_filename; eval "cli_db_filename=\"\${${_opts_name}[db-filename]:-}\""
   # shellcheck disable=SC2154
-  _resolved[db_filename]=$(resolve_value "$cli_db_filename" "$env_db_filename" "$file_db_filename" "db-dump.sql" || true)
+  ref_set "${_resolved_name}" db_filename "$(resolve_value "$cli_db_filename" "$env_db_filename" "$file_db_filename" "db-dump.sql" || true)"
 
-  local cli_db_schedule="${_opts[db-schedule]:-}"
-  _resolved[db_schedule]=$(resolve_value "$cli_db_schedule" "$env_db_schedule" "$file_db_schedule" "" || true)
+  local cli_db_schedule; eval "cli_db_schedule=\"\${${_opts_name}[db-schedule]:-}\""
+  ref_set "${_resolved_name}" db_schedule "$(resolve_value "$cli_db_schedule" "$env_db_schedule" "$file_db_schedule" "" || true)"
 
-  local cli_db_keep_daily="${_opts[db-keep-daily]:-}"
-  _resolved[db_keep_daily]=$(resolve_value "$cli_db_keep_daily" "$env_db_keep_daily" "$file_db_keep_daily" "" || true)
+  local cli_db_keep_daily; eval "cli_db_keep_daily=\"\${${_opts_name}[db-keep-daily]:-}\""
+  ref_set "${_resolved_name}" db_keep_daily "$(resolve_value "$cli_db_keep_daily" "$env_db_keep_daily" "$file_db_keep_daily" "" || true)"
 
-  local cli_db_keep_weekly="${_opts[db-keep-weekly]:-}"
-  _resolved[db_keep_weekly]=$(resolve_value "$cli_db_keep_weekly" "$env_db_keep_weekly" "$file_db_keep_weekly" "" || true)
+  local cli_db_keep_weekly; eval "cli_db_keep_weekly=\"\${${_opts_name}[db-keep-weekly]:-}\""
+  ref_set "${_resolved_name}" db_keep_weekly "$(resolve_value "$cli_db_keep_weekly" "$env_db_keep_weekly" "$file_db_keep_weekly" "" || true)"
 
-  local cli_db_keep_monthly="${_opts[db-keep-monthly]:-}"
-  _resolved[db_keep_monthly]=$(resolve_value "$cli_db_keep_monthly" "$env_db_keep_monthly" "$file_db_keep_monthly" "" || true)
+  local cli_db_keep_monthly; eval "cli_db_keep_monthly=\"\${${_opts_name}[db-keep-monthly]:-}\""
+  ref_set "${_resolved_name}" db_keep_monthly "$(resolve_value "$cli_db_keep_monthly" "$env_db_keep_monthly" "$file_db_keep_monthly" "" || true)"
 
-  local cli_ntp_report="${_opts[ntp-report]:-${_opts[chrony-report]:-}}"
+  local cli_ntp_report; eval "cli_ntp_report=\"\${${_opts_name}[ntp-report]:-}\""
+  [[ -z "$cli_ntp_report" ]] && cli_ntp_report="$(eval echo "\${${_opts_name}[chrony-report]:-}")"
   # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
   # shellcheck disable=SC2154
-  _resolved[ntp_report]=$(resolve_value "$cli_ntp_report" "$env_ntp_report" "$file_ntp_report" "" || true)
+  ref_set "${_resolved_name}" ntp_report "$(resolve_value "$cli_ntp_report" "$env_ntp_report" "$file_ntp_report" "" || true)"
 
   # DB 타입별 기본 명령어 채우기
-  if [[ -n "${_resolved[db_type]:-}" ]]; then
-    if [[ -z "${_resolved[db_command]:-}" ]]; then
-      if has_function "database_${_resolved[db_type]}_default_command"; then
-        _resolved[db_command]=$("database_${_resolved[db_type]}_default_command")
+  if [[ -n "$(eval echo "\${${_resolved_name}[db_type]:-}")" ]]; then
+    if [[ -z "$(eval echo "\${${_resolved_name}[db_command]:-}")" ]]; then
+      if has_function "database_$(eval echo "\${${_resolved_name}[db_type]}")_default_command"; then
+        ref_set "${_resolved_name}" db_command "$("database_$(eval echo "\${${_resolved_name}[db_type]}")_default_command")"
       fi
     fi
   fi
 
-  local cli_sec_backend="${_opts[secondary-backend]:-}"
-  _resolved["secondary_backend"]=$(resolve_value "$cli_sec_backend" "$env_secondary_backend" "$file_secondary_backend" "" || true)
+  local cli_sec_backend; eval "cli_sec_backend=\"\${${_opts_name}[secondary-backend]:-}\""
+  ref_set "${_resolved_name}" "secondary_backend" "$(resolve_value "$cli_sec_backend" "$env_secondary_backend" "$file_secondary_backend" "" || true)"
 
-  if [[ -n "${_resolved[secondary_backend]:-}" ]]; then
-    local cli_sec_password="${_opts[secondary-password]:-}"
-    _resolved["secondary_password"]=$(resolve_value "$cli_sec_password" "$env_secondary_password" "$file_secondary_password" "${_resolved[password]:-}" || true)
+  if [[ -n "$(eval echo "\${${_resolved_name}[secondary_backend]:-}")" ]]; then
+    local cli_sec_password; eval "cli_sec_password=\"\${${_opts_name}[secondary-password]:-}\""
+    ref_set "${_resolved_name}" "secondary_password" "$(resolve_value "$cli_sec_password" "$env_secondary_password" "$file_secondary_password" "$(eval echo "\${${_resolved_name}[password]:-}")" || true)"
 
-    local cli_sec_keep_daily="${_opts[secondary-keep-daily]:-}"
-    _resolved["secondary_keep_daily"]=$(resolve_value "$cli_sec_keep_daily" "$env_secondary_keep_daily" "$file_secondary_keep_daily" "${_resolved[keep_daily]:-}" || true)
+    local cli_sec_keep_daily; eval "cli_sec_keep_daily=\"\${${_opts_name}[secondary-keep-daily]:-}\""
+    ref_set "${_resolved_name}" "secondary_keep_daily" "$(resolve_value "$cli_sec_keep_daily" "$env_secondary_keep_daily" "$file_secondary_keep_daily" "$(eval echo "\${${_resolved_name}[keep_daily]:-}")" || true)"
 
-    local cli_sec_keep_weekly="${_opts[secondary-keep-weekly]:-}"
-    _resolved["secondary_keep_weekly"]=$(resolve_value "$cli_sec_keep_weekly" "$env_secondary_keep_weekly" "$file_secondary_keep_weekly" "${_resolved[keep_weekly]:-}" || true)
+    local cli_sec_keep_weekly; eval "cli_sec_keep_weekly=\"\${${_opts_name}[secondary-keep-weekly]:-}\""
+    ref_set "${_resolved_name}" "secondary_keep_weekly" "$(resolve_value "$cli_sec_keep_weekly" "$env_secondary_keep_weekly" "$file_secondary_keep_weekly" "$(eval echo "\${${_resolved_name}[keep_weekly]:-}")" || true)"
 
-    local cli_sec_keep_monthly="${_opts[secondary-keep-monthly]:-}"
-    _resolved["secondary_keep_monthly"]=$(resolve_value "$cli_sec_keep_monthly" "$env_secondary_keep_monthly" "$file_secondary_keep_monthly" "${_resolved[keep_monthly]:-}" || true)
+    local cli_sec_keep_monthly; eval "cli_sec_keep_monthly=\"\${${_opts_name}[secondary-keep-monthly]:-}\""
+    ref_set "${_resolved_name}" "secondary_keep_monthly" "$(resolve_value "$cli_sec_keep_monthly" "$env_secondary_keep_monthly" "$file_secondary_keep_monthly" "$(eval echo "\${${_resolved_name}[keep_monthly]:-}")" || true)"
   fi
 
 
 
 
   # Resolve Exclude
-  local cli_exclude="${_opts[exclude]:-}"
-  _resolved[excludes_csv]=$(resolve_value "$cli_exclude" "" "$file_excludes" "${DEFAULT_EXCLUDES:-}")
+  local cli_exclude; eval "cli_exclude=\"\${${_opts_name}[exclude]:-}\""
+  ref_set "${_resolved_name}" excludes_csv "$(resolve_value "$cli_exclude" "" "$file_excludes" "${DEFAULT_EXCLUDES:-}")"
 
   # Resolve Notifications
-  local cli_notification_url="${_opts[notification-url]:-}"
+  local cli_notification_url; eval "cli_notification_url=\"\${${_opts_name}[notification-url]:-}\""
   # resolved는 nameref 연관 배열이며 키 이름이 변수로 오인되는 것을 방지한다.
   # shellcheck disable=SC2154
-  _resolved[notification_url]=$(resolve_value "$cli_notification_url" "$env_notification_url" "$file_notification_url" "" || true)
+  ref_set "${_resolved_name}" notification_url "$(resolve_value "$cli_notification_url" "$env_notification_url" "$file_notification_url" "" || true)"
 
-  local cli_notification_type="${_opts[notification-type]:-}"
+  local cli_notification_type; eval "cli_notification_type=\"\${${_opts_name}[notification-type]:-}\""
   # resolved는 nameref 연관 배열이며 키 이름이 변수로 오인되는 것을 방지한다.
   # shellcheck disable=SC2154
-  _resolved[notification_type]=$(resolve_value "$cli_notification_type" "$env_notification_type" "$file_notification_type" "" || true)
+  ref_set "${_resolved_name}" notification_type "$(resolve_value "$cli_notification_type" "$env_notification_type" "$file_notification_type" "" || true)"
 
-  local cli_notification_on="${_opts[notification-on]:-}"
+  local cli_notification_on; eval "cli_notification_on=\"\${${_opts_name}[notification-on]:-}\""
   # resolved는 nameref 연관 배열이며 키 이름이 변수로 오인되는 것을 방지한다.
   # shellcheck disable=SC2154
-  _resolved[notification_on]=$(resolve_value "$cli_notification_on" "$env_notification_on" "$file_notification_on" "both" || true)
+  ref_set "${_resolved_name}" notification_on "$(resolve_value "$cli_notification_on" "$env_notification_on" "$file_notification_on" "both" || true)"
 
   # resolved는 nameref 연관 배열이며 키 이름이 변수로 오인되는 것을 방지한다.
   # shellcheck disable=SC2154
-  _resolved[notification_method]=$(resolve_value "" "${BACKUP_NOTIFICATION_METHOD:-}" "$file_notification_method" "POST" || true)
+  ref_set "${_resolved_name}" notification_method "$(resolve_value "" "${BACKUP_NOTIFICATION_METHOD:-}" "$file_notification_method" "POST" || true)"
   # shellcheck disable=SC2154
-  _resolved[notification_headers]=$(resolve_value "" "${BACKUP_NOTIFICATION_HEADERS:-}" "$file_notification_headers" "" || true)
+  ref_set "${_resolved_name}" notification_headers "$(resolve_value "" "${BACKUP_NOTIFICATION_HEADERS:-}" "$file_notification_headers" "" || true)"
   # shellcheck disable=SC2154
-  _resolved[notification_body_success]=$(resolve_value "" "${BACKUP_NOTIFICATION_BODY_SUCCESS:-}" "$file_notification_body_success" "" || true)
+  ref_set "${_resolved_name}" notification_body_success "$(resolve_value "" "${BACKUP_NOTIFICATION_BODY_SUCCESS:-}" "$file_notification_body_success" "" || true)"
   # shellcheck disable=SC2154
-  _resolved[notification_body_failure]=$(resolve_value "" "${BACKUP_NOTIFICATION_BODY_FAILURE:-}" "$file_notification_body_failure" "" || true)
+  ref_set "${_resolved_name}" notification_body_failure "$(resolve_value "" "${BACKUP_NOTIFICATION_BODY_FAILURE:-}" "$file_notification_body_failure" "" || true)"
 
-  local cli_audit_tester="${_opts[audit-tester]:-}"
+  local cli_audit_tester; eval "cli_audit_tester=\"\${${_opts_name}[audit-tester]:-}\""
   local env_audit_tester="${BACKUP_AUDIT_TESTER:-}"
   # shellcheck disable=SC2154
-  _resolved[audit_tester]=$(resolve_value "$cli_audit_tester" "$env_audit_tester" "$file_audit_tester" "" || true)
+  ref_set "${_resolved_name}" audit_tester "$(resolve_value "$cli_audit_tester" "$env_audit_tester" "$file_audit_tester" "" || true)"
 
-  local cli_audit_ciso="${_opts[audit-ciso]:-}"
+  local cli_audit_ciso; eval "cli_audit_ciso=\"\${${_opts_name}[audit-ciso]:-}\""
   local env_audit_ciso="${BACKUP_AUDIT_CISO:-}"
   # shellcheck disable=SC2154
-  _resolved[audit_ciso]=$(resolve_value "$cli_audit_ciso" "$env_audit_ciso" "$file_audit_ciso" "" || true)
+  ref_set "${_resolved_name}" audit_ciso "$(resolve_value "$cli_audit_ciso" "$env_audit_ciso" "$file_audit_ciso" "" || true)"
 
-  local cli_audit_rto="${_opts[audit-rto]:-}"
+  local cli_audit_rto; eval "cli_audit_rto=\"\${${_opts_name}[audit-rto]:-}\""
   local env_audit_rto="${BACKUP_AUDIT_RTO:-}"
   # shellcheck disable=SC2154
-  _resolved[audit_rto]=$(resolve_value "$cli_audit_rto" "$env_audit_rto" "$file_audit_rto" "" || true)
+  ref_set "${_resolved_name}" audit_rto "$(resolve_value "$cli_audit_rto" "$env_audit_rto" "$file_audit_rto" "" || true)"
 
   # Global Validation
-  if [[ -z "${_resolved[targets]:-}" ]]; then
-    _errors+=("백업 대상 경로(--targets 또는 BACKUP_TARGETS)가 필요합니다.")
+  if [[ -z "$(eval echo "\${${_resolved_name}[targets]:-}")" ]]; then
+    eval "${_errors_name}+=(\"백업 대상 경로(--targets 또는 BACKUP_TARGETS)가 필요합니다.\")"
   fi
 
-  if [[ -z "${_resolved[password]:-}" ]]; then
-    _errors+=("저장소 비밀번호(--password 또는 BACKUP_PASSWORD)가 필요합니다.")
+  if [[ -z "$(eval echo "\${${_resolved_name}[password]:-}")" ]]; then
+    eval "${_errors_name}+=(\"저장소 비밀번호(--password 또는 BACKUP_PASSWORD)가 필요합니다.\")"
   fi
 
   local err
-  if ! err=$(validate_positive_int "${_resolved[keep_daily]}" "keep-daily"); then
-    _errors+=("$err")
+  if ! err=$(validate_positive_int "$(eval echo "\${${_resolved_name}[keep_daily]}")" "keep-daily"); then
+    eval "${_errors_name}+=(\"$err\")"
   fi
-  if ! err=$(validate_positive_int "${_resolved[keep_weekly]}" "keep-weekly"); then
-    _errors+=("$err")
+  if ! err=$(validate_positive_int "$(eval echo "\${${_resolved_name}[keep_weekly]}")" "keep-weekly"); then
+    eval "${_errors_name}+=(\"$err\")"
   fi
-  if ! err=$(validate_positive_int "${_resolved[keep_monthly]}" "keep-monthly"); then
-    _errors+=("$err")
+  if ! err=$(validate_positive_int "$(eval echo "\${${_resolved_name}[keep_monthly]}")" "keep-monthly"); then
+    eval "${_errors_name}+=(\"$err\")"
   fi
-  if ! err=$(validate_profile_name "${_resolved[profile_name]}"); then
-    _errors+=("$err")
+  if ! err=$(validate_profile_name "$(eval echo "\${${_resolved_name}[profile_name]}")"); then
+    eval "${_errors_name}+=(\"$err\")"
   fi
 
-  if [[ -n "${_resolved[secondary_backend]:-}" ]]; then
-    if ! err=$(validate_secondary_backend "${_resolved[secondary_backend]}"); then
-      _errors+=("$err")
+  if [[ -n "$(eval echo "\${${_resolved_name}[secondary_backend]:-}")" ]]; then
+    if ! err=$(validate_secondary_backend "$(eval echo "\${${_resolved_name}[secondary_backend]}")"); then
+      eval "${_errors_name}+=(\"$err\")"
     fi
-    if ! err=$(validate_positive_int "${_resolved[secondary_keep_daily]}" "secondary-keep-daily"); then
-      _errors+=("$err")
+    if ! err=$(validate_positive_int "$(eval echo "\${${_resolved_name}[secondary_keep_daily]}")" "secondary-keep-daily"); then
+      eval "${_errors_name}+=(\"$err\")"
     fi
-    if ! err=$(validate_positive_int "${_resolved[secondary_keep_weekly]}" "secondary-keep-weekly"); then
-      _errors+=("$err")
+    if ! err=$(validate_positive_int "$(eval echo "\${${_resolved_name}[secondary_keep_weekly]}")" "secondary-keep-weekly"); then
+      eval "${_errors_name}+=(\"$err\")"
     fi
-    if ! err=$(validate_positive_int "${_resolved[secondary_keep_monthly]}" "secondary-keep-monthly"); then
-      _errors+=("$err")
+    if ! err=$(validate_positive_int "$(eval echo "\${${_resolved_name}[secondary_keep_monthly]}")" "secondary-keep-monthly"); then
+      eval "${_errors_name}+=(\"$err\")"
     fi
   fi
 
 
   # Strict Validation for Notifications
-  local url="${_resolved[notification_url]}"
-  local type="${_resolved[notification_type]}"
-  local on="${_resolved[notification_on]}"
+  local url; eval "url=\"\${${_resolved_name}[notification_url]}\""
+  local type; eval "type=\"\${${_resolved_name}[notification_type]}\""
+  local on; eval "on=\"\${${_resolved_name}[notification_on]}\""
 
   if [[ -n "$url" || -n "$type" ]]; then
     if [[ -z "$url" ]]; then
-      _errors+=("알람 URL이 비어 있습니다. 알람 타입을 설정한 경우 URL(--notification-url 또는 BACKUP_NOTIFICATION_URL)을 지정해야 합니다.")
+      eval "${_errors_name}+=(\"알람 URL이 비어 있습니다. 알람 타입을 설정한 경우 URL(--notification-url 또는 BACKUP_NOTIFICATION_URL)을 지정해야 합니다.\")"
     elif [[ -z "$type" ]]; then
-      _errors+=("알람 타입이 비어 있습니다. 알람 URL을 설정한 경우 타입(--notification-type 또는 BACKUP_NOTIFICATION_TYPE)을 지정해야 합니다.")
+      eval "${_errors_name}+=(\"알람 타입이 비어 있습니다. 알람 URL을 설정한 경우 타입(--notification-type 또는 BACKUP_NOTIFICATION_TYPE)을 지정해야 합니다.\")"
     fi
 
     if [[ -n "$url" ]]; then
       if [[ ! "$url" =~ ^https?:// ]]; then
-        _errors+=("알람 URL 형식은 http:// 또는 https://로 시작해야 합니다: ${url}")
+        eval "${_errors_name}+=(\"알람 URL 형식은 http:// 또는 https://로 시작해야 합니다: ${url}\")"
       fi
     fi
 
     if [[ -n "$type" ]]; then
       if ! has_function "notification_${type}_send"; then
-        _errors+=("지원하지 않는 알람 타입입니다: ${type}")
+        eval "${_errors_name}+=(\"지원하지 않는 알람 타입입니다: ${type}\")"
       else
         if has_function "notification_${type}_validate"; then
           local validate_err
           if ! validate_err=$("notification_${type}_validate" 2>&1); then
-            _errors+=("$validate_err")
+            eval "${_errors_name}+=(\"$validate_err\")"
           fi
         fi
       fi
@@ -1252,15 +1279,15 @@ resolve_and_validate_config() {
 
     if [[ -n "$on" ]]; then
       if [[ "$on" != "failure" && "$on" != "success" && "$on" != "both" ]]; then
-        _errors+=("지원하지 않는 알람 발생 조건(ON)입니다: ${on} (failure, success, both 중 하나여야 합니다.)")
+        eval "${_errors_name}+=(\"지원하지 않는 알람 발생 조건(ON)입니다: ${on} (failure, success, both 중 하나여야 합니다.)\")"
       fi
     fi
   fi
 
   # Delegate backend-specific validation if backend is specified
-  local backend="${_opts[backend]:-}"
+  local backend; eval "backend=\"\${${_opts_name}[backend]:-}\""
   if [[ -n "$backend" ]]; then
-    _resolved[backend]="$backend"
+    ref_set "${_resolved_name}" backend "$backend"
     # nameref를 통한 동적 파싱을 사용하므로 미사용 변수 경고 우회
     # shellcheck disable=SC2034
     local -A backend_cli=()
@@ -1269,13 +1296,13 @@ resolve_and_validate_config() {
     # shellcheck disable=SC2034
     local -A backend_file=()
 
-    backend_cli[endpoint]="${_opts[endpoint]:-}"
-    backend_cli[bucket]="${_opts[bucket]:-}"
-    backend_cli[access_key]="${_opts[access-key]:-}"
-    backend_cli[secret_key]="${_opts[secret-key]:-}"
-    backend_cli[host]="${_opts[host]:-}"
-    backend_cli[port]="${_opts[port]:-}"
-    backend_cli[user]="${_opts[user]:-}"
+    backend_cli[endpoint]="$(eval echo "\${${_opts_name}[endpoint]:-}")"
+    backend_cli[bucket]="$(eval echo "\${${_opts_name}[bucket]:-}")"
+    backend_cli[access_key]="$(eval echo "\${${_opts_name}[access-key]:-}")"
+    backend_cli[secret_key]="$(eval echo "\${${_opts_name}[secret-key]:-}")"
+    backend_cli[host]="$(eval echo "\${${_opts_name}[host]:-}")"
+    backend_cli[port]="$(eval echo "\${${_opts_name}[port]:-}")"
+    backend_cli[user]="$(eval echo "\${${_opts_name}[user]:-}")"
 
     local env_vars_mapping=""
     if has_function "backend_${backend}_env_vars"; then
@@ -1314,25 +1341,25 @@ resolve_and_validate_config() {
     # Copy to main resolved array
     local key
     for key in "${!backend_fields[@]}"; do
-      _resolved["$key"]="${backend_fields[$key]}"
+      ref_set "${_resolved_name}" "$key" "${backend_fields[$key]}"
     done
 
 
   fi
 
-  local sec_backend="${_resolved[secondary_backend]:-}"
+  local sec_backend; eval "sec_backend=\"\${${_resolved_name}[secondary_backend]:-}\""
   if [[ -n "$sec_backend" ]]; then
     local -A sec_backend_cli=()
     local -A sec_backend_env=()
     local -A sec_backend_file=()
 
-    sec_backend_cli[endpoint]="${_opts[secondary-endpoint]:-}"
-    sec_backend_cli[bucket]="${_opts[secondary-bucket]:-}"
-    sec_backend_cli[access_key]="${_opts[secondary-access-key]:-}"
-    sec_backend_cli[secret_key]="${_opts[secondary-secret-key]:-}"
-    sec_backend_cli[host]="${_opts[secondary-host]:-}"
-    sec_backend_cli[port]="${_opts[secondary-port]:-}"
-    sec_backend_cli[user]="${_opts[secondary-user]:-}"
+    sec_backend_cli[endpoint]="$(eval echo "\${${_opts_name}[secondary-endpoint]:-}")"
+    sec_backend_cli[bucket]="$(eval echo "\${${_opts_name}[secondary-bucket]:-}")"
+    sec_backend_cli[access_key]="$(eval echo "\${${_opts_name}[secondary-access-key]:-}")"
+    sec_backend_cli[secret_key]="$(eval echo "\${${_opts_name}[secondary-secret-key]:-}")"
+    sec_backend_cli[host]="$(eval echo "\${${_opts_name}[secondary-host]:-}")"
+    sec_backend_cli[port]="$(eval echo "\${${_opts_name}[secondary-port]:-}")"
+    sec_backend_cli[user]="$(eval echo "\${${_opts_name}[secondary-user]:-}")"
 
     if [[ "$sec_backend" == "s3" ]]; then
       sec_backend_env[access_key]="${SECONDARY_AWS_ACCESS_KEY_ID:-${SECONDARY_BACKUP_ACCESS_KEY:-}}"
@@ -1375,15 +1402,15 @@ resolve_and_validate_config() {
 
     local skey
     for skey in "${!sec_fields[@]}"; do
-      _resolved["secondary_$skey"]="${sec_fields[$skey]}"
+      ref_set "${_resolved_name}" "secondary_$skey" "${sec_fields[$skey]}"
     done
 
 
   fi
 
-  validate_resolved_config _resolved _errors
+  validate_resolved_config "${_resolved_name}" "${_errors_name}"
 
-  if [[ ${#_errors[@]} -gt 0 ]]; then
+  if [[ $(eval echo "\${#${_errors_name}[@]}") -gt 0 ]]; then
     return 1
   fi
   return 0
@@ -1499,7 +1526,7 @@ parse_long_opts() {
 # 그대로 두고, 그 결과를 쓰는 방식만 걷어낸다. 같은 플래그가 여러 번 오면(--exclude 등)
 # 값을 콤마로 이어붙인다 - 기존 cmd_setting도 --exclude 반복값을 콤마로 합쳐서 저장했다.
 parse_opts_into() {
-  local -n opts_ref="$1"
+  local opts_ref_name="$1"
   shift
   local parsed
   parsed=$(parse_long_opts "$@") || die "$parsed"
@@ -1507,10 +1534,12 @@ parse_opts_into() {
   local key val
   while IFS=$'\t' read -r key val; do
     [[ -z "$key" ]] && continue
-    if [[ -n "${opts_ref[$key]:-}" ]]; then
-      opts_ref["$key"]="${opts_ref[$key]},${val}"
+    local cur_val=""
+    ref_get "${opts_ref_name}" "$key" "cur_val"
+    if [[ -n "$cur_val" ]]; then
+      ref_set "${opts_ref_name}" "$key" "${cur_val},${val}"
     else
-      opts_ref["$key"]="$val"
+      ref_set "${opts_ref_name}" "$key" "$val"
     fi
   done <<< "$parsed"
 }
@@ -1583,63 +1612,63 @@ escape_single_quotes() {
 }
 
 render_notification_env_block() {
-  local -n _res="$1"
+  local _res_name="$1"
   cat <<EOF
 
 # ==========================================
 # 백업 성공/실패 알림 설정 (Slack, Discord, Custom)
 # ==========================================
-BACKUP_NOTIFICATION_URL='$(escape_single_quotes "${_res[notification_url]:-}")'
-BACKUP_NOTIFICATION_TYPE='$(escape_single_quotes "${_res[notification_type]:-}")'
-BACKUP_NOTIFICATION_ON='$(escape_single_quotes "${_res[notification_on]:-both}")'
-BACKUP_NOTIFICATION_METHOD='$(escape_single_quotes "${_res[notification_method]:-POST}")'
-BACKUP_NOTIFICATION_HEADERS='$(escape_single_quotes "${_res[notification_headers]:-}")'
-BACKUP_NOTIFICATION_BODY_SUCCESS='$(escape_single_quotes "${_res[notification_body_success]:-}")'
-BACKUP_NOTIFICATION_BODY_FAILURE='$(escape_single_quotes "${_res[notification_body_failure]:-}")'
+BACKUP_NOTIFICATION_URL='$(escape_single_quotes "$(eval echo "\${${_res_name}[notification_url]:-}")")'
+BACKUP_NOTIFICATION_TYPE='$(escape_single_quotes "$(eval echo "\${${_res_name}[notification_type]:-}")")'
+BACKUP_NOTIFICATION_ON='$(escape_single_quotes "$(eval echo "\${${_res_name}[notification_on]:-both}")")'
+BACKUP_NOTIFICATION_METHOD='$(escape_single_quotes "$(eval echo "\${${_res_name}[notification_method]:-POST}")")'
+BACKUP_NOTIFICATION_HEADERS='$(escape_single_quotes "$(eval echo "\${${_res_name}[notification_headers]:-}")")'
+BACKUP_NOTIFICATION_BODY_SUCCESS='$(escape_single_quotes "$(eval echo "\${${_res_name}[notification_body_success]:-}")")'
+BACKUP_NOTIFICATION_BODY_FAILURE='$(escape_single_quotes "$(eval echo "\${${_res_name}[notification_body_failure]:-}")")'
 EOF
 }
 
 render_audit_env_block() {
-  local -n _res="$1"
+  local _res_name="$1"
   cat <<EOF
 
 # ==========================================
 # ISMS/ISMS-P 감사 보고서용 사용자 설정
 # ==========================================
-BACKUP_AUDIT_TESTER='$(escape_single_quotes "${_res[audit_tester]:-}")'
-BACKUP_AUDIT_CISO='$(escape_single_quotes "${_res[audit_ciso]:-}")'
-BACKUP_AUDIT_RTO='$(escape_single_quotes "${_res[audit_rto]:-}")'
+BACKUP_AUDIT_TESTER='$(escape_single_quotes "$(eval echo "\${${_res_name}[audit_tester]:-}")")'
+BACKUP_AUDIT_CISO='$(escape_single_quotes "$(eval echo "\${${_res_name}[audit_ciso]:-}")")'
+BACKUP_AUDIT_RTO='$(escape_single_quotes "$(eval echo "\${${_res_name}[audit_rto]:-}")")'
 EOF
 }
 
 render_db_env_block() {
-  local -n _res="$1"
-  if [[ -n "${_res[db_type]:-}" ]]; then
+  local _res_name="$1"
+  if [[ -n "$(eval echo "\${${_res_name}[db_type]:-}")" ]]; then
     cat <<EOF
 
 # ==========================================
 # 데이터베이스 백업용 설정 (Database Backup)
 # ==========================================
-BACKUP_DB_TYPE='$(escape_single_quotes "${_res[db_type]:-}")'
-BACKUP_DB_COMMAND='$(escape_single_quotes "${_res[db_command]:-}")'
-BACKUP_DB_FILENAME='$(escape_single_quotes "${_res[db_filename]:-db-dump.sql}")'
-BACKUP_DB_SCHEDULE='$(escape_single_quotes "${_res[db_schedule]:-}")'
-KEEP_DB_DAILY='$(escape_single_quotes "${_res[db_keep_daily]:-}")'
-KEEP_DB_WEEKLY='$(escape_single_quotes "${_res[db_keep_weekly]:-}")'
-KEEP_DB_MONTHLY='$(escape_single_quotes "${_res[db_keep_monthly]:-}")'
+BACKUP_DB_TYPE='$(escape_single_quotes "$(eval echo "\${${_res_name}[db_type]:-}")")'
+BACKUP_DB_COMMAND='$(escape_single_quotes "$(eval echo "\${${_res_name}[db_command]:-}")")'
+BACKUP_DB_FILENAME='$(escape_single_quotes "$(eval echo "\${${_res_name}[db_filename]:-db-dump.sql}")")'
+BACKUP_DB_SCHEDULE='$(escape_single_quotes "$(eval echo "\${${_res_name}[db_schedule]:-}")")'
+KEEP_DB_DAILY='$(escape_single_quotes "$(eval echo "\${${_res_name}[db_keep_daily]:-}")")'
+KEEP_DB_WEEKLY='$(escape_single_quotes "$(eval echo "\${${_res_name}[db_keep_weekly]:-}")")'
+KEEP_DB_MONTHLY='$(escape_single_quotes "$(eval echo "\${${_res_name}[db_keep_monthly]:-}")")'
 EOF
   fi
 }
 
 render_ntp_env_block() {
-  local -n _res_ntp="$1"
-  if [[ -n "${_res_ntp[ntp_report]:-}" ]]; then
+  local _res_ntp_name="$1"
+  if [[ -n "$(eval echo "\${${_res_ntp_name}[ntp_report]:-}")" ]]; then
     cat <<EOF
 
 # ==========================================
 # NTP 시각 동기화 증적 생성 설정
 # ==========================================
-BACKUP_NTP_REPORT='$(escape_single_quotes "${_res_ntp[ntp_report]:-}")'
+BACKUP_NTP_REPORT='$(escape_single_quotes "$(eval echo "\${${_res_ntp_name}[ntp_report]:-}")")'
 EOF
   fi
 }
@@ -1679,12 +1708,15 @@ build_notification_payload_custom() {
 
 dispatch_notification() {
   # shellcheck disable=SC2178  # nameref to caller's associative array
-  local -n _ctx="$1"
-  local status="${_ctx[status]:-success}"
-  local err_msg="${_ctx[err_msg]:-}"
-  local url="${_ctx[notify_url]:-${BACKUP_NOTIFICATION_URL:-}}"
-  local type="${_ctx[notify_type]:-${BACKUP_NOTIFICATION_TYPE:-}}"
-  local on="${_ctx[notify_on]:-${BACKUP_NOTIFICATION_ON:-both}}"
+  local _ctx_name="$1"
+  local status; eval "status=\"\${${_ctx_name}[status]:-success}\""
+  local err_msg; eval "err_msg=\"\${${_ctx_name}[err_msg]:-}\""
+  local url; eval "url=\"\${${_ctx_name}[notify_url]:-}\""
+  [[ -z "$url" ]] && url="${BACKUP_NOTIFICATION_URL:-}"
+  local type; eval "type=\"\${${_ctx_name}[notify_type]:-}\""
+  [[ -z "$type" ]] && type="${BACKUP_NOTIFICATION_TYPE:-}"
+  local on; eval "on=\"\${${_ctx_name}[notify_on]:-}\""
+  [[ -z "$on" ]] && on="${BACKUP_NOTIFICATION_ON:-both}"
 
   [[ -z "$url" ]] && return 0
 
@@ -1698,7 +1730,7 @@ dispatch_notification() {
   log_info "통합 알림 전송 중... ($status)"
   local res=0
   if has_function "notification_${type}_send"; then
-    "notification_${type}_send" _ctx || res=$?
+    "notification_${type}_send" "${_ctx_name}" || res=$?
   else
     log_warn "지원하지 않거나 정의되지 않은 알림 전송 어댑터입니다: ${type}"
     return 0
@@ -2196,13 +2228,24 @@ EOF
 resolve_secondary_policy() {
   # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
   # shellcheck disable=SC2178
-  local -n __policy_ref="$1"
+  local __policy_ref_name="$1"
   # shellcheck disable=SC2178
-  local -n __out_ref="$2"
-  __out_ref[password]="${__policy_ref[secondary_password]:-${__policy_ref[password]:-}}"
-  __out_ref[keep_daily]="${__policy_ref[secondary_keep_daily]:-${__policy_ref[keep_daily]:-}}"
-  __out_ref[keep_weekly]="${__policy_ref[secondary_keep_weekly]:-${__policy_ref[keep_weekly]:-}}"
-  __out_ref[keep_monthly]="${__policy_ref[secondary_keep_monthly]:-${__policy_ref[keep_monthly]:-}}"
+  local __out_ref_name="$2"
+  local sec_pass; eval "sec_pass=\"\${${__policy_ref_name}[secondary_password]:-}\""
+  [[ -z "$sec_pass" ]] && sec_pass="$(eval echo "\${${__policy_ref_name}[password]:-}")"
+  ref_set "${__out_ref_name}" password "$sec_pass"
+
+  local sec_daily; eval "sec_daily=\"\${${__policy_ref_name}[secondary_keep_daily]:-}\""
+  [[ -z "$sec_daily" ]] && sec_daily="$(eval echo "\${${__policy_ref_name}[keep_daily]:-}")"
+  ref_set "${__out_ref_name}" keep_daily "$sec_daily"
+
+  local sec_weekly; eval "sec_weekly=\"\${${__policy_ref_name}[secondary_keep_weekly]:-}\""
+  [[ -z "$sec_weekly" ]] && sec_weekly="$(eval echo "\${${__policy_ref_name}[keep_weekly]:-}")"
+  ref_set "${__out_ref_name}" keep_weekly "$sec_weekly"
+
+  local sec_monthly; eval "sec_monthly=\"\${${__policy_ref_name}[secondary_keep_monthly]:-}\""
+  [[ -z "$sec_monthly" ]] && sec_monthly="$(eval echo "\${${__policy_ref_name}[keep_monthly]:-}")"
+  ref_set "${__out_ref_name}" keep_monthly "$sec_monthly"
 }
 
 validate_mysql_mariadb_dump() {
@@ -2230,56 +2273,67 @@ render_setting_hint_sftp() {
 }
 
 backend_sftp_resolve() {
-  local -n cli_ref="$1" env_ref="$2" file_ref="$3" fields_ref="$4"
-  local env_host="${env_ref[host]:-${BACKUP_HOST:-${RCLONE_CONFIG_SYNO_BACKUP_HOST:-}}}"
-  local file_host="${file_ref[host]:-${file_ref[RCLONE_CONFIG_SYNO_BACKUP_HOST]:-}}"
-  fields_ref[host]=$(resolve_value "${cli_ref[host]:-}" "$env_host" "$file_host" "") || true
+  local cli_ref_name="$1"; local env_ref_name="$2"; local file_ref_name="$3"; local fields_ref_name="$4"
+  local env_host; eval "env_host=\"\${${env_ref_name}[host]:-}\""
+  [[ -z "$env_host" ]] && env_host="${BACKUP_HOST:-${RCLONE_CONFIG_SYNO_BACKUP_HOST:-}}"
+  local file_host; eval "file_host=\"\${${file_ref_name}[host]:-}\""
+  [[ -z "$file_host" ]] && file_host="$(eval echo "\${${file_ref_name}[RCLONE_CONFIG_SYNO_BACKUP_HOST]:-}")"
+  ref_set "${fields_ref_name}" host "$(resolve_value "$(eval echo "\${${cli_ref_name}[host]:-}")" "$env_host" "$file_host" "")" || true
 
-  local env_port="${env_ref[port]:-${BACKUP_PORT:-${RCLONE_CONFIG_SYNO_BACKUP_PORT:-}}}"
-  local file_port="${file_ref[port]:-${file_ref[RCLONE_CONFIG_SYNO_BACKUP_PORT]:-}}"
-  fields_ref[port]=$(resolve_value "${cli_ref[port]:-}" "$env_port" "$file_port" "$DEFAULT_SFTP_PORT") || true
+  local env_port; eval "env_port=\"\${${env_ref_name}[port]:-}\""
+  [[ -z "$env_port" ]] && env_port="${BACKUP_PORT:-${RCLONE_CONFIG_SYNO_BACKUP_PORT:-}}"
+  local file_port; eval "file_port=\"\${${file_ref_name}[port]:-}\""
+  [[ -z "$file_port" ]] && file_port="$(eval echo "\${${file_ref_name}[RCLONE_CONFIG_SYNO_BACKUP_PORT]:-}")"
+  ref_set "${fields_ref_name}" port "$(resolve_value "$(eval echo "\${${cli_ref_name}[port]:-}")" "$env_port" "$file_port" "$DEFAULT_SFTP_PORT")" || true
 
-  local env_user="${env_ref[user]:-${BACKUP_USER:-${RCLONE_CONFIG_SYNO_BACKUP_USER:-}}}"
-  local file_user="${file_ref[user]:-${file_ref[RCLONE_CONFIG_SYNO_BACKUP_USER]:-}}"
-  fields_ref[user]=$(resolve_value "${cli_ref[user]:-}" "$env_user" "$file_user" "") || true
+  local env_user; eval "env_user=\"\${${env_ref_name}[user]:-}\""
+  [[ -z "$env_user" ]] && env_user="${BACKUP_USER:-${RCLONE_CONFIG_SYNO_BACKUP_USER:-}}"
+  local file_user; eval "file_user=\"\${${file_ref_name}[user]:-}\""
+  [[ -z "$file_user" ]] && file_user="$(eval echo "\${${file_ref_name}[RCLONE_CONFIG_SYNO_BACKUP_USER]:-}")"
+  ref_set "${fields_ref_name}" user "$(resolve_value "$(eval echo "\${${cli_ref_name}[user]:-}")" "$env_user" "$file_user" "")" || true
 }
 
 backend_sftp_validate() {
   # fields_ref는 nameref로 연관 배열을 가리키는데, 같은 변수명이 다른 함수에서도
   # nameref로 재사용되다 보니 shellcheck가 스칼라/배열 재할당으로 오인한다.
   # shellcheck disable=SC2178
-  local -n fields_ref="$1"
-  if [[ -z "${fields_ref[host]:-}" || -z "${fields_ref[user]:-}" ]]; then
-    render_setting_hint_sftp "${fields_ref[host]:-}" "${fields_ref[port]:-}" "${fields_ref[user]:-}"
+  local fields_ref_name="$1"
+  if [[ -z "$(eval echo "\${${fields_ref_name}[host]:-}")" || -z "$(eval echo "\${${fields_ref_name}[user]:-}")" ]]; then
+    render_setting_hint_sftp "$(eval echo "\${${fields_ref_name}[host]:-}")" "$(eval echo "\${${fields_ref_name}[port]:-}")" "$(eval echo "\${${fields_ref_name}[user]:-}")"
     return 1
   fi
-  validate_port "${fields_ref[port]:-}"
+  validate_port "$(eval echo "\${${fields_ref_name}[port]:-}")"
 }
 
 backend_sftp_prepare() {
-  local -n fields_ref="$1"
+  local fields_ref_name="$1"
   generate_ssh_key_if_missing
   # pubkey는 nameref로 쓰는 연관 배열의 키일 뿐, 별도로 선언된 변수가 아니다.
   # shellcheck disable=SC2154
-  fields_ref[pubkey]="$(cat "${BACKUP_SSH_KEY}.pub")"
+  ref_set "${fields_ref_name}" pubkey "$(cat "${BACKUP_SSH_KEY}.pub")"
 }
 
 backend_sftp_render_env() {
   local hostname_tag="$1"
   # 다른 함수의 같은 이름 nameref 사용과 겹쳐 shellcheck가 배열/스칼라 재할당으로 오인한다.
   # shellcheck disable=SC2178
-  local -n fields_ref="$2" policy_ref="$3"
+  local fields_ref_name="$2"; local policy_ref_name="$3"
   local slot="${4:-primary}"
 
   if [[ "$slot" == "secondary" ]]; then
     local -A sec_policy=()
-    resolve_secondary_policy policy_ref sec_policy
+    resolve_secondary_policy "${policy_ref_name}" sec_policy
+    local sec_host_val="" sec_user_val="" sec_port_val=""
+    ref_get "${fields_ref_name}" host sec_host_val
+    ref_get "${fields_ref_name}" user sec_user_val
+    ref_get "${fields_ref_name}" port sec_port_val
+    [[ -z "$sec_port_val" ]] && sec_port_val="22"
     cat <<EOF
 SECONDARY_RESTIC_REPOSITORY='rclone:syno_backup_sec:/backup/$(escape_single_quotes "${hostname_tag}")'
 SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE='sftp'
-SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST='$(escape_single_quotes "${fields_ref[host]}")'
-SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER='$(escape_single_quotes "${fields_ref[user]}")'
-SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT='$(escape_single_quotes "${fields_ref[port]:-22}")'
+SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST='$(escape_single_quotes "${sec_host_val}")'
+SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER='$(escape_single_quotes "${sec_user_val}")'
+SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT='$(escape_single_quotes "${sec_port_val}")'
 SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE='$(escape_single_quotes "${BACKUP_SSH_KEY}")'
 SECONDARY_RESTIC_PASSWORD='$(escape_single_quotes "${sec_policy[password]}")'
 SECONDARY_KEEP_DAILY='$(escape_single_quotes "${sec_policy[keep_daily]}")'
@@ -2287,20 +2341,31 @@ SECONDARY_KEEP_WEEKLY='$(escape_single_quotes "${sec_policy[keep_weekly]}")'
 SECONDARY_KEEP_MONTHLY='$(escape_single_quotes "${sec_policy[keep_monthly]}")'
 EOF
   else
+    local host_val="" user_val="" port_val="" pass_val="" targets_val="" excludes_val="" keep_daily_val="" keep_weekly_val="" keep_monthly_val="" profile_name_val=""
+    ref_get "${fields_ref_name}" host host_val
+    ref_get "${fields_ref_name}" user user_val
+    ref_get "${fields_ref_name}" port port_val
+    ref_get "${policy_ref_name}" password pass_val
+    ref_get "${policy_ref_name}" targets targets_val
+    ref_get "${policy_ref_name}" excludes_csv excludes_val
+    ref_get "${policy_ref_name}" keep_daily keep_daily_val
+    ref_get "${policy_ref_name}" keep_weekly keep_weekly_val
+    ref_get "${policy_ref_name}" keep_monthly keep_monthly_val
+    ref_get "${policy_ref_name}" profile_name profile_name_val
     cat <<EOF
 export RESTIC_REPOSITORY='rclone:syno_backup:/backup/$(escape_single_quotes "${hostname_tag}")'
 export RCLONE_CONFIG_SYNO_BACKUP_TYPE='sftp'
-export RCLONE_CONFIG_SYNO_BACKUP_HOST='$(escape_single_quotes "${fields_ref[host]}")'
-export RCLONE_CONFIG_SYNO_BACKUP_USER='$(escape_single_quotes "${fields_ref[user]}")'
-export RCLONE_CONFIG_SYNO_BACKUP_PORT='$(escape_single_quotes "${fields_ref[port]}")'
+export RCLONE_CONFIG_SYNO_BACKUP_HOST='$(escape_single_quotes "${host_val}")'
+export RCLONE_CONFIG_SYNO_BACKUP_USER='$(escape_single_quotes "${user_val}")'
+export RCLONE_CONFIG_SYNO_BACKUP_PORT='$(escape_single_quotes "${port_val}")'
 export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE='$(escape_single_quotes "${BACKUP_SSH_KEY}")'
-export RESTIC_PASSWORD='$(escape_single_quotes "${policy_ref[password]}")'
-export BACKUP_TARGETS='$(escape_single_quotes "${policy_ref[targets]}")'
-export BACKUP_EXCLUDES='$(escape_single_quotes "${policy_ref[excludes_csv]:-}")'
-export KEEP_DAILY='$(escape_single_quotes "${policy_ref[keep_daily]}")'
-export KEEP_WEEKLY='$(escape_single_quotes "${policy_ref[keep_weekly]}")'
-export KEEP_MONTHLY='$(escape_single_quotes "${policy_ref[keep_monthly]}")'
-export BACKUP_PROFILE_NAME='$(escape_single_quotes "${policy_ref[profile_name]}")'
+export RESTIC_PASSWORD='$(escape_single_quotes "${pass_val}")'
+export BACKUP_TARGETS='$(escape_single_quotes "${targets_val}")'
+export BACKUP_EXCLUDES='$(escape_single_quotes "${excludes_val}")'
+export KEEP_DAILY='$(escape_single_quotes "${keep_daily_val}")'
+export KEEP_WEEKLY='$(escape_single_quotes "${keep_weekly_val}")'
+export KEEP_MONTHLY='$(escape_single_quotes "${keep_monthly_val}")'
+export BACKUP_PROFILE_NAME='$(escape_single_quotes "${profile_name_val}")'
 EOF
   fi
 }
@@ -2308,7 +2373,7 @@ EOF
 backend_sftp_render_notice() {
   # 같은 이유의 nameref 오탐.
   # shellcheck disable=SC2178
-  local -n fields_ref="$1"
+  local fields_ref_name="$1"
   local slot="${2:-primary}"
   local prefix=""
   if [[ "$slot" == "secondary" ]]; then
@@ -2317,7 +2382,7 @@ backend_sftp_render_notice() {
   cat <<EOF
 ${prefix}아래 공개키를 NAS의 authorized_keys(또는 File Station)에 등록하세요:
 ----------------------------------------------------------
-${fields_ref[pubkey]}
+$(eval echo "\${${fields_ref_name}[pubkey]}")
 ----------------------------------------------------------
 등록 후 'backup.sh init'을 실행하세요.
 EOF
@@ -2339,17 +2404,21 @@ render_setting_hint_s3() {
 backend_s3_resolve() {
   # 같은 이유의 nameref 오탐.
   # shellcheck disable=SC2178
-  local -n cli_ref="$1" env_ref="$2" file_ref="$3" fields_ref="$4"
+  local cli_ref_name="$1"; local env_ref_name="$2"; local file_ref_name="$3"; local fields_ref_name="$4"
 
   # S3 env fallbacks
-  local env_access_key="${env_ref[access_key]:-${BACKUP_ACCESS_KEY:-${AWS_ACCESS_KEY_ID:-}}}"
-  local file_access_key="${file_ref[access_key]:-${file_ref[AWS_ACCESS_KEY_ID]:-}}"
-  local env_secret_key="${env_ref[secret_key]:-${BACKUP_SECRET_KEY:-${AWS_SECRET_ACCESS_KEY:-}}}"
-  local file_secret_key="${file_ref[secret_key]:-${file_ref[AWS_SECRET_ACCESS_KEY]:-}}"
+  local env_access_key; eval "env_access_key=\"\${${env_ref_name}[access_key]:-}\""
+  [[ -z "$env_access_key" ]] && env_access_key="${BACKUP_ACCESS_KEY:-${AWS_ACCESS_KEY_ID:-}}"
+  local file_access_key; eval "file_access_key=\"\${${file_ref_name}[access_key]:-}\""
+  [[ -z "$file_access_key" ]] && file_access_key="$(eval echo "\${${file_ref_name}[AWS_ACCESS_KEY_ID]:-}")"
+  local env_secret_key; eval "env_secret_key=\"\${${env_ref_name}[secret_key]:-}\""
+  [[ -z "$env_secret_key" ]] && env_secret_key="${BACKUP_SECRET_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
+  local file_secret_key; eval "file_secret_key=\"\${${file_ref_name}[secret_key]:-}\""
+  [[ -z "$file_secret_key" ]] && file_secret_key="$(eval echo "\${${file_ref_name}[AWS_SECRET_ACCESS_KEY]:-}")"
 
   # repo extraction for endpoint and bucket
   local env_repo="${RESTIC_REPOSITORY:-}"
-  local file_repo="${file_ref[RESTIC_REPOSITORY]:-}"
+  local file_repo; eval "file_repo=\"\${${file_ref_name}[RESTIC_REPOSITORY]:-}\""
   local parsed_endpoint="" parsed_bucket=""
 
   if [[ "$env_repo" =~ ^s3:(.*)/([^/]+)/[^/]+$ ]]; then
@@ -2360,28 +2429,32 @@ backend_s3_resolve() {
     parsed_bucket="${BASH_REMATCH[2]}"
   fi
 
-  local env_endpoint="${env_ref[endpoint]:-${BACKUP_ENDPOINT:-$parsed_endpoint}}"
-  local file_endpoint="${file_ref[endpoint]:-$parsed_endpoint}"
-  fields_ref[endpoint]=$(resolve_value "${cli_ref[endpoint]:-}" "$env_endpoint" "$file_endpoint" "") || true
+  local env_endpoint; eval "env_endpoint=\"\${${env_ref_name}[endpoint]:-}\""
+  [[ -z "$env_endpoint" ]] && env_endpoint="${BACKUP_ENDPOINT:-$parsed_endpoint}"
+  local file_endpoint; eval "file_endpoint=\"\${${file_ref_name}[endpoint]:-}\""
+  [[ -z "$file_endpoint" ]] && file_endpoint="$parsed_endpoint"
+  ref_set "${fields_ref_name}" endpoint "$(resolve_value "$(eval echo "\${${cli_ref_name}[endpoint]:-}")" "$env_endpoint" "$file_endpoint" "")" || true
 
-  local env_bucket="${env_ref[bucket]:-${BACKUP_BUCKET:-$parsed_bucket}}"
-  local file_bucket="${file_ref[bucket]:-$parsed_bucket}"
-  fields_ref[bucket]=$(resolve_value "${cli_ref[bucket]:-}" "$env_bucket" "$file_bucket" "") || true
+  local env_bucket; eval "env_bucket=\"\${${env_ref_name}[bucket]:-}\""
+  [[ -z "$env_bucket" ]] && env_bucket="${BACKUP_BUCKET:-$parsed_bucket}"
+  local file_bucket; eval "file_bucket=\"\${${file_ref_name}[bucket]:-}\""
+  [[ -z "$file_bucket" ]] && file_bucket="$parsed_bucket"
+  ref_set "${fields_ref_name}" bucket "$(resolve_value "$(eval echo "\${${cli_ref_name}[bucket]:-}")" "$env_bucket" "$file_bucket" "")" || true
 
-  fields_ref[access_key]=$(resolve_value "${cli_ref[access_key]:-}" "$env_access_key" "$file_access_key" "") || true
-  fields_ref[secret_key]=$(resolve_value "${cli_ref[secret_key]:-}" "$env_secret_key" "$file_secret_key" "") || true
+  ref_set "${fields_ref_name}" access_key "$(resolve_value "$(eval echo "\${${cli_ref_name}[access_key]:-}")" "$env_access_key" "$file_access_key" "")" || true
+  ref_set "${fields_ref_name}" secret_key "$(resolve_value "$(eval echo "\${${cli_ref_name}[secret_key]:-}")" "$env_secret_key" "$file_secret_key" "")" || true
 }
 
 backend_s3_validate() {
   # 위 backend_sftp_validate와 같은 이유의 nameref 오탐.
   # shellcheck disable=SC2178
-  local -n fields_ref="$1"
-  if [[ -z "${fields_ref[endpoint]:-}" || -z "${fields_ref[bucket]:-}" ]]; then
-    render_setting_hint_s3 "${fields_ref[endpoint]:-}" "${fields_ref[bucket]:-}"
+  local fields_ref_name="$1"
+  if [[ -z "$(eval echo "\${${fields_ref_name}[endpoint]:-}")" || -z "$(eval echo "\${${fields_ref_name}[bucket]:-}")" ]]; then
+    render_setting_hint_s3 "$(eval echo "\${${fields_ref_name}[endpoint]:-}")" "$(eval echo "\${${fields_ref_name}[bucket]:-}")"
     return 1
   fi
-  if [[ -z "${fields_ref[access_key]:-}" || -z "${fields_ref[secret_key]:-}" ]]; then
-    render_setting_hint_s3 "${fields_ref[endpoint]:-}" "${fields_ref[bucket]:-}"
+  if [[ -z "$(eval echo "\${${fields_ref_name}[access_key]:-}")" || -z "$(eval echo "\${${fields_ref_name}[secret_key]:-}")" ]]; then
+    render_setting_hint_s3 "$(eval echo "\${${fields_ref_name}[endpoint]:-}")" "$(eval echo "\${${fields_ref_name}[bucket]:-}")"
     return 1
   fi
   return 0
@@ -2393,33 +2466,50 @@ backend_s3_prepare() {
 
 backend_s3_render_env() {
   local hostname_tag="$1"
-  local -n fields_ref="$2" policy_ref="$3"
+  local fields_ref_name="$2"; local policy_ref_name="$3"
   local slot="${4:-primary}"
 
   if [[ "$slot" == "secondary" ]]; then
     local -A sec_policy=()
-    resolve_secondary_policy policy_ref sec_policy
+    resolve_secondary_policy "${policy_ref_name}" sec_policy
+    local sec_endpoint_val="" sec_bucket_val="" sec_access_key_val="" sec_secret_key_val=""
+    ref_get "${fields_ref_name}" endpoint sec_endpoint_val
+    ref_get "${fields_ref_name}" bucket sec_bucket_val
+    ref_get "${fields_ref_name}" access_key sec_access_key_val
+    ref_get "${fields_ref_name}" secret_key sec_secret_key_val
     cat <<EOF
-SECONDARY_RESTIC_REPOSITORY='s3:$(escape_single_quotes "${fields_ref[endpoint]}")/$(escape_single_quotes "${fields_ref[bucket]}")/$(escape_single_quotes "${hostname_tag}")'
-SECONDARY_AWS_ACCESS_KEY_ID='$(escape_single_quotes "${fields_ref[access_key]}")'
-SECONDARY_AWS_SECRET_ACCESS_KEY='$(escape_single_quotes "${fields_ref[secret_key]}")'
+SECONDARY_RESTIC_REPOSITORY='s3:$(escape_single_quotes "${sec_endpoint_val}")/$(escape_single_quotes "${sec_bucket_val}")/$(escape_single_quotes "${hostname_tag}")'
+SECONDARY_AWS_ACCESS_KEY_ID='$(escape_single_quotes "${sec_access_key_val}")'
+SECONDARY_AWS_SECRET_ACCESS_KEY='$(escape_single_quotes "${sec_secret_key_val}")'
 SECONDARY_RESTIC_PASSWORD='$(escape_single_quotes "${sec_policy[password]}")'
 SECONDARY_KEEP_DAILY='$(escape_single_quotes "${sec_policy[keep_daily]}")'
 SECONDARY_KEEP_WEEKLY='$(escape_single_quotes "${sec_policy[keep_weekly]}")'
 SECONDARY_KEEP_MONTHLY='$(escape_single_quotes "${sec_policy[keep_monthly]}")'
 EOF
   else
+    local endpoint_val="" bucket_val="" access_key_val="" secret_key_val="" pass_val="" targets_val="" excludes_val="" keep_daily_val="" keep_weekly_val="" keep_monthly_val="" profile_name_val=""
+    ref_get "${fields_ref_name}" endpoint endpoint_val
+    ref_get "${fields_ref_name}" bucket bucket_val
+    ref_get "${fields_ref_name}" access_key access_key_val
+    ref_get "${fields_ref_name}" secret_key secret_key_val
+    ref_get "${policy_ref_name}" password pass_val
+    ref_get "${policy_ref_name}" targets targets_val
+    ref_get "${policy_ref_name}" excludes_csv excludes_val
+    ref_get "${policy_ref_name}" keep_daily keep_daily_val
+    ref_get "${policy_ref_name}" keep_weekly keep_weekly_val
+    ref_get "${policy_ref_name}" keep_monthly keep_monthly_val
+    ref_get "${policy_ref_name}" profile_name profile_name_val
     cat <<EOF
-export RESTIC_REPOSITORY='s3:$(escape_single_quotes "${fields_ref[endpoint]}")/$(escape_single_quotes "${fields_ref[bucket]}")/$(escape_single_quotes "${hostname_tag}")'
-export AWS_ACCESS_KEY_ID='$(escape_single_quotes "${fields_ref[access_key]}")'
-export AWS_SECRET_ACCESS_KEY='$(escape_single_quotes "${fields_ref[secret_key]}")'
-export RESTIC_PASSWORD='$(escape_single_quotes "${policy_ref[password]}")'
-export BACKUP_TARGETS='$(escape_single_quotes "${policy_ref[targets]}")'
-export BACKUP_EXCLUDES='$(escape_single_quotes "${policy_ref[excludes_csv]:-}")'
-export KEEP_DAILY='$(escape_single_quotes "${policy_ref[keep_daily]}")'
-export KEEP_WEEKLY='$(escape_single_quotes "${policy_ref[keep_weekly]}")'
-export KEEP_MONTHLY='$(escape_single_quotes "${policy_ref[keep_monthly]}")'
-export BACKUP_PROFILE_NAME='$(escape_single_quotes "${policy_ref[profile_name]}")'
+export RESTIC_REPOSITORY='s3:$(escape_single_quotes "${endpoint_val}")/$(escape_single_quotes "${bucket_val}")/$(escape_single_quotes "${hostname_tag}")'
+export AWS_ACCESS_KEY_ID='$(escape_single_quotes "${access_key_val}")'
+export AWS_SECRET_ACCESS_KEY='$(escape_single_quotes "${secret_key_val}")'
+export RESTIC_PASSWORD='$(escape_single_quotes "${pass_val}")'
+export BACKUP_TARGETS='$(escape_single_quotes "${targets_val}")'
+export BACKUP_EXCLUDES='$(escape_single_quotes "${excludes_val}")'
+export KEEP_DAILY='$(escape_single_quotes "${keep_daily_val}")'
+export KEEP_WEEKLY='$(escape_single_quotes "${keep_weekly_val}")'
+export KEEP_MONTHLY='$(escape_single_quotes "${keep_monthly_val}")'
+export BACKUP_PROFILE_NAME='$(escape_single_quotes "${profile_name_val}")'
 EOF
   fi
 }
@@ -2442,15 +2532,19 @@ EOF
 
 
 render_secondary_config() {
-  local -n __res_sec_ref="$1"
-  local sec_backend="${__res_sec_ref[secondary_backend]:-}"
+  local __res_sec_ref_name="$1"
+  local sec_backend; eval "sec_backend=\"\${${__res_sec_ref_name}[secondary_backend]:-}\""
   [[ -z "$sec_backend" ]] && return 0
 
-  local sec_password="${__res_sec_ref[secondary_password]:-${__res_sec_ref[password]:-}}"
-  local sec_keep_daily="${__res_sec_ref[secondary_keep_daily]:-${__res_sec_ref[keep_daily]:-}}"
-  local sec_keep_weekly="${__res_sec_ref[secondary_keep_weekly]:-${__res_sec_ref[keep_weekly]:-}}"
-  local sec_keep_monthly="${__res_sec_ref[secondary_keep_monthly]:-${__res_sec_ref[keep_monthly]:-}}"
-  local profile_name="${__res_sec_ref[profile_name]:-$(hostname)}"
+  local sec_password; eval "sec_password=\"\${${__res_sec_ref_name}[secondary_password]:-}\""
+  [[ -z "$sec_password" ]] && sec_password="$(eval echo "\${${__res_sec_ref_name}[password]:-}")"
+  local sec_keep_daily; eval "sec_keep_daily=\"\${${__res_sec_ref_name}[secondary_keep_daily]:-}\""
+  [[ -z "$sec_keep_daily" ]] && sec_keep_daily="$(eval echo "\${${__res_sec_ref_name}[keep_daily]:-}")"
+  local sec_keep_weekly; eval "sec_keep_weekly=\"\${${__res_sec_ref_name}[secondary_keep_weekly]:-}\""
+  [[ -z "$sec_keep_weekly" ]] && sec_keep_weekly="$(eval echo "\${${__res_sec_ref_name}[keep_weekly]:-}")"
+  local sec_keep_monthly; eval "sec_keep_monthly=\"\${${__res_sec_ref_name}[secondary_keep_monthly]:-}\""
+  [[ -z "$sec_keep_monthly" ]] && sec_keep_monthly="$(eval echo "\${${__res_sec_ref_name}[keep_monthly]:-}")"
+  local profile_name; eval "profile_name=\"\${${__res_sec_ref_name}[profile_name]:-$(hostname)}\""
 
   printf '\n# 2차 원격 소산 백업 설정\n'
   printf 'SECONDARY_BACKEND="%s"\n' "$sec_backend"
@@ -2460,36 +2554,36 @@ render_secondary_config() {
   printf 'SECONDARY_KEEP_MONTHLY="%s"\n' "$sec_keep_monthly"
 
   local -A fields=()
-  fields[host]="${__res_sec_ref[secondary_host]:-}"
-  fields[port]="${__res_sec_ref[secondary_port]:-22}"
-  fields[user]="${__res_sec_ref[secondary_user]:-}"
-  fields[endpoint]="${__res_sec_ref[secondary_endpoint]:-}"
-  fields[bucket]="${__res_sec_ref[secondary_bucket]:-}"
-  fields[access_key]="${__res_sec_ref[secondary_access_key]:-}"
-  fields[secret_key]="${__res_sec_ref[secondary_secret_key]:-}"
+  fields[host]="$(eval echo "\${${__res_sec_ref_name}[secondary_host]:-}")"
+  fields[port]="$(eval echo "\${${__res_sec_ref_name}[secondary_port]:-22}")"
+  fields[user]="$(eval echo "\${${__res_sec_ref_name}[secondary_user]:-}")"
+  fields[endpoint]="$(eval echo "\${${__res_sec_ref_name}[secondary_endpoint]:-}")"
+  fields[bucket]="$(eval echo "\${${__res_sec_ref_name}[secondary_bucket]:-}")"
+  fields[access_key]="$(eval echo "\${${__res_sec_ref_name}[secondary_access_key]:-}")"
+  fields[secret_key]="$(eval echo "\${${__res_sec_ref_name}[secondary_secret_key]:-}")"
 
   if has_function "backend_${sec_backend}_render_env"; then
-    "backend_${sec_backend}_render_env" "$profile_name" fields __res_sec_ref "secondary"
+    "backend_${sec_backend}_render_env" "$profile_name" fields "${__res_sec_ref_name}" "secondary"
   fi
 }
 
 append_secondary_config_and_notice() {
-  local -n __res_sec_ref="$1"
-  local -n __content_sec_ref="$2"
-  local -n __notice_sec_ref="$3"
+  local __res_sec_ref_name="$1"
+  local __content_sec_ref_name="$2"
+  local __notice_sec_ref_name="$3"
 
-  local sec_backend="${__res_sec_ref[secondary_backend]:-}"
+  local sec_backend; eval "sec_backend=\"\${${__res_sec_ref_name}[secondary_backend]:-}\""
   if [[ -n "$sec_backend" ]]; then
-    __content_sec_ref+="$(render_secondary_config "$1")"
+    local _tmp_refactor_scalar_val_16; _tmp_refactor_scalar_val_16="$(render_secondary_config "$1")"; eval "${__content_sec_ref_name}+=\${_tmp_refactor_scalar_val_16}"
     
     local -A fields=()
-    fields[host]="${__res_sec_ref[secondary_host]:-}"
-    fields[port]="${__res_sec_ref[secondary_port]:-22}"
-    fields[user]="${__res_sec_ref[secondary_user]:-}"
-    fields[endpoint]="${__res_sec_ref[secondary_endpoint]:-}"
-    fields[bucket]="${__res_sec_ref[secondary_bucket]:-}"
-    fields[access_key]="${__res_sec_ref[secondary_access_key]:-}"
-    fields[secret_key]="${__res_sec_ref[secondary_secret_key]:-}"
+    fields[host]="$(eval echo "\${${__res_sec_ref_name}[secondary_host]:-}")"
+    fields[port]="$(eval echo "\${${__res_sec_ref_name}[secondary_port]:-22}")"
+    fields[user]="$(eval echo "\${${__res_sec_ref_name}[secondary_user]:-}")"
+    fields[endpoint]="$(eval echo "\${${__res_sec_ref_name}[secondary_endpoint]:-}")"
+    fields[bucket]="$(eval echo "\${${__res_sec_ref_name}[secondary_bucket]:-}")"
+    fields[access_key]="$(eval echo "\${${__res_sec_ref_name}[secondary_access_key]:-}")"
+    fields[secret_key]="$(eval echo "\${${__res_sec_ref_name}[secondary_secret_key]:-}")"
     if [[ "$sec_backend" == "sftp" ]]; then
       generate_ssh_key_if_missing
       fields[pubkey]="$(cat "${BACKUP_SSH_KEY}.pub")"
@@ -2506,9 +2600,7 @@ append_secondary_config_and_notice() {
 ${sec_notice}
 EOF" 2>/dev/null || echo "$sec_notice")
       fi
-      __notice_sec_ref="${__notice_sec_ref}
-
-${sec_notice}"
+      eval "${__notice_sec_ref_name}+=\"\\\$'\n\n'\${sec_notice}\""
     fi
   fi
 }
@@ -2516,54 +2608,58 @@ ${sec_notice}"
 
 
 backend_s3_render_notice() {
-  local -n fields_ref="$1"
+  local fields_ref_name="$1"
   local slot="${2:-primary}"
   local prefix=""
   if [[ "$slot" == "secondary" ]]; then
     prefix="[2차 소산지 S3] "
   fi
   printf '%s최소권한 버킷 정책을 아래와 같이 적용하세요:\n' "$prefix"
-  render_s3_bucket_policy "${fields_ref[bucket]}"
+  render_s3_bucket_policy "$(eval echo "\${${fields_ref_name}[bucket]}")"
 }
 
 # shellcheck disable=SC2034
 backend_sftp_configure() {
   # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
   # shellcheck disable=SC2178
-  local -n _resolved="$1"
-  local -n _out_env="$2"
-  local -n _out_notice="$3"
+  local _resolved_name="$1"
+  local _out_env_name="$2"
+  local _out_notice_name="$3"
 
   # Prepare keys
   generate_ssh_key_if_missing
   local -A fields=()
   fields[pubkey]="$(cat "${BACKUP_SSH_KEY}.pub")"
-  fields[host]="${_resolved[host]:-}"
-  fields[port]="${_resolved[port]:-22}"
-  fields[user]="${_resolved[user]:-}"
+  fields[host]="$(eval echo "\${${_resolved_name}[host]:-}")"
+  fields[port]="$(eval echo "\${${_resolved_name}[port]:-22}")"
+  fields[user]="$(eval echo "\${${_resolved_name}[user]:-}")"
 
   # Render Env
-  _out_env=$(backend_sftp_render_env "${_resolved[profile_name]:-$(hostname)}" fields _resolved "primary")
-  _out_env+=$'\n'
-  _out_env+="$(render_notification_env_block _resolved)"
-  _out_env+="$(render_audit_env_block _resolved)"
-  _out_env+="$(render_db_env_block _resolved)"
-  _out_env+="$(render_ntp_env_block _resolved)"
+  local _tmp_refactor_scalar_val_14; _tmp_refactor_scalar_val_14=$(backend_sftp_render_env "$(eval echo "\${${_resolved_name}[profile_name]:-$(hostname)}")" fields "${_resolved_name}" "primary"); eval "${_out_env_name}=\${_tmp_refactor_scalar_val_14}"
+  local _tmp_refactor_scalar_val_9; _tmp_refactor_scalar_val_9=$'\n'; eval "${_out_env_name}+=\${_tmp_refactor_scalar_val_9}"
+  local _tmp_refactor_scalar_val_10; _tmp_refactor_scalar_val_10="$(render_notification_env_block "${_resolved_name}")"; eval "${_out_env_name}+=\${_tmp_refactor_scalar_val_10}"
+  local _tmp_refactor_scalar_val_11; _tmp_refactor_scalar_val_11="$(render_audit_env_block "${_resolved_name}")"; eval "${_out_env_name}+=\${_tmp_refactor_scalar_val_11}"
+  local _tmp_refactor_scalar_val_12; _tmp_refactor_scalar_val_12="$(render_db_env_block "${_resolved_name}")"; eval "${_out_env_name}+=\${_tmp_refactor_scalar_val_12}"
+  local _tmp_refactor_scalar_val_13; _tmp_refactor_scalar_val_13="$(render_ntp_env_block "${_resolved_name}")"; eval "${_out_env_name}+=\${_tmp_refactor_scalar_val_13}"
 
   # Render Notice
-  _out_notice=$(backend_sftp_render_notice fields "primary")
+  local _tmp_refactor_scalar_val_15; _tmp_refactor_scalar_val_15=$(backend_sftp_render_notice fields "primary"); eval "${_out_notice_name}=\${_tmp_refactor_scalar_val_15}"
 }
 
 backend_sftp_test_connectivity() {
   # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
   # shellcheck disable=SC2178
-  local -n _resolved="$1"
+  local _resolved_name="$1"
   generate_ssh_key_if_missing
   (
+    local host_val="" port_val="" user_val=""
+    ref_get "${_resolved_name}" host host_val
+    ref_get "${_resolved_name}" port port_val
+    ref_get "${_resolved_name}" user user_val
     export RCLONE_CONFIG_SYNO_BACKUP_TYPE="sftp"
-    export RCLONE_CONFIG_SYNO_BACKUP_HOST="${_resolved[host]}"
-    export RCLONE_CONFIG_SYNO_BACKUP_PORT="${_resolved[port]}"
-    export RCLONE_CONFIG_SYNO_BACKUP_USER="${_resolved[user]}"
+    export RCLONE_CONFIG_SYNO_BACKUP_HOST="$host_val"
+    export RCLONE_CONFIG_SYNO_BACKUP_PORT="$port_val"
+    export RCLONE_CONFIG_SYNO_BACKUP_USER="$user_val"
     export RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE="${BACKUP_SSH_KEY}"
     rclone_check_connectivity "syno_backup" "${BACKUP_VERBOSE:-0}"
   )
@@ -2573,30 +2669,34 @@ backend_sftp_test_connectivity() {
 backend_s3_configure() {
   # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
   # shellcheck disable=SC2178
-  local -n _resolved="$1"
-  local -n _out_env="$2"
-  local -n _out_notice="$3"
+  local _resolved_name="$1"
+  local _out_env_name="$2"
+  local _out_notice_name="$3"
 
   local -A fields=()
-  fields[endpoint]="${_resolved[endpoint]:-}"
-  fields[bucket]="${_resolved[bucket]:-}"
-  fields[access_key]="${_resolved[access_key]:-}"
-  fields[secret_key]="${_resolved[secret_key]:-}"
+  fields[endpoint]="$(eval echo "\${${_resolved_name}[endpoint]:-}")"
+  fields[bucket]="$(eval echo "\${${_resolved_name}[bucket]:-}")"
+  fields[access_key]="$(eval echo "\${${_resolved_name}[access_key]:-}")"
+  fields[secret_key]="$(eval echo "\${${_resolved_name}[secret_key]:-}")"
 
   # Render Env
-  _out_env=$(backend_s3_render_env "${_resolved[profile_name]:-$(hostname)}" fields _resolved "primary")
-  _out_env+=$'\n'
-  _out_env+="$(render_notification_env_block _resolved)"
-  _out_env+="$(render_audit_env_block _resolved)"
-  _out_env+="$(render_db_env_block _resolved)"
-  _out_env+="$(render_ntp_env_block _resolved)"
+  local _tmp_refactor_scalar_val_6; _tmp_refactor_scalar_val_6=$(backend_s3_render_env "$(eval echo "\${${_resolved_name}[profile_name]:-$(hostname)}")" fields "${_resolved_name}" "primary"); eval "${_out_env_name}=\${_tmp_refactor_scalar_val_6}"
+  local _tmp_refactor_scalar_val_1; _tmp_refactor_scalar_val_1=$'\n'; eval "${_out_env_name}+=\${_tmp_refactor_scalar_val_1}"
+  local _tmp_refactor_scalar_val_2; _tmp_refactor_scalar_val_2="$(render_notification_env_block "${_resolved_name}")"; eval "${_out_env_name}+=\${_tmp_refactor_scalar_val_2}"
+  local _tmp_refactor_scalar_val_3; _tmp_refactor_scalar_val_3="$(render_audit_env_block "${_resolved_name}")"; eval "${_out_env_name}+=\${_tmp_refactor_scalar_val_3}"
+  local _tmp_refactor_scalar_val_4; _tmp_refactor_scalar_val_4="$(render_db_env_block "${_resolved_name}")"; eval "${_out_env_name}+=\${_tmp_refactor_scalar_val_4}"
+  local _tmp_refactor_scalar_val_5; _tmp_refactor_scalar_val_5="$(render_ntp_env_block "${_resolved_name}")"; eval "${_out_env_name}+=\${_tmp_refactor_scalar_val_5}"
 
   # Render Notice
-  _out_notice=$(backend_s3_render_notice fields "primary")
-  if [[ "$_out_notice" == *"\$(render_s3_bucket_policy"* ]]; then
-    _out_notice=$(eval "cat <<EOF
-$_out_notice
-EOF" 2>/dev/null || echo "$_out_notice")
+  local _tmp_refactor_scalar_val_7; _tmp_refactor_scalar_val_7=$(backend_s3_render_notice fields "primary"); eval "${_out_notice_name}=\${_tmp_refactor_scalar_val_7}"
+  local current_notice=""
+  eval "current_notice=\"\${${_out_notice_name}:-}\""
+  if [[ "$current_notice" == *"\$(render_s3_bucket_policy"* ]]; then
+    local s3_eval_notice
+    s3_eval_notice=$(eval "cat <<EOF
+${current_notice}
+EOF" 2>/dev/null || echo "$current_notice")
+    eval "${_out_notice_name}=\"\${s3_eval_notice}\""
   fi
 }
 
@@ -2612,10 +2712,11 @@ notification_slack_validate() {
 notification_slack_send() {
   # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
   # shellcheck disable=SC2178,SC2034
-  local -n __ctx="$1"
-  local url="${__ctx[notify_url]:-${BACKUP_NOTIFICATION_URL:-}}"
-  local status="${__ctx[status]:-success}"
-  local err_msg="${__ctx[err_msg]:-}"
+  local __ctx_name="$1"
+  local url; eval "url=\"\${${__ctx_name}[notify_url]:-}\""
+  [[ -z "$url" ]] && url="${BACKUP_NOTIFICATION_URL:-}"
+  local status; eval "status=\"\${${__ctx_name}[status]:-success}\""
+  local err_msg; eval "err_msg=\"\${${__ctx_name}[err_msg]:-}\""
   local hostname_val; hostname_val=$(hostname)
   local profile_name_val="${BACKUP_PROFILE_NAME:-$hostname_val}"
 
@@ -2632,10 +2733,11 @@ notification_discord_validate() {
 notification_discord_send() {
   # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
   # shellcheck disable=SC2178,SC2034
-  local -n __ctx="$1"
-  local url="${__ctx[notify_url]:-${BACKUP_NOTIFICATION_URL:-}}"
-  local status="${__ctx[status]:-success}"
-  local err_msg="${__ctx[err_msg]:-}"
+  local __ctx_name="$1"
+  local url; eval "url=\"\${${__ctx_name}[notify_url]:-}\""
+  [[ -z "$url" ]] && url="${BACKUP_NOTIFICATION_URL:-}"
+  local status; eval "status=\"\${${__ctx_name}[status]:-success}\""
+  local err_msg; eval "err_msg=\"\${${__ctx_name}[err_msg]:-}\""
   local hostname_val; hostname_val=$(hostname)
   local profile_name_val="${BACKUP_PROFILE_NAME:-$hostname_val}"
 
@@ -2652,17 +2754,22 @@ notification_custom_validate() {
 notification_custom_send() {
   # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
   # shellcheck disable=SC2178,SC2034
-  local -n __ctx="$1"
-  local url="${__ctx[notify_url]:-${BACKUP_NOTIFICATION_URL:-}}"
-  local status="${__ctx[status]:-success}"
-  local err_msg="${__ctx[err_msg]:-}"
+  local __ctx_name="$1"
+  local url; eval "url=\"\${${__ctx_name}[notify_url]:-}\""
+  [[ -z "$url" ]] && url="${BACKUP_NOTIFICATION_URL:-}"
+  local status; eval "status=\"\${${__ctx_name}[status]:-success}\""
+  local err_msg; eval "err_msg=\"\${${__ctx_name}[err_msg]:-}\""
   local hostname_val; hostname_val=$(hostname)
   local profile_name_val="${BACKUP_PROFILE_NAME:-$hostname_val}"
-  local method="${__ctx[method]:-${BACKUP_NOTIFICATION_METHOD:-POST}}"
-  local headers_val="${__ctx[headers]:-${BACKUP_NOTIFICATION_HEADERS:-}}"
-  local body_success="${__ctx[body_success]:-${BACKUP_NOTIFICATION_BODY_SUCCESS:-}}"
-  local body_failure="${__ctx[body_failure]:-${BACKUP_NOTIFICATION_BODY_FAILURE:-}}"
-  local profile_command="${__ctx[profile_command]:-}"
+  local method; eval "method=\"\${${__ctx_name}[method]:-}\""
+  [[ -z "$method" ]] && method="${BACKUP_NOTIFICATION_METHOD:-POST}"
+  local headers_val; eval "headers_val=\"\${${__ctx_name}[headers]:-}\""
+  [[ -z "$headers_val" ]] && headers_val="${BACKUP_NOTIFICATION_HEADERS:-}"
+  local body_success; eval "body_success=\"\${${__ctx_name}[body_success]:-}\""
+  [[ -z "$body_success" ]] && body_success="${BACKUP_NOTIFICATION_BODY_SUCCESS:-}"
+  local body_failure; eval "body_failure=\"\${${__ctx_name}[body_failure]:-}\""
+  [[ -z "$body_failure" ]] && body_failure="${BACKUP_NOTIFICATION_BODY_FAILURE:-}"
+  local profile_command; eval "profile_command=\"\${${__ctx_name}[profile_command]:-}\""
 
   local payload
   payload=$(build_notification_payload_custom "$status" "$hostname_val" "$profile_name_val" "$err_msg" "$body_success" "$body_failure" "$profile_command")
@@ -2862,7 +2969,7 @@ cmd_init() {
 
 
 is_systemd_active() {
-  if [[ -d /run/systemd/system || -d "${TEST_ROOT:-}/run/systemd/system" ]] && command -v systemctl >/dev/null 2>&1; then
+  if command -v systemctl >/dev/null 2>&1; then
     return 0
   fi
   return 1
@@ -2901,9 +3008,9 @@ determine_scheduler_adapter() {
 scheduler_register() {
   local profile_name="$1"
   # shellcheck disable=SC2178
-  local -n _s_cfg="$2"
+  local _s_cfg_name="$2"
   local adapter; adapter=$(determine_scheduler_adapter)
-  "scheduler_${adapter}_register" "$profile_name" _s_cfg
+  "scheduler_${adapter}_register" "$profile_name" "${_s_cfg_name}"
 }
 
 scheduler_unregister() {
@@ -2916,24 +3023,24 @@ scheduler_unregister() {
 scheduler_status() {
   local profile_name="$1"
   # shellcheck disable=SC2178
-  local -n _s_stat="$2"
+  local _s_stat_name="$2"
   local adapter; adapter=$(determine_scheduler_adapter)
-  "scheduler_${adapter}_status" "$profile_name" _s_stat
+  "scheduler_${adapter}_status" "$profile_name" "${_s_stat_name}"
 }
 
 # --- 1) Mock Scheduler Adapter ---
 scheduler_mock_register() {
   local profile_name="$1"
   # shellcheck disable=SC2178
-  local -n _m_cfg="$2"
+  local _m_cfg_name="$2"
   local state_file="${TEST_ROOT:-/tmp}/var/log/scheduler_mock.state"
   mkdir -p "$(dirname "$state_file")"
 
-  local on_cal="${_m_cfg[on-calendar]:-}"
-  local d_cal="${_m_cfg[on-calendar-daily]:-}"
-  local dr_cal="${_m_cfg[on-calendar-drill]:-}"
-  local daily="${_m_cfg[daily]:-0}"
-  local drill="${_m_cfg[restore-drill]:-0}"
+  local on_cal; eval "on_cal=\"\${${_m_cfg_name}[on-calendar]:-}\""
+  local d_cal; eval "d_cal=\"\${${_m_cfg_name}[on-calendar-daily]:-}\""
+  local dr_cal; eval "dr_cal=\"\${${_m_cfg_name}[on-calendar-drill]:-}\""
+  local daily; eval "daily=\"\${${_m_cfg_name}[daily]:-0}\""
+  local drill; eval "drill=\"\${${_m_cfg_name}[restore-drill]:-0}\""
 
   if (( daily )); then
     printf 'daily_schedule=%s\ndaily_enabled=1\n' "$d_cal" >> "$state_file"
@@ -2977,14 +3084,14 @@ scheduler_mock_unregister() {
 scheduler_mock_status() {
   local profile_name="$1"
   # shellcheck disable=SC2178
-  local -n _m_stat="$2"
+  local _m_stat_name="$2"
   local state_file="${TEST_ROOT:-/tmp}/var/log/scheduler_mock.state"
 
   if [[ ! -f "$state_file" ]]; then
-    _m_stat[backup]="inactive"
-    _m_stat[daily]="inactive"
-    _m_stat[drill]="inactive"
-    _m_stat[db_backup]="inactive"
+    ref_set "${_m_stat_name}" backup "inactive"
+    ref_set "${_m_stat_name}" daily "inactive"
+    ref_set "${_m_stat_name}" drill "inactive"
+    ref_set "${_m_stat_name}" db_backup "inactive"
     return 0
   fi
 
@@ -2993,24 +3100,24 @@ scheduler_mock_status() {
     [[ -z "$key" ]] && continue
     case "$key" in
       backup_enabled)
-        _m_stat[backup]="$([[ "$val" == "1" ]] && echo "active" || echo "inactive")"
+        ref_set "${_m_stat_name}" backup "$([[ "$val" == "1" ]] && echo "active" || echo "inactive")"
         ;;
       daily_enabled)
-        _m_stat[daily]="$([[ "$val" == "1" ]] && echo "active" || echo "inactive")"
+        ref_set "${_m_stat_name}" daily "$([[ "$val" == "1" ]] && echo "active" || echo "inactive")"
         ;;
       drill_enabled)
-        _m_stat[drill]="$([[ "$val" == "1" ]] && echo "active" || echo "inactive")"
+        ref_set "${_m_stat_name}" drill "$([[ "$val" == "1" ]] && echo "active" || echo "inactive")"
         ;;
       db_backup_enabled)
-        _m_stat[db_backup]="$([[ "$val" == "1" ]] && echo "active" || echo "inactive")"
+        ref_set "${_m_stat_name}" db_backup "$([[ "$val" == "1" ]] && echo "active" || echo "inactive")"
         ;;
     esac
   done < "$state_file"
 
-  [[ -z "${_m_stat[backup]:-}" ]] && _m_stat[backup]="inactive"
-  [[ -z "${_m_stat[daily]:-}" ]] && _m_stat[daily]="inactive"
-  [[ -z "${_m_stat[drill]:-}" ]] && _m_stat[drill]="inactive"
-  [[ -z "${_m_stat[db_backup]:-}" ]] && _m_stat[db_backup]="inactive"
+  [[ -z "$(eval echo "\${${_m_stat_name}[backup]:-}")" ]] && ref_set "${_m_stat_name}" backup "inactive"
+  [[ -z "$(eval echo "\${${_m_stat_name}[daily]:-}")" ]] && ref_set "${_m_stat_name}" daily "inactive"
+  [[ -z "$(eval echo "\${${_m_stat_name}[drill]:-}")" ]] && ref_set "${_m_stat_name}" drill "inactive"
+  [[ -z "$(eval echo "\${${_m_stat_name}[db_backup]:-}")" ]] && ref_set "${_m_stat_name}" db_backup "inactive"
   return 0
 }
 
@@ -3019,14 +3126,15 @@ scheduler_mock_status() {
 scheduler_cron_register() {
   local profile_name="$1"
   # shellcheck disable=SC2178
-  local -n _c_cfg="$2"
+  local _c_cfg_name="$2"
 
-  local on_calendar="${_c_cfg[on-calendar]:-$DEFAULT_ON_CALENDAR}"
-  local daily_on_calendar="${_c_cfg[on-calendar-daily]:-*-*-* 01:00:00}"
-  local drill_on_calendar="${_c_cfg[on-calendar-drill]:-*-*-01 01:30:00}"
-  local daily="${_c_cfg[daily]:-0}"
-  local restore_drill="${_c_cfg[restore-drill]:-0}"
-  local ntp_report="${_c_cfg[ntp_report]:-${BACKUP_NTP_REPORT:-${BACKUP_CHRONY_REPORT:-}}}"
+  local on_calendar; eval "on_calendar=\"\${${_c_cfg_name}[on-calendar]:-$DEFAULT_ON_CALENDAR}\""
+  local daily_on_calendar; eval "daily_on_calendar=\"\${${_c_cfg_name}[on-calendar-daily]:-*-*-* 01:00:00}\""
+  local drill_on_calendar; eval "drill_on_calendar=\"\${${_c_cfg_name}[on-calendar-drill]:-*-*-01 01:30:00}\""
+  local daily; eval "daily=\"\${${_c_cfg_name}[daily]:-0}\""
+  local restore_drill; eval "restore_drill=\"\${${_c_cfg_name}[restore-drill]:-0}\""
+  local ntp_report; eval "ntp_report=\"\${${_c_cfg_name}[ntp_report]:-}\""
+  [[ -z "$ntp_report" ]] && ntp_report="${BACKUP_NTP_REPORT:-${BACKUP_CHRONY_REPORT:-}}"
 
   local cron_on_cal; cron_on_cal=$(convert_calendar_to_cron "$on_calendar")
   local cron_daily; cron_daily=$(convert_calendar_to_cron "$daily_on_calendar")
@@ -3218,14 +3326,14 @@ scheduler_cron_unregister() {
 scheduler_cron_status() {
   local profile_name="$1"
   # shellcheck disable=SC2178,SC2154
-  local -n _c_stat="$2"
+  local _c_stat_name="$2"
 
   local current_cron; current_cron=$(crontab -l 2>/dev/null || true)
   if [[ -z "$current_cron" ]]; then
-    _c_stat[backup]="inactive"
-    _c_stat[daily]="inactive"
-    _c_stat[drill]="inactive"
-    _c_stat[db_backup]="inactive"
+    ref_set "${_c_stat_name}" backup "inactive"
+    ref_set "${_c_stat_name}" daily "inactive"
+    ref_set "${_c_stat_name}" drill "inactive"
+    ref_set "${_c_stat_name}" db_backup "inactive"
     return 0
   fi
 
@@ -3247,24 +3355,25 @@ scheduler_cron_status() {
   done <<< "$current_cron"
 
   # Assign active/inactive
-  if (( has_backup )); then _c_stat[backup]="active"; else _c_stat[backup]="inactive"; fi
-  if (( has_daily )); then _c_stat[daily]="active"; else _c_stat[daily]="inactive"; fi
-  if (( has_drill )); then _c_stat[drill]="active"; else _c_stat[drill]="inactive"; fi
-  if (( has_db )); then _c_stat[db_backup]="active"; else _c_stat[db_backup]="inactive"; fi
+  if (( has_backup )); then ref_set "${_c_stat_name}" backup "active"; else ref_set "${_c_stat_name}" backup "inactive"; fi
+  if (( has_daily )); then ref_set "${_c_stat_name}" daily "active"; else ref_set "${_c_stat_name}" daily "inactive"; fi
+  if (( has_drill )); then ref_set "${_c_stat_name}" drill "active"; else ref_set "${_c_stat_name}" drill "inactive"; fi
+  if (( has_db )); then ref_set "${_c_stat_name}" db_backup "active"; else ref_set "${_c_stat_name}" db_backup "inactive"; fi
 }
 
 # --- 2) Systemd Scheduler Adapter ---
 scheduler_systemd_register() {
   local profile_name="$1"
   # shellcheck disable=SC2178
-  local -n _sys_cfg="$2"
+  local _sys_cfg_name="$2"
 
-  local on_calendar="${_sys_cfg[on-calendar]:-$DEFAULT_ON_CALENDAR}"
-  local daily_on_calendar="${_sys_cfg[on-calendar-daily]:-*-*-* 01:00:00}"
-  local drill_on_calendar="${_sys_cfg[on-calendar-drill]:-*-*-01 01:30:00}"
-  local daily="${_sys_cfg[daily]:-0}"
-  local restore_drill="${_sys_cfg[restore-drill]:-0}"
-  local ntp_report="${_sys_cfg[ntp_report]:-${BACKUP_NTP_REPORT:-${BACKUP_CHRONY_REPORT:-}}}"
+  local on_calendar; eval "on_calendar=\"\${${_sys_cfg_name}[on-calendar]:-$DEFAULT_ON_CALENDAR}\""
+  local daily_on_calendar; eval "daily_on_calendar=\"\${${_sys_cfg_name}[on-calendar-daily]:-*-*-* 01:00:00}\""
+  local drill_on_calendar; eval "drill_on_calendar=\"\${${_sys_cfg_name}[on-calendar-drill]:-*-*-01 01:30:00}\""
+  local daily; eval "daily=\"\${${_sys_cfg_name}[daily]:-0}\""
+  local restore_drill; eval "restore_drill=\"\${${_sys_cfg_name}[restore-drill]:-0}\""
+  local ntp_report; eval "ntp_report=\"\${${_sys_cfg_name}[ntp_report]:-}\""
+  [[ -z "$ntp_report" ]] && ntp_report="${BACKUP_NTP_REPORT:-${BACKUP_CHRONY_REPORT:-}}"
 
   if (( daily )); then
     write_systemd_timer_unit "backup-audit-daily" "Restic Daily Backup Audit Report" "Run Restic Daily Backup Audit Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH audit --daily --report" "$daily_on_calendar"
@@ -3344,7 +3453,7 @@ scheduler_systemd_status() {
   local profile_name="$1"
   # nameref로 전달받아 변수 선언 분석 우회
   # shellcheck disable=SC2178,SC2154
-  local -n _sys_stat="$2"
+  local _sys_stat_name="$2"
 
   local timer_state daily_timer_state drill_timer_state db_timer_state
   timer_state=$(systemctl is-active "$(resticprofile_timer_unit_name "$profile_name")" 2>/dev/null) || true
@@ -3352,10 +3461,10 @@ scheduler_systemd_status() {
   drill_timer_state=$(systemctl is-active backup-audit-restore-drill.timer 2>/dev/null) || true
   db_timer_state=$(systemctl is-active "$(resticprofile_timer_unit_name "${profile_name}-db")" 2>/dev/null) || true
 
-  _sys_stat[backup]="${timer_state:-unknown}"
-  _sys_stat[daily]="${daily_timer_state:-unknown}"
-  _sys_stat[drill]="${drill_timer_state:-unknown}"
-  _sys_stat[db_backup]="${db_timer_state:-inactive}"
+  ref_set "${_sys_stat_name}" backup "${timer_state:-unknown}"
+  ref_set "${_sys_stat_name}" daily "${daily_timer_state:-unknown}"
+  ref_set "${_sys_stat_name}" drill "${drill_timer_state:-unknown}"
+  ref_set "${_sys_stat_name}" db_backup "${db_timer_state:-inactive}"
 }
 
 systemd_reload_daemon() {
@@ -3793,26 +3902,31 @@ except Exception:
 run_restore_drill() {
   # nameref를 통한 연관 배열 키 동적 할당으로 정적 분석기 미인식 우회
   # shellcheck disable=SC2178  # nameref to caller's associative array
-  local -n _opts="$1"
+  local _opts_name="$1"
   # shellcheck disable=SC2178  # nameref to caller's associative array
-  local -n _res="$2"
+  local _res_name="$2"
 
-  _res["test_date"]=$(date "+%Y-%m-%d")
-  _res["tester"]="${_opts["tester"]:-}"
-  _res["ciso"]="${_opts["ciso"]:-}"
-  
-  local rto="${_opts["rto"]:-120}"
-  _res["rto_minutes"]="$rto"
-  
-  local target_dir="${_opts["target"]:-/tmp/restore_test}"
-  _res["target_dir"]="$target_dir"
+  local tester_val="" ciso_val="" rto_val="" target_dir_val=""
+  ref_get "${_opts_name}" tester tester_val
+  ref_get "${_opts_name}" ciso ciso_val
+  ref_get "${_opts_name}" rto rto_val
+  [[ -z "$rto_val" ]] && rto_val="120"
+  ref_get "${_opts_name}" target target_dir_val
+  [[ -z "$target_dir_val" ]] && target_dir_val="/tmp/restore_test"
+
+  ref_set "${_res_name}" "test_date" "$(date "+%Y-%m-%d")"
+  ref_set "${_res_name}" "tester" "$tester_val"
+  ref_set "${_res_name}" "ciso" "$ciso_val"
+  ref_set "${_res_name}" "rto_minutes" "$rto_val"
+  local target_dir="$target_dir_val"
+  ref_set "${_res_name}" "target_dir" "$target_dir"
 
   local os_name="Rocky Linux 9"
   if [[ -f /etc/os-release ]]; then
     # shellcheck disable=SC1091
     os_name=$(source /etc/os-release && echo "${PRETTY_NAME:-Rocky Linux 9}")
   fi
-  _res["os_name"]="$os_name"
+  ref_set "${_res_name}" "os_name" "$os_name"
 
   # 1. Primary snapshot
   local primary_info; primary_info=$(query_snapshot_info)
@@ -3821,13 +3935,13 @@ run_restore_drill() {
     read -r primary_snap primary_snap_time <<< "$primary_info"
   fi
 
-  _res["primary_snap"]="$primary_snap"
-  _res["primary_snap_time"]="$primary_snap_time"
+  ref_set "${_res_name}" "primary_snap" "$primary_snap"
+  ref_set "${_res_name}" "primary_snap_time" "$primary_snap_time"
 
   if [[ -z "$primary_snap" ]]; then
-    _res["primary_rto_satisfied"]="false"
-    _res["primary_rto_status"]="초과 (미흡)"
-    _res["error_message"]="복구 테스트 실패: 저장소에 백업 스냅샷이 존재하지 않습니다."
+    ref_set "${_res_name}" "primary_rto_satisfied" "false"
+    ref_set "${_res_name}" "primary_rto_status" "초과 (미흡)"
+    ref_set "${_res_name}" "error_message" "복구 테스트 실패: 저장소에 백업 스냅샷이 존재하지 않습니다."
     return 0
   fi
 
@@ -3835,9 +3949,9 @@ run_restore_drill() {
     if [[ "$target_dir" == /tmp/* || "$target_dir" == /var/tmp/* ]]; then
       rm -rf "$target_dir"
     else
-      _res["primary_rto_satisfied"]="false"
-      _res["primary_rto_status"]="초과 (미흡)"
-      _res["error_message"]="복구 경로가 안전하지 않습니다 (/tmp 또는 /var/tmp 하위 경로만 지원): $target_dir"
+      ref_set "${_res_name}" "primary_rto_satisfied" "false"
+      ref_set "${_res_name}" "primary_rto_status" "초과 (미흡)"
+      ref_set "${_res_name}" "error_message" "복구 경로가 안전하지 않습니다 (/tmp 또는 /var/tmp 하위 경로만 지원): $target_dir"
       return 0
     fi
   fi
@@ -3855,44 +3969,44 @@ run_restore_drill() {
   else
     elapsed_str="$((elapsed / 60))분 $((elapsed % 60))초"
   fi
-  _res["primary_elapsed_seconds"]="$elapsed"
-  _res["primary_elapsed_str"]="$elapsed_str"
+  ref_set "${_res_name}" "primary_elapsed_seconds" "$elapsed"
+  ref_set "${_res_name}" "primary_elapsed_str" "$elapsed_str"
 
   local rto_seconds=$((rto * 60))
   if (( restore_ok && elapsed <= rto_seconds )); then
-    _res["primary_rto_satisfied"]="true"
-    _res["primary_rto_status"]="만족"
+    ref_set "${_res_name}" "primary_rto_satisfied" "true"
+    ref_set "${_res_name}" "primary_rto_status" "만족"
   else
-    _res["primary_rto_satisfied"]="false"
-    _res["primary_rto_status"]="초과 (미흡)"
+    ref_set "${_res_name}" "primary_rto_satisfied" "false"
+    ref_set "${_res_name}" "primary_rto_status" "초과 (미흡)"
   fi
 
   if (( ! restore_ok )); then
-    _res["error_message"]="restic restore 복구 실패"
+    ref_set "${_res_name}" "error_message" "restic restore 복구 실패"
     rm -rf "$target_dir"
     return 0
   fi
 
   local total_bytes=0
   total_bytes=$(du -sb "$target_dir" 2>/dev/null | awk '{print $1}') || total_bytes=0
-  _res["primary_size"]=$(format_bytes "$total_bytes")
+  ref_set "${_res_name}" "primary_size" "$(format_bytes "$total_bytes")"
   rm -rf "$target_dir"
 
   # 2. DB snapshot
   if [[ -n "${BACKUP_DB_TYPE:-}" ]]; then
-    _res["db_type"]="${BACKUP_DB_TYPE}"
+    ref_set "${_res_name}" "db_type" "${BACKUP_DB_TYPE}"
     local db_info; db_info=$(query_snapshot_info --tag db)
     local db_snap="" db_snap_time=""
     if [[ -n "$db_info" ]]; then
       read -r db_snap db_snap_time <<< "$db_info"
     fi
     
-    _res["db_snap"]="$db_snap"
-    _res["db_snap_time"]="$db_snap_time"
+    ref_set "${_res_name}" "db_snap" "$db_snap"
+    ref_set "${_res_name}" "db_snap_time" "$db_snap_time"
 
     if [[ -z "$db_snap" ]]; then
-      _res["db_valid"]="0"
-      _res["error_message"]="DB 복구 테스트 실패: 저장소에 DB 백업 스냅샷이 존재하지 않습니다."
+      ref_set "${_res_name}" "db_valid" "0"
+      ref_set "${_res_name}" "error_message" "DB 복구 테스트 실패: 저장소에 DB 백업 스냅샷이 존재하지 않습니다."
       return 0
     fi
 
@@ -3921,11 +4035,11 @@ run_restore_drill() {
       fi
     fi
 
-    _res["db_valid"]="$db_valid"
+    ref_set "${_res_name}" "db_valid" "$db_valid"
     rm -rf "$db_target_dir"
 
     if (( ! db_restore_ok )); then
-      _res["error_message"]="DB restic restore 복구 실패"
+      ref_set "${_res_name}" "error_message" "DB restic restore 복구 실패"
       return 0
     fi
   fi
@@ -3986,16 +4100,16 @@ run_restore_drill() {
     )
 
     if [[ "$sec_res" == ERROR:* ]]; then
-      _res["secondary_rto_satisfied"]="false"
-      _res["secondary_rto_status"]="초과 (미흡)"
-      _res["error_message"]="${sec_res#ERROR:}"
+      ref_set "${_res_name}" "secondary_rto_satisfied" "false"
+      ref_set "${_res_name}" "secondary_rto_status" "초과 (미흡)"
+      ref_set "${_res_name}" "error_message" "${sec_res#ERROR:}"
     elif [[ "$sec_res" == SUCCESS:* ]]; then
       local sec_snap="" sec_snap_time="" sec_elapsed=0 sec_size_str=""
       IFS=":" read -r _status sec_snap sec_snap_time sec_elapsed sec_size_str <<< "$sec_res"
       
-      _res["secondary_snap"]="$sec_snap"
-      _res["secondary_snap_time"]="$sec_snap_time"
-      _res["secondary_elapsed_seconds"]="$sec_elapsed"
+      ref_set "${_res_name}" "secondary_snap" "$sec_snap"
+      ref_set "${_res_name}" "secondary_snap_time" "$sec_snap_time"
+      ref_set "${_res_name}" "secondary_elapsed_seconds" "$sec_elapsed"
       
       local sec_elapsed_str
       if (( sec_elapsed < 60 )); then
@@ -4003,15 +4117,15 @@ run_restore_drill() {
       else
         sec_elapsed_str="$((sec_elapsed / 60))분 $((sec_elapsed % 60))초"
       fi
-      _res["secondary_elapsed_str"]="$sec_elapsed_str"
-      _res["secondary_size"]="$sec_size_str"
+      ref_set "${_res_name}" "secondary_elapsed_str" "$sec_elapsed_str"
+      ref_set "${_res_name}" "secondary_size" "$sec_size_str"
 
       if (( sec_elapsed <= rto_seconds )); then
-        _res["secondary_rto_satisfied"]="true"
-        _res["secondary_rto_status"]="만족"
+        ref_set "${_res_name}" "secondary_rto_satisfied" "true"
+        ref_set "${_res_name}" "secondary_rto_status" "만족"
       else
-        _res["secondary_rto_satisfied"]="false"
-        _res["secondary_rto_status"]="초과 (미흡)"
+        ref_set "${_res_name}" "secondary_rto_satisfied" "false"
+        ref_set "${_res_name}" "secondary_rto_status" "초과 (미흡)"
       fi
     fi
   fi
@@ -4069,45 +4183,45 @@ except Exception as e:
 render_audit_report_unified() {
   local report_type="$1"
   local format="$2"
-  local -n _ra_ref="$3"
+  local _ra_ref_name="$3"
   
   case "$report_type" in
     restore_drill)
       case "$format" in
         txt|markdown)
-          render_restore_drill_txt _ra_ref
+          render_restore_drill_txt "${_ra_ref_name}"
           ;;
         json)
-          render_restore_drill_json _ra_ref
+          render_restore_drill_json "${_ra_ref_name}"
           ;;
         html)
-          render_restore_drill_html _ra_ref
+          render_restore_drill_html "${_ra_ref_name}"
           ;;
       esac
       ;;
     daily)
       case "$format" in
         txt)
-          render_daily_txt _ra_ref
+          render_daily_txt "${_ra_ref_name}"
           ;;
         json)
-          render_daily_json _ra_ref
+          render_daily_json "${_ra_ref_name}"
           ;;
         html)
-          render_daily_html _ra_ref
+          render_daily_html "${_ra_ref_name}"
           ;;
       esac
       ;;
     general)
       case "$format" in
         txt)
-          render_general_txt _ra_ref
+          render_general_txt "${_ra_ref_name}"
           ;;
         json)
-          render_general_json _ra_ref
+          render_general_json "${_ra_ref_name}"
           ;;
         html)
-          render_general_html _ra_ref
+          render_general_html "${_ra_ref_name}"
           ;;
       esac
       ;;
@@ -4117,7 +4231,7 @@ render_audit_report_unified() {
 # nameref 전달 인자 미사용 오탐 우회
 # shellcheck disable=SC2034
 write_evidence_report_bundle() {
-  local -n _werb_data="$1"
+  local _werb_data_name="$1"
   local report_file="$2"
   local report_type="$3"
 
@@ -4145,29 +4259,29 @@ write_evidence_report_bundle() {
   chmod 700 "$(dirname "$base_path")" 2>/dev/null || true
 
   if [[ "$report_type" == "chrony" || "$report_type" == "ntp" ]]; then
-    render_ntp_txt _werb_data > "$txt_path"
-    render_ntp_json _werb_data > "$json_path"
-    render_ntp_html _werb_data > "$html_path"
+    render_ntp_txt "${_werb_data_name}" > "$txt_path"
+    render_ntp_json "${_werb_data_name}" > "$json_path"
+    render_ntp_html "${_werb_data_name}" > "$html_path"
   else
-    render_audit_report_unified "$report_type" "txt" _werb_data > "$txt_path"
-    render_audit_report_unified "$report_type" "json" _werb_data > "$json_path"
-    render_audit_report_unified "$report_type" "html" _werb_data > "$html_path"
+    render_audit_report_unified "$report_type" "txt" "${_werb_data_name}" > "$txt_path"
+    render_audit_report_unified "$report_type" "json" "${_werb_data_name}" > "$json_path"
+    render_audit_report_unified "$report_type" "html" "${_werb_data_name}" > "$html_path"
   fi
 
   chmod 600 "$txt_path" "$json_path" "$html_path" 2>/dev/null || true
 }
 
 write_audit_reports() {
-  local -n _war_data="$1"
+  local _war_data_name="$1"
   local md_path="$2"
-  write_evidence_report_bundle _war_data "$md_path" "restore_drill"
+  write_evidence_report_bundle "${_war_data_name}" "$md_path" "restore_drill"
 }
 
 # Compatibility wrappers
 render_restore_drill_report() {
   if (( $# == 1 )); then
-    local -n _rrd_ref="$1"
-    render_audit_report_unified "restore_drill" "txt" _rrd_ref
+  local _rrd_ref_name="$1"
+    render_audit_report_unified "restore_drill" "txt" "${_rrd_ref_name}"
   else
     local -A _tmp_rrd=(
       [test_date]="$1" [tester]="$2" [primary_snap]="$3" [primary_snap_time]="$4" [target_dir]="$5"
@@ -4198,19 +4312,19 @@ render_restore_drill_report() {
 }
 
 render_report_markdown() {
-  local -n _ref_md="$1"
-  render_audit_report_unified "restore_drill" "txt" _ref_md
+  local _ref_md_name="$1"
+  render_audit_report_unified "restore_drill" "txt" "${_ref_md_name}"
 }
 
 render_report_json() {
-  local -n _ref_js="$1"
-  render_audit_report_unified "restore_drill" "json" _ref_js
+  local _ref_js_name="$1"
+  render_audit_report_unified "restore_drill" "json" "${_ref_js_name}"
 }
 
 render_restore_drill_report_json() {
   if (( $# == 1 )); then
-    local -n _rrj_ref="$1"
-    render_audit_report_unified "restore_drill" "json" _rrj_ref
+  local _rrj_ref_name="$1"
+    render_audit_report_unified "restore_drill" "json" "${_rrj_ref_name}"
   else
     local -A _tmp_rrj=(
       [test_date]="$1" [tester]="$2" [primary_snap]="$3" [primary_snap_time]="$4" [target_dir]="$5"
@@ -4245,8 +4359,8 @@ render_restore_drill_report_json() {
 
 render_restore_drill_report_html() {
   if (( $# == 1 )); then
-    local -n _rr_html="$1"
-    render_audit_report_unified "restore_drill" "html" _rr_html
+  local _rr_html_name="$1"
+    render_audit_report_unified "restore_drill" "html" "${_rr_html_name}"
   else
     local -A _tmp_html=(
       [test_date]="$1" [tester]="$2" [primary_snap]="$3" [primary_snap_time]="$4" [target_dir]="$5"
@@ -4278,8 +4392,8 @@ render_restore_drill_report_html() {
 
 render_daily_audit_report() {
   if (( $# == 1 )); then
-    local -n _ref_da="$1"
-    render_audit_report_unified "daily" "txt" _ref_da
+  local _ref_da_name="$1"
+    render_audit_report_unified "daily" "txt" "${_ref_da_name}"
   else
     local -A _tmp_daily=(
       [cur_time]="$1" [hostname]="$2" [tester]="$3" [backend]="$4" [repo]="$5" [targets]="$6"
@@ -4295,8 +4409,8 @@ render_daily_audit_report() {
 
 render_daily_audit_report_json() {
   if (( $# == 1 )); then
-    local -n _ref_daj="$1"
-    render_audit_report_unified "daily" "json" _ref_daj
+  local _ref_daj_name="$1"
+    render_audit_report_unified "daily" "json" "${_ref_daj_name}"
   else
     local -A _tmp_daily=(
       [cur_time]="$1" [hostname]="$2" [tester]="$3" [backend]="$4" [repo]="$5" [targets]="$6"
@@ -4312,8 +4426,8 @@ render_daily_audit_report_json() {
 
 render_daily_audit_report_html() {
   if (( $# == 1 )); then
-    local -n _ref_dah="$1"
-    render_audit_report_unified "daily" "html" _ref_dah
+  local _ref_dah_name="$1"
+    render_audit_report_unified "daily" "html" "${_ref_dah_name}"
   else
     local -A _tmp_daily=(
       [cur_time]="$1" [hostname]="$2" [tester]="$3" [backend]="$4" [repo]="$5" [targets]="$6"
@@ -4329,8 +4443,8 @@ render_daily_audit_report_html() {
 
 render_audit_report() {
   if (( $# == 1 )); then
-    local -n _ref_ar="$1"
-    render_audit_report_unified "general" "txt" _ref_ar
+  local _ref_ar_name="$1"
+    render_audit_report_unified "general" "txt" "${_ref_ar_name}"
   else
     local -A _tmp_gen=(
       [backend]="$1" [on_calendar]="$2" [timer_enabled]="$3" [timer_active]="$4" [next_run]="$5" [etc_perm]="$6" [env_perm]="$7"
@@ -4341,8 +4455,8 @@ render_audit_report() {
 
 render_audit_report_json() {
   if (( $# == 1 )); then
-    local -n _ref_arj="$1"
-    render_audit_report_unified "general" "json" _ref_arj
+  local _ref_arj_name="$1"
+    render_audit_report_unified "general" "json" "${_ref_arj_name}"
   else
     local -A _tmp_gen=(
       [backend]="$1" [on_calendar]="$2" [timer_enabled]="$3" [timer_active]="$4" [next_run]="$5" [etc_perm]="$6" [env_perm]="$7"
@@ -4353,8 +4467,8 @@ render_audit_report_json() {
 
 render_audit_report_html() {
   if (( $# == 1 )); then
-    local -n _ref_arh="$1"
-    render_audit_report_unified "general" "html" _ref_arh
+  local _ref_arh_name="$1"
+    render_audit_report_unified "general" "html" "${_ref_arh_name}"
   else
     local -A _tmp_gen=(
       [backend]="$1" [on_calendar]="$2" [timer_enabled]="$3" [timer_active]="$4" [next_run]="$5" [etc_perm]="$6" [env_perm]="$7" [snapshot_table_html]="$8"
@@ -4364,27 +4478,27 @@ render_audit_report_html() {
 }
 
 render_restore_drill_txt() {
-  local -n _rd_txt="$1"
-  local test_date="${_rd_txt[test_date]:-}"
-  local tester="${_rd_txt[tester]:-}"
-  local ciso="${_rd_txt[ciso]:-}"
-  local rto="${_rd_txt[rto_minutes]:-120}"
-  local p_snap="${_rd_txt[primary_snap]:-}"
-  local p_time="${_rd_txt[primary_snap_time]:-}"
-  local p_size="${_rd_txt[primary_size]:-0 B}"
-  local p_elapsed_str="${_rd_txt[primary_elapsed_str]:-0초}"
-  local p_ok="${_rd_txt[primary_rto_satisfied]:-false}"
+  local _rd_txt_name="$1"
+  local test_date; eval "test_date=\"\${${_rd_txt_name}[test_date]:-}\""
+  local tester; eval "tester=\"\${${_rd_txt_name}[tester]:-}\""
+  local ciso; eval "ciso=\"\${${_rd_txt_name}[ciso]:-}\""
+  local rto; eval "rto=\"\${${_rd_txt_name}[rto_minutes]:-120}\""
+  local p_snap; eval "p_snap=\"\${${_rd_txt_name}[primary_snap]:-}\""
+  local p_time; eval "p_time=\"\${${_rd_txt_name}[primary_snap_time]:-}\""
+  local p_size; eval "p_size=\"\${${_rd_txt_name}[primary_size]:-0 B}\""
+  local p_elapsed_str; eval "p_elapsed_str=\"\${${_rd_txt_name}[primary_elapsed_str]:-0초}\""
+  local p_ok; eval "p_ok=\"\${${_rd_txt_name}[primary_rto_satisfied]:-false}\""
   
-  local s_snap="${_rd_txt[secondary_snap]:-}"
-  local s_time="${_rd_txt[secondary_snap_time]:-}"
-  local s_size="${_rd_txt[secondary_size]:-}"
-  local s_elapsed_str="${_rd_txt[secondary_elapsed_str]:-}"
-  local s_ok="${_rd_txt[secondary_rto_satisfied]:-false}"
+  local s_snap; eval "s_snap=\"\${${_rd_txt_name}[secondary_snap]:-}\""
+  local s_time; eval "s_time=\"\${${_rd_txt_name}[secondary_snap_time]:-}\""
+  local s_size; eval "s_size=\"\${${_rd_txt_name}[secondary_size]:-}\""
+  local s_elapsed_str; eval "s_elapsed_str=\"\${${_rd_txt_name}[secondary_elapsed_str]:-}\""
+  local s_ok; eval "s_ok=\"\${${_rd_txt_name}[secondary_rto_satisfied]:-false}\""
   
-  local db_type="${_rd_txt[db_type]:-}"
-  local db_ok="${_rd_txt[db_valid]:-0}"
-  local os_name="${_rd_txt[os_name]:-Rocky Linux 9}"
-  local target_dir="${_rd_txt[target_dir]:-/tmp/restore_test}"
+  local db_type; eval "db_type=\"\${${_rd_txt_name}[db_type]:-}\""
+  local db_ok; eval "db_ok=\"\${${_rd_txt_name}[db_valid]:-0}\""
+  local os_name; eval "os_name=\"\${${_rd_txt_name}[os_name]:-Rocky Linux 9}\""
+  local target_dir; eval "target_dir=\"\${${_rd_txt_name}[target_dir]:-/tmp/restore_test}\""
 
   local p_status; p_status="$([[ "$p_ok" == "true" ]] && echo "만족" || echo "초과 (미흡)")"
   local s_status; s_status="$([[ "$s_ok" == "true" ]] && echo "만족" || echo "초과 (미흡)")"
@@ -4431,11 +4545,11 @@ EOF
 EOF
 
   if [[ -n "$db_type" ]]; then
-    local db_status_str="만족"
+    local db_status_str="성공"
     if [[ "$db_ok" == "0" || "$db_ok" == "false" ]]; then
-      db_status_str="미흡"
+      db_status_str="실패"
     fi
-    printf '  - 데이터베이스(%s) 복원: %s\n' "$db_type" "$db_status_str"
+    printf '  - 데이터베이스(%s) 복원 무결성 검증: %s\n' "$db_type" "$db_status_str"
   fi
 
   cat <<EOF
@@ -4449,30 +4563,30 @@ EOF
 }
 
 render_restore_drill_json() {
-  local -n _rd_json="$1"
-  local test_date="${_rd_json[test_date]:-}"
-  local tester="${_rd_json[tester]:-}"
-  local ciso="${_rd_json[ciso]:-}"
-  local rto="${_rd_json[rto_minutes]:-120}"
-  local p_snap="${_rd_json[primary_snap]:-}"
-  local p_time="${_rd_json[primary_snap_time]:-}"
-  local p_size="${_rd_json[primary_size]:-0 B}"
-  local p_elapsed="${_rd_json[primary_elapsed_seconds]:-0}"
-  local p_elapsed_str="${_rd_json[primary_elapsed_str]:-0초}"
-  local p_ok="${_rd_json[primary_rto_satisfied]:-false}"
+  local _rd_json_name="$1"
+  local test_date; eval "test_date=\"\${${_rd_json_name}[test_date]:-}\""
+  local tester; eval "tester=\"\${${_rd_json_name}[tester]:-}\""
+  local ciso; eval "ciso=\"\${${_rd_json_name}[ciso]:-}\""
+  local rto; eval "rto=\"\${${_rd_json_name}[rto_minutes]:-120}\""
+  local p_snap; eval "p_snap=\"\${${_rd_json_name}[primary_snap]:-}\""
+  local p_time; eval "p_time=\"\${${_rd_json_name}[primary_snap_time]:-}\""
+  local p_size; eval "p_size=\"\${${_rd_json_name}[primary_size]:-0 B}\""
+  local p_elapsed; eval "p_elapsed=\"\${${_rd_json_name}[primary_elapsed_seconds]:-0}\""
+  local p_elapsed_str; eval "p_elapsed_str=\"\${${_rd_json_name}[primary_elapsed_str]:-0초}\""
+  local p_ok; eval "p_ok=\"\${${_rd_json_name}[primary_rto_satisfied]:-false}\""
   
-  local s_snap="${_rd_json[secondary_snap]:-}"
-  local s_time="${_rd_json[secondary_snap_time]:-}"
-  local s_size="${_rd_json[secondary_size]:-}"
-  local s_elapsed="${_rd_json[secondary_elapsed_seconds]:-0}"
-  local s_elapsed_str="${_rd_json[secondary_elapsed_str]:-}"
-  local s_ok="${_rd_json[secondary_rto_satisfied]:-false}"
+  local s_snap; eval "s_snap=\"\${${_rd_json_name}[secondary_snap]:-}\""
+  local s_time; eval "s_time=\"\${${_rd_json_name}[secondary_snap_time]:-}\""
+  local s_size; eval "s_size=\"\${${_rd_json_name}[secondary_size]:-}\""
+  local s_elapsed; eval "s_elapsed=\"\${${_rd_json_name}[secondary_elapsed_seconds]:-0}\""
+  local s_elapsed_str; eval "s_elapsed_str=\"\${${_rd_json_name}[secondary_elapsed_str]:-}\""
+  local s_ok; eval "s_ok=\"\${${_rd_json_name}[secondary_rto_satisfied]:-false}\""
   
-  local db_type="${_rd_json[db_type]:-}"
-  local db_snap="${_rd_json[db_snap]:-}"
-  local db_time="${_rd_json[db_snap_time]:-}"
-  local db_ok="${_rd_json[db_valid]:-0}"
-  local target_dir="${_rd_json[target_dir]:-/tmp/restore_test}"
+  local db_type; eval "db_type=\"\${${_rd_json_name}[db_type]:-}\""
+  local db_snap; eval "db_snap=\"\${${_rd_json_name}[db_snap]:-}\""
+  local db_time; eval "db_time=\"\${${_rd_json_name}[db_snap_time]:-}\""
+  local db_ok; eval "db_ok=\"\${${_rd_json_name}[db_valid]:-0}\""
+  local target_dir; eval "target_dir=\"\${${_rd_json_name}[target_dir]:-/tmp/restore_test}\""
 
   local db_integrity_verified="null"
   if [[ -n "$db_type" ]]; then
@@ -4532,29 +4646,29 @@ EOF
 }
 
 render_restore_drill_html() {
-  local -n _rd_html="$1"
-  local test_date="${_rd_html[test_date]:-}"
-  local tester="${_rd_html[tester]:-}"
-  local latest_snap="${_rd_html[primary_snap]:-}"
-  local latest_time="${_rd_html[primary_snap_time]:-}"
-  local target_dir="${_rd_html[target_dir]:-/tmp/restore_test}"
-  local size_str="${_rd_html[primary_size]:-0 B}"
-  local elapsed_str="${_rd_html[primary_elapsed_str]:-0초}"
-  local rto="${_rd_html[rto_minutes]:-120}"
-  local p_ok="${_rd_html[primary_rto_satisfied]:-false}"
+  local _rd_html_name="$1"
+  local test_date; eval "test_date=\"\${${_rd_html_name}[test_date]:-}\""
+  local tester; eval "tester=\"\${${_rd_html_name}[tester]:-}\""
+  local latest_snap; eval "latest_snap=\"\${${_rd_html_name}[primary_snap]:-}\""
+  local latest_time; eval "latest_time=\"\${${_rd_html_name}[primary_snap_time]:-}\""
+  local target_dir; eval "target_dir=\"\${${_rd_html_name}[target_dir]:-/tmp/restore_test}\""
+  local size_str; eval "size_str=\"\${${_rd_html_name}[primary_size]:-0 B}\""
+  local elapsed_str; eval "elapsed_str=\"\${${_rd_html_name}[primary_elapsed_str]:-0초}\""
+  local rto; eval "rto=\"\${${_rd_html_name}[rto_minutes]:-120}\""
+  local p_ok; eval "p_ok=\"\${${_rd_html_name}[primary_rto_satisfied]:-false}\""
   local rto_status; rto_status="$([[ "$p_ok" == "true" ]] && echo "만족" || echo "초과 (미흡)")"
-  local ciso="${_rd_html[ciso]:-}"
-  local os_name="${_rd_html[os_name]:-Rocky Linux 9}"
+  local ciso; eval "ciso=\"\${${_rd_html_name}[ciso]:-}\""
+  local os_name; eval "os_name=\"\${${_rd_html_name}[os_name]:-Rocky Linux 9}\""
   
-  local sec_snap="${_rd_html[secondary_snap]:-}"
-  local sec_time="${_rd_html[secondary_snap_time]:-}"
-  local sec_size_str="${_rd_html[secondary_size]:-}"
-  local sec_elapsed_str="${_rd_html[secondary_elapsed_str]:-}"
-  local s_ok="${_rd_html[secondary_rto_satisfied]:-false}"
+  local sec_snap; eval "sec_snap=\"\${${_rd_html_name}[secondary_snap]:-}\""
+  local sec_time; eval "sec_time=\"\${${_rd_html_name}[secondary_snap_time]:-}\""
+  local sec_size_str; eval "sec_size_str=\"\${${_rd_html_name}[secondary_size]:-}\""
+  local sec_elapsed_str; eval "sec_elapsed_str=\"\${${_rd_html_name}[secondary_elapsed_str]:-}\""
+  local s_ok; eval "s_ok=\"\${${_rd_html_name}[secondary_rto_satisfied]:-false}\""
   local sec_rto_status; sec_rto_status="$([[ "$s_ok" == "true" ]] && echo "만족" || echo "초과 (미흡)")"
   
-  local db_type="${_rd_html[db_type]:-}"
-  local db_valid="${_rd_html[db_valid]:-0}"
+  local db_type; eval "db_type=\"\${${_rd_html_name}[db_type]:-}\""
+  local db_valid; eval "db_valid=\"\${${_rd_html_name}[db_valid]:-0}\""
 
   cat <<EOF
 <!DOCTYPE html>
@@ -4840,33 +4954,33 @@ EOF
 }
 
 render_daily_txt() {
-  local -n _d_txt="$1"
-  local cur_time="${_d_txt[cur_time]:-}"
-  local hostname_val="${_d_txt[hostname]:-}"
-  local tester="${_d_txt[tester]:-}"
-  local backend="${_d_txt[backend]:-}"
-  local repo="${_d_txt[repo]:-}"
-  local targets="${_d_txt[targets]:-}"
-  local config_daily="${_d_txt[config_daily]:-0}"
-  local actual_daily="${_d_txt[actual_daily]:-0}"
-  local config_daily_status="${_d_txt[config_daily_status]:-}"
-  local actual_daily_status="${_d_txt[actual_daily_status]:-}"
-  local config_weekly="${_d_txt[config_weekly]:-0}"
-  local actual_weekly="${_d_txt[actual_weekly]:-0}"
-  local config_weekly_status="${_d_txt[config_weekly_status]:-}"
-  local actual_weekly_status="${_d_txt[actual_weekly_status]:-}"
-  local config_monthly="${_d_txt[config_monthly]:-0}"
-  local actual_monthly="${_d_txt[actual_monthly]:-0}"
-  local config_monthly_status="${_d_txt[config_monthly_status]:-}"
-  local actual_monthly_status="${_d_txt[actual_monthly_status]:-}"
-  local etc_dir="${_d_txt[etc_dir]:-}"
-  local etc_perm="${_d_txt[etc_perm]:-}"
-  local etc_safe_str="${_d_txt[etc_safe_str]:-}"
-  local env_file="${_d_txt[env_file]:-}"
-  local env_perm="${_d_txt[env_perm]:-}"
-  local env_safe_str="${_d_txt[env_safe_str]:-}"
-  local check_status="${_d_txt[check_status]:-}"
-  local snapshot_table="${_d_txt[snapshot_table]:-}"
+  local _d_txt_name="$1"
+  local cur_time; eval "cur_time=\"\${${_d_txt_name}[cur_time]:-}\""
+  local hostname_val; eval "hostname_val=\"\${${_d_txt_name}[hostname]:-}\""
+  local tester; eval "tester=\"\${${_d_txt_name}[tester]:-}\""
+  local backend; eval "backend=\"\${${_d_txt_name}[backend]:-}\""
+  local repo; eval "repo=\"\${${_d_txt_name}[repo]:-}\""
+  local targets; eval "targets=\"\${${_d_txt_name}[targets]:-}\""
+  local config_daily; eval "config_daily=\"\${${_d_txt_name}[config_daily]:-0}\""
+  local actual_daily; eval "actual_daily=\"\${${_d_txt_name}[actual_daily]:-0}\""
+  local config_daily_status; eval "config_daily_status=\"\${${_d_txt_name}[config_daily_status]:-}\""
+  local actual_daily_status; eval "actual_daily_status=\"\${${_d_txt_name}[actual_daily_status]:-}\""
+  local config_weekly; eval "config_weekly=\"\${${_d_txt_name}[config_weekly]:-0}\""
+  local actual_weekly; eval "actual_weekly=\"\${${_d_txt_name}[actual_weekly]:-0}\""
+  local config_weekly_status; eval "config_weekly_status=\"\${${_d_txt_name}[config_weekly_status]:-}\""
+  local actual_weekly_status; eval "actual_weekly_status=\"\${${_d_txt_name}[actual_weekly_status]:-}\""
+  local config_monthly; eval "config_monthly=\"\${${_d_txt_name}[config_monthly]:-0}\""
+  local actual_monthly; eval "actual_monthly=\"\${${_d_txt_name}[actual_monthly]:-0}\""
+  local config_monthly_status; eval "config_monthly_status=\"\${${_d_txt_name}[config_monthly_status]:-}\""
+  local actual_monthly_status; eval "actual_monthly_status=\"\${${_d_txt_name}[actual_monthly_status]:-}\""
+  local etc_dir; eval "etc_dir=\"\${${_d_txt_name}[etc_dir]:-}\""
+  local etc_perm; eval "etc_perm=\"\${${_d_txt_name}[etc_perm]:-}\""
+  local etc_safe_str; eval "etc_safe_str=\"\${${_d_txt_name}[etc_safe_str]:-}\""
+  local env_file; eval "env_file=\"\${${_d_txt_name}[env_file]:-}\""
+  local env_perm; eval "env_perm=\"\${${_d_txt_name}[env_perm]:-}\""
+  local env_safe_str; eval "env_safe_str=\"\${${_d_txt_name}[env_safe_str]:-}\""
+  local check_status; eval "check_status=\"\${${_d_txt_name}[check_status]:-}\""
+  local snapshot_table; eval "snapshot_table=\"\${${_d_txt_name}[snapshot_table]:-}\""
 
   local backend_desc="SFTP"
   if [[ "$backend" == "s3" ]]; then
@@ -4943,29 +5057,29 @@ EOF
 }
 
 render_daily_json() {
-  local -n _d_json="$1"
-  local cur_time="${_d_json[cur_time]:-}"
-  local hostname_val="${_d_json[hostname]:-}"
-  local tester="${_d_json[tester]:-}"
-  local backend="${_d_json[backend]:-}"
-  local repo="${_d_json[repo]:-}"
-  local targets="${_d_json[targets]:-}"
-  local config_daily="${_d_json[config_daily]:-0}"
-  local actual_daily="${_d_json[actual_daily]:-0}"
-  local config_daily_status="${_d_json[config_daily_status]:-}"
-  local actual_daily_status="${_d_json[actual_daily_status]:-}"
-  local config_weekly="${_d_json[config_weekly]:-0}"
-  local actual_weekly="${_d_json[actual_weekly]:-0}"
-  local config_weekly_status="${_d_json[config_weekly_status]:-}"
-  local actual_weekly_status="${_d_json[actual_weekly_status]:-}"
-  local config_monthly="${_d_json[config_monthly]:-0}"
-  local actual_monthly="${_d_json[actual_monthly]:-0}"
-  local config_monthly_status="${_d_json[config_monthly_status]:-}"
-  local actual_monthly_status="${_d_json[actual_monthly_status]:-}"
-  local etc_perm="${_d_json[etc_perm]:-}"
-  local env_perm="${_d_json[env_perm]:-}"
-  local check_status="${_d_json[check_status]:-}"
-  local snapshots_json="${_d_json[snapshots_json]:-[]}"
+  local _d_json_name="$1"
+  local cur_time; eval "cur_time=\"\${${_d_json_name}[cur_time]:-}\""
+  local hostname_val; eval "hostname_val=\"\${${_d_json_name}[hostname]:-}\""
+  local tester; eval "tester=\"\${${_d_json_name}[tester]:-}\""
+  local backend; eval "backend=\"\${${_d_json_name}[backend]:-}\""
+  local repo; eval "repo=\"\${${_d_json_name}[repo]:-}\""
+  local targets; eval "targets=\"\${${_d_json_name}[targets]:-}\""
+  local config_daily; eval "config_daily=\"\${${_d_json_name}[config_daily]:-0}\""
+  local actual_daily; eval "actual_daily=\"\${${_d_json_name}[actual_daily]:-0}\""
+  local config_daily_status; eval "config_daily_status=\"\${${_d_json_name}[config_daily_status]:-}\""
+  local actual_daily_status; eval "actual_daily_status=\"\${${_d_json_name}[actual_daily_status]:-}\""
+  local config_weekly; eval "config_weekly=\"\${${_d_json_name}[config_weekly]:-0}\""
+  local actual_weekly; eval "actual_weekly=\"\${${_d_json_name}[actual_weekly]:-0}\""
+  local config_weekly_status; eval "config_weekly_status=\"\${${_d_json_name}[config_weekly_status]:-}\""
+  local actual_weekly_status; eval "actual_weekly_status=\"\${${_d_json_name}[actual_weekly_status]:-}\""
+  local config_monthly; eval "config_monthly=\"\${${_d_json_name}[config_monthly]:-0}\""
+  local actual_monthly; eval "actual_monthly=\"\${${_d_json_name}[actual_monthly]:-0}\""
+  local config_monthly_status; eval "config_monthly_status=\"\${${_d_json_name}[config_monthly_status]:-}\""
+  local actual_monthly_status; eval "actual_monthly_status=\"\${${_d_json_name}[actual_monthly_status]:-}\""
+  local etc_perm; eval "etc_perm=\"\${${_d_json_name}[etc_perm]:-}\""
+  local env_perm; eval "env_perm=\"\${${_d_json_name}[env_perm]:-}\""
+  local check_status; eval "check_status=\"\${${_d_json_name}[check_status]:-}\""
+  local snapshots_json; eval "snapshots_json=\"\${${_d_json_name}[snapshots_json]:-[]}\""
 
   cat <<EOF
 {
@@ -5012,33 +5126,33 @@ EOF
 }
 
 render_daily_html() {
-  local -n _d_html="$1"
-  local cur_time="${_d_html[cur_time]:-}"
-  local hostname_val="${_d_html[hostname]:-}"
-  local tester="${_d_html[tester]:-}"
-  local backend="${_d_html[backend]:-}"
-  local repo="${_d_html[repo]:-}"
-  local targets="${_d_html[targets]:-}"
-  local config_daily="${_d_html[config_daily]:-0}"
-  local actual_daily="${_d_html[actual_daily]:-0}"
-  local config_daily_status="${_d_html[config_daily_status]:-}"
-  local actual_daily_status="${_d_html[actual_daily_status]:-}"
-  local config_weekly="${_d_html[config_weekly]:-0}"
-  local actual_weekly="${_d_html[actual_weekly]:-0}"
-  local config_weekly_status="${_d_html[config_weekly_status]:-}"
-  local actual_weekly_status="${_d_html[actual_weekly_status]:-}"
-  local config_monthly="${_d_html[config_monthly]:-0}"
-  local actual_monthly="${_d_html[actual_monthly]:-0}"
-  local config_monthly_status="${_d_html[config_monthly_status]:-}"
-  local actual_monthly_status="${_d_html[actual_monthly_status]:-}"
-  local etc_dir="${_d_html[etc_dir]:-}"
-  local etc_perm="${_d_html[etc_perm]:-}"
-  local etc_safe_str="${_d_html[etc_safe_str]:-}"
-  local env_file="${_d_html[env_file]:-}"
-  local env_perm="${_d_html[env_perm]:-}"
-  local env_safe_str="${_d_html[env_safe_str]:-}"
-  local check_status="${_d_html[check_status]:-}"
-  local snapshot_table_html="${_d_html[snapshot_table_html]:-}"
+  local _d_html_name="$1"
+  local cur_time; eval "cur_time=\"\${${_d_html_name}[cur_time]:-}\""
+  local hostname_val; eval "hostname_val=\"\${${_d_html_name}[hostname]:-}\""
+  local tester; eval "tester=\"\${${_d_html_name}[tester]:-}\""
+  local backend; eval "backend=\"\${${_d_html_name}[backend]:-}\""
+  local repo; eval "repo=\"\${${_d_html_name}[repo]:-}\""
+  local targets; eval "targets=\"\${${_d_html_name}[targets]:-}\""
+  local config_daily; eval "config_daily=\"\${${_d_html_name}[config_daily]:-0}\""
+  local actual_daily; eval "actual_daily=\"\${${_d_html_name}[actual_daily]:-0}\""
+  local config_daily_status; eval "config_daily_status=\"\${${_d_html_name}[config_daily_status]:-}\""
+  local actual_daily_status; eval "actual_daily_status=\"\${${_d_html_name}[actual_daily_status]:-}\""
+  local config_weekly; eval "config_weekly=\"\${${_d_html_name}[config_weekly]:-0}\""
+  local actual_weekly; eval "actual_weekly=\"\${${_d_html_name}[actual_weekly]:-0}\""
+  local config_weekly_status; eval "config_weekly_status=\"\${${_d_html_name}[config_weekly_status]:-}\""
+  local actual_weekly_status; eval "actual_weekly_status=\"\${${_d_html_name}[actual_weekly_status]:-}\""
+  local config_monthly; eval "config_monthly=\"\${${_d_html_name}[config_monthly]:-0}\""
+  local actual_monthly; eval "actual_monthly=\"\${${_d_html_name}[actual_monthly]:-0}\""
+  local config_monthly_status; eval "config_monthly_status=\"\${${_d_html_name}[config_monthly_status]:-}\""
+  local actual_monthly_status; eval "actual_monthly_status=\"\${${_d_html_name}[actual_monthly_status]:-}\""
+  local etc_dir; eval "etc_dir=\"\${${_d_html_name}[etc_dir]:-}\""
+  local etc_perm; eval "etc_perm=\"\${${_d_html_name}[etc_perm]:-}\""
+  local etc_safe_str; eval "etc_safe_str=\"\${${_d_html_name}[etc_safe_str]:-}\""
+  local env_file; eval "env_file=\"\${${_d_html_name}[env_file]:-}\""
+  local env_perm; eval "env_perm=\"\${${_d_html_name}[env_perm]:-}\""
+  local env_safe_str; eval "env_safe_str=\"\${${_d_html_name}[env_safe_str]:-}\""
+  local check_status; eval "check_status=\"\${${_d_html_name}[check_status]:-}\""
+  local snapshot_table_html; eval "snapshot_table_html=\"\${${_d_html_name}[snapshot_table_html]:-}\""
 
   local backend_desc="SFTP"
   if [[ "$backend" == "s3" ]]; then
@@ -5401,14 +5515,14 @@ EOF
 }
 
 render_general_txt() {
-  local -n _g_txt="$1"
-  local backend="${_g_txt[backend]:-}"
-  local on_calendar="${_g_txt[on_calendar]:-알 수 없음}"
-  local timer_enabled="${_g_txt[timer_enabled]:-unknown}"
-  local timer_active="${_g_txt[timer_active]:-unknown}"
-  local next_run="${_g_txt[next_run]:-알 수 없음}"
-  local etc_perm="${_g_txt[etc_perm]:-?}"
-  local env_perm="${_g_txt[env_perm]:-?}"
+  local _g_txt_name="$1"
+  local backend; eval "backend=\"\${${_g_txt_name}[backend]:-}\""
+  local on_calendar; eval "on_calendar=\"\${${_g_txt_name}[on_calendar]:-알 수 없음}\""
+  local timer_enabled; eval "timer_enabled=\"\${${_g_txt_name}[timer_enabled]:-unknown}\""
+  local timer_active; eval "timer_active=\"\${${_g_txt_name}[timer_active]:-unknown}\""
+  local next_run; eval "next_run=\"\${${_g_txt_name}[next_run]:-알 수 없음}\""
+  local etc_perm; eval "etc_perm=\"\${${_g_txt_name}[etc_perm]:-?}\""
+  local env_perm; eval "env_perm=\"\${${_g_txt_name}[env_perm]:-?}\""
 
   local encrypted_note="AES-256 (restic 저장소 자체 암호화)"
   if [[ -z "${RESTIC_PASSWORD:-}" ]]; then
@@ -5521,14 +5635,14 @@ EOF
 }
 
 render_general_json() {
-  local -n _g_json="$1"
-  local backend="${_g_json[backend]:-}"
-  local on_calendar="${_g_json[on_calendar]:-알 수 없음}"
-  local timer_enabled="${_g_json[timer_enabled]:-unknown}"
-  local timer_active="${_g_json[timer_active]:-unknown}"
-  local next_run="${_g_json[next_run]:-알 수 없음}"
-  local etc_perm="${_g_json[etc_perm]:-?}"
-  local env_perm="${_g_json[env_perm]:-?}"
+  local _g_json_name="$1"
+  local backend; eval "backend=\"\${${_g_json_name}[backend]:-}\""
+  local on_calendar; eval "on_calendar=\"\${${_g_json_name}[on_calendar]:-알 수 없음}\""
+  local timer_enabled; eval "timer_enabled=\"\${${_g_json_name}[timer_enabled]:-unknown}\""
+  local timer_active; eval "timer_active=\"\${${_g_json_name}[timer_active]:-unknown}\""
+  local next_run; eval "next_run=\"\${${_g_json_name}[next_run]:-알 수 없음}\""
+  local etc_perm; eval "etc_perm=\"\${${_g_json_name}[etc_perm]:-?}\""
+  local env_perm; eval "env_perm=\"\${${_g_json_name}[env_perm]:-?}\""
 
   local hostname; hostname=$(hostname 2>/dev/null || echo "unknown")
   local timestamp; timestamp=$(date --iso-8601=seconds 2>/dev/null || date -Iseconds 2>/dev/null || date "+%Y-%m-%dT%H:%M:%S%z")
@@ -5599,15 +5713,15 @@ EOF
 }
 
 render_general_html() {
-  local -n _g_html="$1"
-  local backend="${_g_html[backend]:-}"
-  local on_calendar="${_g_html[on_calendar]:-알 수 없음}"
-  local timer_enabled="${_g_html[timer_enabled]:-unknown}"
-  local timer_active="${_g_html[timer_active]:-unknown}"
-  local next_run="${_g_html[next_run]:-알 수 없음}"
-  local etc_perm="${_g_html[etc_perm]:-?}"
-  local env_perm="${_g_html[env_perm]:-?}"
-  local snapshot_table_html="${_g_html[snapshot_table_html]:-}"
+  local _g_html_name="$1"
+  local backend; eval "backend=\"\${${_g_html_name}[backend]:-}\""
+  local on_calendar; eval "on_calendar=\"\${${_g_html_name}[on_calendar]:-알 수 없음}\""
+  local timer_enabled; eval "timer_enabled=\"\${${_g_html_name}[timer_enabled]:-unknown}\""
+  local timer_active; eval "timer_active=\"\${${_g_html_name}[timer_active]:-unknown}\""
+  local next_run; eval "next_run=\"\${${_g_html_name}[next_run]:-알 수 없음}\""
+  local etc_perm; eval "etc_perm=\"\${${_g_html_name}[etc_perm]:-?}\""
+  local env_perm; eval "env_perm=\"\${${_g_html_name}[env_perm]:-?}\""
+  local snapshot_table_html; eval "snapshot_table_html=\"\${${_g_html_name}[snapshot_table_html]:-}\""
 
   local repo="${RESTIC_REPOSITORY:-}"
   local targets="${BACKUP_TARGETS:-}"
@@ -5963,15 +6077,15 @@ leapsectz right/UTC'
 # nameref 전달 변수 미사용 경고 우회
 # shellcheck disable=SC2034
 render_ntp_txt() {
-  local -n _ct_ref="$1"
-  local hostname_val="${_ct_ref[hostname]:-unknown}"
-  local report_date="${_ct_ref[report_date]:-unknown}"
-  local service_enabled="${_ct_ref[service_enabled]:-unknown}"
-  local service_active="${_ct_ref[service_active]:-unknown}"
-  local sources_output="${_ct_ref[sources_output]:-}"
-  local tracking_output="${_ct_ref[tracking_output]:-}"
-  local conf_perm="${_ct_ref[conf_perm]:-}"
-  local ntp_service="${_ct_ref[ntp_service]:-chronyd}"
+  local _ct_ref_name="$1"
+  local hostname_val; eval "hostname_val=\"\${${_ct_ref_name}[hostname]:-unknown}\""
+  local report_date; eval "report_date=\"\${${_ct_ref_name}[report_date]:-unknown}\""
+  local service_enabled; eval "service_enabled=\"\${${_ct_ref_name}[service_enabled]:-unknown}\""
+  local service_active; eval "service_active=\"\${${_ct_ref_name}[service_active]:-unknown}\""
+  local sources_output; eval "sources_output=\"\${${_ct_ref_name}[sources_output]:-}\""
+  local tracking_output; eval "tracking_output=\"\${${_ct_ref_name}[tracking_output]:-}\""
+  local conf_perm; eval "conf_perm=\"\${${_ct_ref_name}[conf_perm]:-}\""
+  local ntp_service; eval "ntp_service=\"\${${_ct_ref_name}[ntp_service]:-chronyd}\""
 
   local sources_title="chronyc sources -v"
   local tracking_title="chronyc tracking"
@@ -6008,15 +6122,15 @@ EOF
 
 # shellcheck disable=SC2034
 render_ntp_json() {
-  local -n _cj_ref="$1"
-  local hostname_val="${_cj_ref[hostname]:-unknown}"
-  local report_date="${_cj_ref[report_date]:-unknown}"
-  local service_enabled="${_cj_ref[service_enabled]:-unknown}"
-  local service_active="${_cj_ref[service_active]:-unknown}"
-  local sources_output="${_cj_ref[sources_output]:-}"
-  local tracking_output="${_cj_ref[tracking_output]:-}"
-  local conf_perm="${_cj_ref[conf_perm]:-}"
-  local ntp_service="${_cj_ref[ntp_service]:-chronyd}"
+  local _cj_ref_name="$1"
+  local hostname_val; eval "hostname_val=\"\${${_cj_ref_name}[hostname]:-unknown}\""
+  local report_date; eval "report_date=\"\${${_cj_ref_name}[report_date]:-unknown}\""
+  local service_enabled; eval "service_enabled=\"\${${_cj_ref_name}[service_enabled]:-unknown}\""
+  local service_active; eval "service_active=\"\${${_cj_ref_name}[service_active]:-unknown}\""
+  local sources_output; eval "sources_output=\"\${${_cj_ref_name}[sources_output]:-}\""
+  local tracking_output; eval "tracking_output=\"\${${_cj_ref_name}[tracking_output]:-}\""
+  local conf_perm; eval "conf_perm=\"\${${_cj_ref_name}[conf_perm]:-}\""
+  local ntp_service; eval "ntp_service=\"\${${_cj_ref_name}[ntp_service]:-chronyd}\""
 
   local sources_json; sources_json=$(printf '%s' "$sources_output" | sed 's/"/\\"/g')
   local tracking_json; tracking_json=$(printf '%s' "$tracking_output" | sed 's/"/\\"/g')
@@ -6040,15 +6154,15 @@ EOF
 
 # shellcheck disable=SC2034
 render_ntp_html() {
-  local -n _ch_ref="$1"
-  local hostname_val="${_ch_ref[hostname]:-unknown}"
-  local report_date="${_ch_ref[report_date]:-unknown}"
-  local service_enabled="${_ch_ref[service_enabled]:-unknown}"
-  local service_active="${_ch_ref[service_active]:-unknown}"
-  local sources_output="${_ch_ref[sources_output]:-}"
-  local tracking_output="${_ch_ref[tracking_output]:-}"
-  local conf_perm="${_ch_ref[conf_perm]:-}"
-  local ntp_service="${_ch_ref[ntp_service]:-chronyd}"
+  local _ch_ref_name="$1"
+  local hostname_val; eval "hostname_val=\"\${${_ch_ref_name}[hostname]:-unknown}\""
+  local report_date; eval "report_date=\"\${${_ch_ref_name}[report_date]:-unknown}\""
+  local service_enabled; eval "service_enabled=\"\${${_ch_ref_name}[service_enabled]:-unknown}\""
+  local service_active; eval "service_active=\"\${${_ch_ref_name}[service_active]:-unknown}\""
+  local sources_output; eval "sources_output=\"\${${_ch_ref_name}[sources_output]:-}\""
+  local tracking_output; eval "tracking_output=\"\${${_ch_ref_name}[tracking_output]:-}\""
+  local conf_perm; eval "conf_perm=\"\${${_ch_ref_name}[conf_perm]:-}\""
+  local ntp_service; eval "ntp_service=\"\${${_ch_ref_name}[ntp_service]:-chronyd}\""
 
   local sources_title="chronyc sources -v"
   local tracking_title="chronyc tracking"

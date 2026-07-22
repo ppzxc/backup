@@ -7,6 +7,7 @@
 !/.gitignore
 !/.gitattributes
 !/LICENSE
+!/Dockerfile.centos6
 !/tests/
 !/tests/**
 !/docs/

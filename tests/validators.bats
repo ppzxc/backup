@@ -396,3 +396,15 @@ setup() {
   [[ "${errors[0]}" == *"절대 경로"* ]]
 }
 
+@test "ref_get and ref_set safely access and mutate named associative arrays" {
+  declare -A my_test_map=([key1]="val1")
+  local result=""
+  ref_get "my_test_map" "key1" "result"
+  [ "$result" = "val1" ]
+  
+  ref_set "my_test_map" "key2" "val2"
+  ref_get "my_test_map" "key2" "result"
+  [ "$result" = "val2" ]
+}
+
+
