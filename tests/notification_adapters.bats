@@ -13,7 +13,13 @@ setup() {
 
 @test "notification_slack_send calls curl with Slack payload" {
   stub_command "curl" 'echo "curl $*" >> "'"${STUB_BIN}"'/curl.calls"; exit 0'
-  run notification_slack_send "https://slack.webhook" "success" "myhost" "myprofile" ""
+  declare -A ctx=(
+    [notify_url]="https://slack.webhook"
+    [status]="success"
+    [err_msg]=""
+  )
+  BACKUP_PROFILE_NAME="myprofile"
+  run notification_slack_send ctx
   [ "$status" -eq 0 ]
   [ -f "${STUB_BIN}/curl.calls" ]
   grep -q "성공" "${STUB_BIN}/curl.calls"
@@ -27,7 +33,13 @@ setup() {
 
 @test "notification_discord_send calls curl with Discord payload" {
   stub_command "curl" 'echo "curl $*" >> "'"${STUB_BIN}"'/curl.calls"; exit 0'
-  run notification_discord_send "https://discord.webhook" "failure" "myhost" "myprofile" "some error"
+  declare -A ctx=(
+    [notify_url]="https://discord.webhook"
+    [status]="failure"
+    [err_msg]="some error"
+  )
+  BACKUP_PROFILE_NAME="myprofile"
+  run notification_discord_send ctx
   [ "$status" -eq 0 ]
   [ -f "${STUB_BIN}/curl.calls" ]
   grep -q "실패" "${STUB_BIN}/curl.calls"
@@ -41,7 +53,18 @@ setup() {
 
 @test "notification_custom_send calls curl with custom payload and method" {
   stub_command "curl" 'echo "curl $*" >> "'"${STUB_BIN}"'/curl.calls"; exit 0'
-  run notification_custom_send "https://custom.webhook" "success" "myhost" "myprofile" "" "POST" "Content-Type: text/plain" "success payload" "failure payload" "run-cmd"
+  declare -A ctx=(
+    [notify_url]="https://custom.webhook"
+    [status]="success"
+    [err_msg]=""
+    [method]="POST"
+    [headers]="Content-Type: text/plain"
+    [body_success]="success payload"
+    [body_failure]="failure payload"
+    [profile_command]="run-cmd"
+  )
+  BACKUP_PROFILE_NAME="myprofile"
+  run notification_custom_send ctx
   [ "$status" -eq 0 ]
   [ -f "${STUB_BIN}/curl.calls" ]
   grep -q "custom.webhook" "${STUB_BIN}/curl.calls"

@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.48"
+BACKUP_SCRIPT_VERSION="0.0.49"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -1624,41 +1624,6 @@ build_notification_payload_custom() {
   printf '%s' "$payload"
 }
 
-send_notification_slack() {
-  local url="$1" status="$2" hostname="$3" profile_name="$4" err_msg="$5"
-  local payload
-  payload=$(build_notification_payload_slack "$status" "$hostname" "$profile_name" "$err_msg")
-  curl -s -X POST -H "Content-Type: application/json" --max-time 10 -d "$payload" "$url"
-}
-
-send_notification_discord() {
-  local url="$1" status="$2" hostname="$3" profile_name="$4" err_msg="$5"
-  local payload
-  payload=$(build_notification_payload_discord "$status" "$hostname" "$profile_name" "$err_msg")
-  curl -s -X POST -H "Content-Type: application/json" --max-time 10 -d "$payload" "$url"
-}
-
-send_notification_custom() {
-  local url="$1" status="$2" hostname="$3" profile_name="$4" err_msg="$5" method="$6" headers_str="$7" body_success="$8" body_failure="$9" profile_command="${10:-}"
-  local payload
-  payload=$(build_notification_payload_custom "$status" "$hostname" "$profile_name" "$err_msg" "$body_success" "$body_failure" "$profile_command")
-  
-  local -a curl_headers=()
-  if [[ -n "$headers_str" ]]; then
-    local -a headers_arr=()
-    IFS=',' read -ra headers_arr <<< "$headers_str"
-    local h
-    for h in "${headers_arr[@]}"; do
-      h=$(echo "$h" | xargs)
-      curl_headers+=("-H" "$h")
-    done
-  else
-    curl_headers+=("-H" "Content-Type: application/json")
-  fi
-
-  curl -s -X "$method" "${curl_headers[@]}" --max-time 10 -d "$payload" "$url"
-}
-
 dispatch_notification() {
   # shellcheck disable=SC2178  # nameref to caller's associative array
   local -n _ctx="$1"
@@ -1677,18 +1642,10 @@ dispatch_notification() {
     return 0
   fi
 
-  local hostname_val; hostname_val=$(hostname)
-  local profile_name_val="${BACKUP_PROFILE_NAME:-$hostname_val}"
-
   log_info "통합 알림 전송 중... ($status)"
   local res=0
   if has_function "notification_${type}_send"; then
-    local method="${_ctx[method]:-${BACKUP_NOTIFICATION_METHOD:-POST}}"
-    local headers="${_ctx[headers]:-${BACKUP_NOTIFICATION_HEADERS:-}}"
-    local body_success="${_ctx[body_success]:-${BACKUP_NOTIFICATION_BODY_SUCCESS:-}}"
-    local body_failure="${_ctx[body_failure]:-${BACKUP_NOTIFICATION_BODY_FAILURE:-}}"
-    local profile_command="${_ctx[profile_command]:-}"
-    "notification_${type}_send" "$url" "$status" "$hostname_val" "$profile_name_val" "$err_msg" "$method" "$headers" "$body_success" "$body_failure" "$profile_command" || res=$?
+    "notification_${type}_send" _ctx || res=$?
   else
     log_warn "지원하지 않거나 정의되지 않은 알림 전송 어댑터입니다: ${type}"
     return 0
@@ -2183,6 +2140,26 @@ EOF
   log_info "install 완료"
 }
 
+resolve_secondary_policy() {
+  # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
+  # shellcheck disable=SC2178
+  local -n __policy_ref="$1"
+  # shellcheck disable=SC2178
+  local -n __out_ref="$2"
+  __out_ref[password]="${__policy_ref[secondary_password]:-${__policy_ref[password]:-}}"
+  __out_ref[keep_daily]="${__policy_ref[secondary_keep_daily]:-${__policy_ref[keep_daily]:-}}"
+  __out_ref[keep_weekly]="${__policy_ref[secondary_keep_weekly]:-${__policy_ref[keep_weekly]:-}}"
+  __out_ref[keep_monthly]="${__policy_ref[secondary_keep_monthly]:-${__policy_ref[keep_monthly]:-}}"
+}
+
+validate_mysql_mariadb_dump() {
+  local header="$1"
+  if [[ "$header" == *"MySQL dump"* || "$header" == *"MariaDB dump"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
 # --- sftp backend adapter ---
 # 두 backend(sftp/s3)가 공유하는 계약: env_vars/resolve/validate/prepare/render_env/render_notice.
 # cmd_setting은 이 6개 함수만 알면 되고, 백엔드별 필드 지식은 각 adapter 블록 안에 갇혀 있다.
@@ -2242,10 +2219,8 @@ backend_sftp_render_env() {
   local slot="${4:-primary}"
 
   if [[ "$slot" == "secondary" ]]; then
-    local sec_password="${policy_ref[secondary_password]:-${policy_ref[password]:-}}"
-    local sec_keep_daily="${policy_ref[secondary_keep_daily]:-${policy_ref[keep_daily]:-}}"
-    local sec_keep_weekly="${policy_ref[secondary_keep_weekly]:-${policy_ref[keep_weekly]:-}}"
-    local sec_keep_monthly="${policy_ref[secondary_keep_monthly]:-${policy_ref[keep_monthly]:-}}"
+    local -A sec_policy=()
+    resolve_secondary_policy policy_ref sec_policy
     cat <<EOF
 SECONDARY_RESTIC_REPOSITORY='rclone:syno_backup_sec:/backup/$(escape_single_quotes "${hostname_tag}")'
 SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE='sftp'
@@ -2253,10 +2228,10 @@ SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST='$(escape_single_quotes "${fields_r
 SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER='$(escape_single_quotes "${fields_ref[user]}")'
 SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT='$(escape_single_quotes "${fields_ref[port]:-22}")'
 SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE='$(escape_single_quotes "${BACKUP_SSH_KEY}")'
-SECONDARY_RESTIC_PASSWORD='$(escape_single_quotes "${sec_password}")'
-SECONDARY_KEEP_DAILY='$(escape_single_quotes "${sec_keep_daily}")'
-SECONDARY_KEEP_WEEKLY='$(escape_single_quotes "${sec_keep_weekly}")'
-SECONDARY_KEEP_MONTHLY='$(escape_single_quotes "${sec_keep_monthly}")'
+SECONDARY_RESTIC_PASSWORD='$(escape_single_quotes "${sec_policy[password]}")'
+SECONDARY_KEEP_DAILY='$(escape_single_quotes "${sec_policy[keep_daily]}")'
+SECONDARY_KEEP_WEEKLY='$(escape_single_quotes "${sec_policy[keep_weekly]}")'
+SECONDARY_KEEP_MONTHLY='$(escape_single_quotes "${sec_policy[keep_monthly]}")'
 EOF
   else
     cat <<EOF
@@ -2369,18 +2344,16 @@ backend_s3_render_env() {
   local slot="${4:-primary}"
 
   if [[ "$slot" == "secondary" ]]; then
-    local sec_password="${policy_ref[secondary_password]:-${policy_ref[password]:-}}"
-    local sec_keep_daily="${policy_ref[secondary_keep_daily]:-${policy_ref[keep_daily]:-}}"
-    local sec_keep_weekly="${policy_ref[secondary_keep_weekly]:-${policy_ref[keep_weekly]:-}}"
-    local sec_keep_monthly="${policy_ref[secondary_keep_monthly]:-${policy_ref[keep_monthly]:-}}"
+    local -A sec_policy=()
+    resolve_secondary_policy policy_ref sec_policy
     cat <<EOF
 SECONDARY_RESTIC_REPOSITORY='s3:$(escape_single_quotes "${fields_ref[endpoint]}")/$(escape_single_quotes "${fields_ref[bucket]}")/$(escape_single_quotes "${hostname_tag}")'
 SECONDARY_AWS_ACCESS_KEY_ID='$(escape_single_quotes "${fields_ref[access_key]}")'
 SECONDARY_AWS_SECRET_ACCESS_KEY='$(escape_single_quotes "${fields_ref[secret_key]}")'
-SECONDARY_RESTIC_PASSWORD='$(escape_single_quotes "${sec_password}")'
-SECONDARY_KEEP_DAILY='$(escape_single_quotes "${sec_keep_daily}")'
-SECONDARY_KEEP_WEEKLY='$(escape_single_quotes "${sec_keep_weekly}")'
-SECONDARY_KEEP_MONTHLY='$(escape_single_quotes "${sec_keep_monthly}")'
+SECONDARY_RESTIC_PASSWORD='$(escape_single_quotes "${sec_policy[password]}")'
+SECONDARY_KEEP_DAILY='$(escape_single_quotes "${sec_policy[keep_daily]}")'
+SECONDARY_KEEP_WEEKLY='$(escape_single_quotes "${sec_policy[keep_weekly]}")'
+SECONDARY_KEEP_MONTHLY='$(escape_single_quotes "${sec_policy[keep_monthly]}")'
 EOF
   else
     cat <<EOF
@@ -2584,8 +2557,18 @@ notification_slack_validate() {
 }
 
 notification_slack_send() {
-  local url="$1" status="$2" hostname="$3" profile_name="$4" err_msg="$5"
-  send_notification_slack "$url" "$status" "$hostname" "$profile_name" "$err_msg"
+  # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
+  # shellcheck disable=SC2178,SC2034
+  local -n __ctx="$1"
+  local url="${__ctx[notify_url]:-${BACKUP_NOTIFICATION_URL:-}}"
+  local status="${__ctx[status]:-success}"
+  local err_msg="${__ctx[err_msg]:-}"
+  local hostname_val; hostname_val=$(hostname)
+  local profile_name_val="${BACKUP_PROFILE_NAME:-$hostname_val}"
+
+  local payload
+  payload=$(build_notification_payload_slack "$status" "$hostname_val" "$profile_name_val" "$err_msg")
+  curl -s -X POST -H "Content-Type: application/json" --max-time 10 -d "$payload" "$url"
 }
 
 # --- notification discord adapter ---
@@ -2594,8 +2577,18 @@ notification_discord_validate() {
 }
 
 notification_discord_send() {
-  local url="$1" status="$2" hostname="$3" profile_name="$4" err_msg="$5"
-  send_notification_discord "$url" "$status" "$hostname" "$profile_name" "$err_msg"
+  # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
+  # shellcheck disable=SC2178,SC2034
+  local -n __ctx="$1"
+  local url="${__ctx[notify_url]:-${BACKUP_NOTIFICATION_URL:-}}"
+  local status="${__ctx[status]:-success}"
+  local err_msg="${__ctx[err_msg]:-}"
+  local hostname_val; hostname_val=$(hostname)
+  local profile_name_val="${BACKUP_PROFILE_NAME:-$hostname_val}"
+
+  local payload
+  payload=$(build_notification_payload_discord "$status" "$hostname_val" "$profile_name_val" "$err_msg")
+  curl -s -X POST -H "Content-Type: application/json" --max-time 10 -d "$payload" "$url"
 }
 
 # --- notification custom adapter ---
@@ -2604,14 +2597,37 @@ notification_custom_validate() {
 }
 
 notification_custom_send() {
-  local url="$1" status="$2" hostname="$3" profile_name="$4" err_msg="$5"
-  local method="${6:-${BACKUP_NOTIFICATION_METHOD:-POST}}"
-  local headers_val="${7:-${BACKUP_NOTIFICATION_HEADERS:-}}"
-  local body_success="${8:-${BACKUP_NOTIFICATION_BODY_SUCCESS:-}}"
-  local body_failure="${9:-${BACKUP_NOTIFICATION_BODY_FAILURE:-}}"
-  local profile_command="${10:-}"
+  # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
+  # shellcheck disable=SC2178,SC2034
+  local -n __ctx="$1"
+  local url="${__ctx[notify_url]:-${BACKUP_NOTIFICATION_URL:-}}"
+  local status="${__ctx[status]:-success}"
+  local err_msg="${__ctx[err_msg]:-}"
+  local hostname_val; hostname_val=$(hostname)
+  local profile_name_val="${BACKUP_PROFILE_NAME:-$hostname_val}"
+  local method="${__ctx[method]:-${BACKUP_NOTIFICATION_METHOD:-POST}}"
+  local headers_val="${__ctx[headers]:-${BACKUP_NOTIFICATION_HEADERS:-}}"
+  local body_success="${__ctx[body_success]:-${BACKUP_NOTIFICATION_BODY_SUCCESS:-}}"
+  local body_failure="${__ctx[body_failure]:-${BACKUP_NOTIFICATION_BODY_FAILURE:-}}"
+  local profile_command="${__ctx[profile_command]:-}"
 
-  send_notification_custom "$url" "$status" "$hostname" "$profile_name" "$err_msg" "$method" "$headers_val" "$body_success" "$body_failure" "$profile_command"
+  local payload
+  payload=$(build_notification_payload_custom "$status" "$hostname_val" "$profile_name_val" "$err_msg" "$body_success" "$body_failure" "$profile_command")
+  
+  local -a curl_headers=()
+  if [[ -n "$headers_val" ]]; then
+    local -a headers_arr=()
+    IFS=',' read -ra headers_arr <<< "$headers_val"
+    local h
+    for h in "${headers_arr[@]}"; do
+      h=$(echo "$h" | xargs)
+      curl_headers+=("-H" "$h")
+    done
+  else
+    curl_headers+=("-H" "Content-Type: application/json")
+  fi
+
+  curl -s -X "$method" "${curl_headers[@]}" --max-time 10 -d "$payload" "$url"
 }
 
 # --- database mysql adapter ---
@@ -2624,11 +2640,7 @@ database_mysql_validate_config() {
 }
 
 database_mysql_validate_dump() {
-  local header="$1"
-  if [[ "$header" == *"MySQL dump"* || "$header" == *"MariaDB dump"* ]]; then
-    return 0
-  fi
-  return 1
+  validate_mysql_mariadb_dump "$1"
 }
 
 # --- database mariadb adapter ---
@@ -2641,11 +2653,7 @@ database_mariadb_validate_config() {
 }
 
 database_mariadb_validate_dump() {
-  local header="$1"
-  if [[ "$header" == *"MySQL dump"* || "$header" == *"MariaDB dump"* ]]; then
-    return 0
-  fi
-  return 1
+  validate_mysql_mariadb_dump "$1"
 }
 
 # --- database postgres adapter ---
