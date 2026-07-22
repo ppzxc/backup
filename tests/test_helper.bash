@@ -14,8 +14,9 @@ setup_backup_sh_env() {
   export RESTICPROFILE_INSTALL_PATH="${TEST_ROOT}/usr/local/bin/resticprofile"
   export SYSTEMD_UNIT_DIR="${TEST_ROOT}/etc/systemd/system"
   export CHRONY_CONF_PATH="${TEST_ROOT}/etc/chrony.conf"
+  export NTP_CONF_PATH="${TEST_ROOT}/etc/chrony.conf"
   export BACKUP_REPORTS_DIR="${TEST_ROOT}/data/backup/reports"
-  mkdir -p "$SYSTEMD_UNIT_DIR" "$(dirname "$BACKUP_SCRIPT_INSTALL_PATH")" "$(dirname "$RESTIC_INSTALL_PATH")" "$(dirname "$CHRONY_CONF_PATH")"
+  mkdir -p "$SYSTEMD_UNIT_DIR" "$(dirname "$BACKUP_SCRIPT_INSTALL_PATH")" "$(dirname "$RESTIC_INSTALL_PATH")" "$(dirname "$NTP_CONF_PATH")"
 
   export STUB_BIN="${BATS_TEST_TMPDIR}/stub-bin"
   mkdir -p "$STUB_BIN"
