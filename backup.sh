@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.55"
+BACKUP_SCRIPT_VERSION="0.0.56"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -80,6 +80,10 @@ RCLONE_INSTALL_PATH="${RCLONE_INSTALL_PATH:-/usr/local/bin/rclone}"
 RCLONE_VERSION="1.74.3"
 RCLONE_SHA256="${RCLONE_SHA256:-dbee7ccd7a5d617e4ed4cd4555c16669b511abfe8d31164f61be35ac9e999bd2}"
 RCLONE_URL="${RCLONE_URL:-https://github.com/rclone/rclone/releases/download/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-amd64.zip}"
+GUM_INSTALL_PATH="${GUM_INSTALL_PATH:-/usr/local/bin/gum}"
+GUM_VERSION="0.15.0"
+GUM_SHA256_AMD64="${GUM_SHA256_AMD64:-6919a0a149c7bc2990089f2ee1df1b3531bdf776adcd1ca4eb0cf91fec660565}"
+GUM_SHA256_ARM64="${GUM_SHA256_ARM64:-8b2c286a67f1b73bf7e21a221f7c17d3d17dcb1adad98327ef3eefbf7a70a8d6}"
 RESTICPROFILE_CONFIG_FILE="${RESTICPROFILE_CONFIG_FILE:-${BACKUP_ETC_DIR}/profiles.yaml}"
 RESTICPROFILE_UNIT_TEMPLATE="${RESTICPROFILE_UNIT_TEMPLATE:-${BACKUP_ETC_DIR}/resticprofile-service.tmpl}"
 RESTICPROFILE_TIMER_TEMPLATE="${RESTICPROFILE_TIMER_TEMPLATE:-${BACKUP_ETC_DIR}/resticprofile-timer.tmpl}"
@@ -460,6 +464,129 @@ setup_colors() {
     C_GRAY=$'\e[90m'
   fi
 }
+
+is_interactive() {
+  if [[ -t 0 ]] && { [[ -t 1 ]] || [[ -t 2 ]]; } && [[ -z "${NO_COLOR:-}" ]] && [[ "${GUM_DISABLE:-0}" != "1" ]] && command -v gum >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+safe_spin() {
+  local title="$1"
+  shift
+  if [[ "${1:-}" == "--" ]]; then
+    shift
+  fi
+
+  if is_interactive; then
+    if has_function "${1:-}"; then
+      local func_name="$1"
+      shift
+      # shellcheck disable=SC2163
+      export -f "$func_name" 2>/dev/null || true
+      export RESTIC_PASSWORD RESTIC_REPOSITORY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY 2>/dev/null || true
+      gum spin --spinner dot --title "$title" -- bash -c '"$@"' _ "$func_name" "$@"
+    else
+      gum spin --spinner dot --title "$title" -- "$@"
+    fi
+  else
+    log_info "[RUN] $title"
+    "$@"
+  fi
+}
+
+safe_confirm() {
+  local prompt="$1"
+  local default_ans="${2:-n}"
+  if is_interactive && [[ -e /dev/tty ]]; then
+    if [[ "$default_ans" == "y" ]]; then
+      gum confirm --default=true "$prompt" < /dev/tty > /dev/tty
+    else
+      gum confirm --default=false "$prompt" < /dev/tty > /dev/tty
+    fi
+  else
+    if [[ ! -t 0 ]]; then
+      local user_input=""
+      if read -r user_input; then
+        case "$user_input" in
+          [Yy]* ) return 0 ;;
+          [Nn]* ) return 1 ;;
+        esac
+      fi
+    fi
+    if [[ "$default_ans" == "y" ]]; then
+      return 0
+    else
+      return 1
+    fi
+  fi
+}
+
+safe_input() {
+  local prompt="$1"
+  local default_val="${2:-}"
+  local is_password="${3:-0}"
+  if is_interactive && [[ -e /dev/tty ]]; then
+    local -a gum_opts=(--placeholder "$prompt")
+    if [[ -n "$default_val" ]]; then
+      gum_opts+=(--value "$default_val")
+    fi
+    if [[ "$is_password" == "1" ]]; then
+      gum_opts+=(--password)
+    fi
+    gum input "${gum_opts[@]}" < /dev/tty
+  else
+    local val=""
+    if [[ "$is_password" == "1" ]]; then
+      printf '%s: ' "$prompt" >&2
+      if ! read -r -s val; then val=""; fi
+      echo "" >&2
+    else
+      printf '%s [%s]: ' "$prompt" "$default_val" >&2
+      if ! read -r val; then val=""; fi
+    fi
+    val="${val:-$default_val}"
+    printf '%s\n' "$val"
+  fi
+}
+
+safe_choose() {
+  local header="$1"
+  shift
+  local options=("$@")
+  if is_interactive && [[ -e /dev/tty ]]; then
+    gum choose --header "$header" "${options[@]}" < /dev/tty
+  else
+    if [[ ! -t 0 ]]; then
+      local val=""
+      if read -r val; then
+        printf '%s\n' "$val"
+        return 0
+      fi
+    fi
+    printf '%s\n' "${options[0]}"
+  fi
+}
+
+safe_style() {
+  local text="$1"
+  shift
+  if is_interactive; then
+    gum style "$@" "$text"
+  else
+    printf '%s\n' "$text"
+  fi
+}
+
+safe_table() {
+  if is_interactive; then
+    gum table "$@"
+  else
+    cat
+  fi
+}
+
 
 log_info() {
   printf '%s\n' "$1"
@@ -2127,6 +2254,44 @@ install_rclone() {
     "$RCLONE_SHA256" "$RCLONE_INSTALL_PATH" "zip" "rclone-v${RCLONE_VERSION}-linux-amd64/rclone"
 }
 
+install_gum() {
+  if command -v gum >/dev/null 2>&1; then
+    log_info "gum이 이미 설치되어 있습니다: $(command -v gum)"
+    return 0
+  fi
+
+  local uname_arch
+  uname_arch=$(uname -m)
+  local gum_arch=""
+  local gum_sha=""
+
+  case "$uname_arch" in
+    x86_64)
+      gum_arch="x86_64"
+      gum_sha="$GUM_SHA256_AMD64"
+      ;;
+    aarch64|arm64)
+      gum_arch="arm64"
+      gum_sha="$GUM_SHA256_ARM64"
+      ;;
+    *)
+      log_warn "지원하지 않는 아키텍처(${uname_arch})이므로 gum 설치를 건너뜁니다."
+      return 0
+      ;;
+  esac
+
+  local gum_url="https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/gum_${GUM_VERSION}_Linux_${gum_arch}.tar.gz"
+  local archive_member="gum_${GUM_VERSION}_Linux_${gum_arch}/gum"
+
+  log_info "gum v${GUM_VERSION} (${gum_arch}) 설치 시도 중..."
+  if ( install_binary "gum" "$GUM_VERSION" "$gum_url" "$gum_sha" "$GUM_INSTALL_PATH" "tar.gz" "$archive_member" ) 2>/dev/null; then
+    log_info "gum 설치가 완료되었습니다: ${GUM_INSTALL_PATH}"
+  else
+    log_warn "gum 자동 설치를 건너뛰었습니다 (선택적 TUI 도구)"
+  fi
+  return 0
+}
+
 self_install_copy() {
   local source_path="$1" force="$2"
   if [[ -e "$BACKUP_SCRIPT_INSTALL_PATH" && "$force" != 1 ]]; then
@@ -2211,6 +2376,7 @@ cmd_install() {
 [dry-run] restic ${RESTIC_VERSION} 다운로드+체크섬 검증 후 ${RESTIC_INSTALL_PATH}에 설치
 [dry-run] rclone ${RCLONE_VERSION} 다운로드+체크섬 검증 후 ${RCLONE_INSTALL_PATH}에 설치
 [dry-run] resticprofile ${RESTICPROFILE_VERSION} 다운로드+체크섬 검증 후 ${RESTICPROFILE_INSTALL_PATH}에 설치
+[dry-run] gum ${GUM_VERSION} 선택적 다운로드+체크섬 검증 후 ${GUM_INSTALL_PATH}에 설치
 [dry-run] install -m 0755 "\$0" "${BACKUP_SCRIPT_INSTALL_PATH}"
 [dry-run] mkdir -p "${RESTIC_ETC_DIR}" && chmod 700 "${RESTIC_ETC_DIR}"
 EOF
@@ -2220,6 +2386,7 @@ EOF
   install_restic
   install_rclone
   install_resticprofile
+  install_gum
   self_install_copy "$0" "$force"
   ensure_restic_dir
   log_info "install 완료"
@@ -3615,7 +3782,7 @@ cmd_run() {
 
   local pipeline_err=""
   local run_status=0
-  resticprofile "${resticprofile_args[@]}" || run_status=$?
+  safe_spin "1차 파일 백업 진행 중..." -- resticprofile "${resticprofile_args[@]}" || run_status=$?
   if [[ $run_status -eq 0 ]]; then
     log_info "1차 파일 백업 성공"
   elif [[ $run_status -eq 3 ]]; then
@@ -6861,8 +7028,15 @@ cmd_uninstall() {
   fi
   require_root
   local -A opts=()
-  parse_opts_into opts "purge" -- "$@"
-  local purge="${opts[purge]:-0}"
+  parse_opts_into opts "purge force yes" -- "$@"
+  local purge="${opts[purge]:-0}" force="${opts[force]:-0}" yes="${opts[yes]:-0}"
+
+  if (( purge )) && (( force == 0 )) && (( yes == 0 )); then
+    if ! safe_confirm "언인스톨 및 모든 백업 데이터/설정을 삭제하시겠습니까?" "n"; then
+      log_info "언인스톨 작업이 취소되었습니다."
+      return 0
+    fi
+  fi
 
   if [[ -f "$BACKUP_ENV_FILE" ]]; then
     declare -A file_config=()
@@ -6944,9 +7118,17 @@ cmd_migrate() {
   require_backup_env
 
   local -A opts=()
-  parse_opts_into opts "backend: endpoint: bucket: access-key: secret-key: host: port: user: new-password: skip-check force" -- "$@"
+  parse_opts_into opts "backend: endpoint: bucket: access-key: secret-key: host: port: user: new-password: skip-check force yes" -- "$@"
   local skip_check="${opts[skip-check]:-0}"
   local force="${opts[force]:-0}"
+  local yes="${opts[yes]:-0}"
+
+  if (( force == 0 )) && (( yes == 0 )); then
+    if ! safe_confirm "저장소 마이그레이션을 진행하시겠습니까?" "n"; then
+      log_info "마이그레이션 작업이 취소되었습니다."
+      return 0
+    fi
+  fi
 
   # 1. Pre-flight check on Source Repository
   log_info "기존 저장소(Source) 상태 점검 중..."
@@ -7211,22 +7393,27 @@ prompt_validated() {
   local message="$1" default="$2" validate_fn="$3"
   local value err
   while true; do
-    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-      setup_colors
-      if [[ -n "$default" ]]; then
-        printf '%b%s%b [%b%s%b]: ' "$C_CYAN" "$message" "$C_RESET" "$C_BOLD" "$default" "$C_RESET" >&2
-      else
-        printf '%b%s%b: ' "$C_CYAN" "$message" "$C_RESET" >&2
-      fi
+    if is_interactive && [[ -e /dev/tty ]]; then
+      value=$(safe_input "$message" "$default" 0)
     else
-      if [[ -n "$default" ]]; then
-        printf '%s [%s]: ' "$message" "$default" >&2
+      if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+        setup_colors
+        if [[ -n "$default" ]]; then
+          printf '%b%s%b [%b%s%b]: ' "$C_CYAN" "$message" "$C_RESET" "$C_BOLD" "$default" "$C_RESET" >&2
+        else
+          printf '%b%s%b: ' "$C_CYAN" "$message" "$C_RESET" >&2
+        fi
       else
-        printf '%s: ' "$message" >&2
+        if [[ -n "$default" ]]; then
+          printf '%s [%s]: ' "$message" "$default" >&2
+        else
+          printf '%s: ' "$message" >&2
+        fi
       fi
+      read -r value
+      value="${value:-$default}"
     fi
-    read -r value
-    value="${value:-$default}"
+
     if err=$("$validate_fn" "$value"); then
       printf '%s' "$value"
       return 0
@@ -7239,19 +7426,23 @@ prompt_validated() {
   done
 }
 
-# 화면에 표시되지 않는 비밀번호 입력을 받고, 빈 값이면 다시 묻는다.
 prompt_secret_required() {
   local message="$1"
   local value
   while true; do
-    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-      setup_colors
-      printf '%b%s%b' "$C_YELLOW" "$message" "$C_RESET" >&2
+    if is_interactive && [[ -e /dev/tty ]]; then
+      value=$(safe_input "$message" "" 1)
     else
-      printf '%s' "$message" >&2
+      if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+        setup_colors
+        printf '%b%s%b' "$C_YELLOW" "$message" "$C_RESET" >&2
+      else
+        printf '%s' "$message" >&2
+      fi
+      read -rs value
+      printf '\n' >&2
     fi
-    read -rs value
-    printf '\n' >&2
+
     if [[ -n "$value" ]]; then
       printf '%s' "$value"
       return 0
@@ -7264,8 +7455,16 @@ prompt_secret_required() {
   done
 }
 
-# 1(S3)/2(SFTP) 중 하나를 고를 때까지 다시 묻고, 선택된 backend 이름을 반환한다.
 prompt_backend_choice() {
+  if is_interactive && [[ -e /dev/tty ]]; then
+    local choice
+    choice=$(safe_choose "백엔드 선택 (Choose Backend)" "s3" "sftp")
+    if [[ "$choice" == "s3" || "$choice" == "sftp" ]]; then
+      printf '%s' "$choice"
+      return 0
+    fi
+  fi
+
   local choice
   while true; do
     if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
