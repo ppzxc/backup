@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.49"
+BACKUP_SCRIPT_VERSION="0.0.53"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -433,31 +433,31 @@ C_RESET="" C_BOLD="" C_DIM="" C_RED="" C_GREEN="" C_YELLOW="" C_BLUE="" C_CYAN="
 
 setup_colors() {
   if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-    C_RESET="\033[0m"
-    C_BOLD="\033[1m"
-    C_DIM="\033[2m"
-    C_RED="\033[31m"
-    C_GREEN="\033[32m"
-    C_YELLOW="\033[33m"
-    C_BLUE="\033[34m"
-    C_CYAN="\033[36m"
-    C_GRAY="\033[90m"
+    C_RESET=$'\e[0m'
+    C_BOLD=$'\e[1m'
+    C_DIM=$'\e[2m'
+    C_RED=$'\e[31m'
+    C_GREEN=$'\e[32m'
+    C_YELLOW=$'\e[33m'
+    C_BLUE=$'\e[34m'
+    C_CYAN=$'\e[36m'
+    C_GRAY=$'\e[90m'
   fi
 }
 
 log_info() {
   printf '%s\n' "$1"
-  command -v logger >/dev/null 2>&1 && logger -t backup -- "$1" || true
+  command -v logger >/dev/null 2>&1 && logger -t restic-backup -- "$1" || true
 }
 
 log_error() {
   printf 'ERROR: %s\n' "$1" >&2
-  command -v logger >/dev/null 2>&1 && logger -t backup -- "ERROR: $1" || true
+  command -v logger >/dev/null 2>&1 && logger -t restic-backup -- "ERROR: $1" || true
 }
 
 log_warn() {
   printf 'WARNING: %s\n' "$1" >&2
-  command -v logger >/dev/null 2>&1 && logger -t backup -- "WARNING: $1" || true
+  command -v logger >/dev/null 2>&1 && logger -t restic-backup -- "WARNING: $1" || true
 }
 
 die() {
@@ -626,6 +626,59 @@ require_backup_env() {
 resolve_profile_name() {
   printf '%s' "${BACKUP_PROFILE_NAME:-$(hostname)}"
 }
+
+convert_calendar_to_cron() {
+  local cal="$1"
+  # Trim spaces
+  cal=$(echo "$cal" | xargs)
+
+  # 1. Daily: *-*-* HH:MM:SS or *-*-* HH:MM
+  if [[ "$cal" =~ ^\*-\*-\*[[:space:]]+([0-9]{1,2}):([0-9]{2})(:[0-9]{2})?$ ]]; then
+    local hour="${BASH_REMATCH[1]}"
+    local min="${BASH_REMATCH[2]}"
+    hour=$((10#$hour))
+    min=$((10#$min))
+    printf '%s %s * * *\n' "$min" "$hour"
+    return 0
+  fi
+
+  # 2. Monthly: *-*-DD HH:MM:SS or *-*-DD HH:MM
+  if [[ "$cal" =~ ^\*-\*-([0-9]{2})[[:space:]]+([0-9]{1,2}):([0-9]{2})(:[0-9]{2})?$ ]]; then
+    local dom="${BASH_REMATCH[1]}"
+    local hour="${BASH_REMATCH[2]}"
+    local min="${BASH_REMATCH[3]}"
+    dom=$((10#$dom))
+    hour=$((10#$hour))
+    min=$((10#$min))
+    printf '%s %s %s * *\n' "$min" "$hour" "$dom"
+    return 0
+  fi
+
+  # 3. Weekly: (DayOfWeek) *-*-* HH:MM:SS
+  # Systemd: Mon..Fri *-*-* 02:00:00 or Mon,Tue *-*-* 02:00:00 or Mon *-*-* 02:00:00
+  if [[ "$cal" =~ ^([A-Za-z0-9,.-]+)[[:space:]]+\*-\*-\*[[:space:]]+([0-9]{1,2}):([0-9]{2})(:[0-9]{2})?$ ]]; then
+    local days="${BASH_REMATCH[1]}"
+    local hour="${BASH_REMATCH[2]}"
+    local min="${BASH_REMATCH[3]}"
+    hour=$((10#$hour))
+    min=$((10#$min))
+    
+    # Translate day ranges like Mon..Fri to Mon-Fri
+    days="${days//../-}"
+    printf '%s %s * * %s\n' "$min" "$hour" "$days"
+    return 0
+  fi
+
+  # Fallback: if it's already a valid cron expression (5 fields), return it directly.
+  if [[ $(echo "$cal" | awk '{print NF}') -eq 5 ]]; then
+    printf '%s\n' "$cal"
+    return 0
+  fi
+
+  # Default fallback
+  printf '0 2 * * *\n'
+}
+
 
 validate_backend() {
   local value="$1"
@@ -2808,21 +2861,55 @@ cmd_init() {
 }
 
 
-# ---------------------------------------------------------------------------
-# 스케줄러 관리 엔진: Scheduler Seam 및 다형성 라우터
-# ---------------------------------------------------------------------------
+is_systemd_active() {
+  if [[ -d /run/systemd/system || -d "${TEST_ROOT:-}/run/systemd/system" ]] && command -v systemctl >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+determine_scheduler_adapter() {
+  # 1. 환경 변수로 어댑터가 명시적으로 설정된 경우 해당 값을 강제 적용
+  if [[ -n "${BACKUP_SCHEDULER_ADAPTER:-}" ]]; then
+    case "$BACKUP_SCHEDULER_ADAPTER" in
+      systemd|cron|mock)
+        printf '%s' "$BACKUP_SCHEDULER_ADAPTER"
+        return 0
+        ;;
+      *)
+        die "지원하지 않는 스케줄러 어댑터: $BACKUP_SCHEDULER_ADAPTER" 1
+        ;;
+    esac
+  fi
+
+  # 2. systemd 데몬 동작 확인
+  if is_systemd_active; then
+    printf 'systemd'
+    return 0
+  fi
+
+  # 3. crontab 사용 가능 여부 확인
+  if command -v crontab >/dev/null 2>&1; then
+    log_warn "systemd를 사용할 수 없어 crontab 스케줄러(cron)로 자동 폴백합니다."
+    printf 'cron'
+    return 0
+  fi
+
+  die "스케줄링을 지원하는 데몬(systemd 또는 crontab)을 찾을 수 없습니다." 1
+}
+
 scheduler_register() {
   local profile_name="$1"
   # shellcheck disable=SC2178
   local -n _s_cfg="$2"
-  local adapter="${BACKUP_SCHEDULER_ADAPTER:-systemd}"
+  local adapter; adapter=$(determine_scheduler_adapter)
   "scheduler_${adapter}_register" "$profile_name" _s_cfg
 }
 
 scheduler_unregister() {
   local profile_name="$1"
   local target_type="$2"
-  local adapter="${BACKUP_SCHEDULER_ADAPTER:-systemd}"
+  local adapter; adapter=$(determine_scheduler_adapter)
   "scheduler_${adapter}_unregister" "$profile_name" "$target_type"
 }
 
@@ -2830,7 +2917,7 @@ scheduler_status() {
   local profile_name="$1"
   # shellcheck disable=SC2178
   local -n _s_stat="$2"
-  local adapter="${BACKUP_SCHEDULER_ADAPTER:-systemd}"
+  local adapter; adapter=$(determine_scheduler_adapter)
   "scheduler_${adapter}_status" "$profile_name" _s_stat
 }
 
@@ -2925,6 +3012,245 @@ scheduler_mock_status() {
   [[ -z "${_m_stat[drill]:-}" ]] && _m_stat[drill]="inactive"
   [[ -z "${_m_stat[db_backup]:-}" ]] && _m_stat[db_backup]="inactive"
   return 0
+}
+
+# --- 3) Cron Scheduler Adapter ---
+# shellcheck disable=SC2120
+scheduler_cron_register() {
+  local profile_name="$1"
+  # shellcheck disable=SC2178
+  local -n _c_cfg="$2"
+
+  local on_calendar="${_c_cfg[on-calendar]:-$DEFAULT_ON_CALENDAR}"
+  local daily_on_calendar="${_c_cfg[on-calendar-daily]:-*-*-* 01:00:00}"
+  local drill_on_calendar="${_c_cfg[on-calendar-drill]:-*-*-01 01:30:00}"
+  local daily="${_c_cfg[daily]:-0}"
+  local restore_drill="${_c_cfg[restore-drill]:-0}"
+  local ntp_report="${_c_cfg[ntp_report]:-${BACKUP_NTP_REPORT:-${BACKUP_CHRONY_REPORT:-}}}"
+
+  local cron_on_cal; cron_on_cal=$(convert_calendar_to_cron "$on_calendar")
+  local cron_daily; cron_daily=$(convert_calendar_to_cron "$daily_on_calendar")
+  local cron_drill; cron_drill=$(convert_calendar_to_cron "$drill_on_calendar")
+  local cron_ntp; cron_ntp=$(convert_calendar_to_cron "${DEFAULT_NTP_ON_CALENDAR}")
+
+  local install_path="${BACKUP_SCRIPT_INSTALL_PATH:-/usr/local/bin/backup.sh}"
+  local r_cfg_file="${RESTICPROFILE_CONFIG_FILE:-/etc/restic/profiles.yaml}"
+  local path_env="PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+  # Retrieve current crontab
+  local current_cron; current_cron=$(crontab -l 2>/dev/null || true)
+
+  # Parse current crontab, stripping the existing block but also capturing its entries
+  local clean_cron=""
+  local block_entries=""
+  local in_block=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "# RESTIC_BACKUP_BEGIN" ]]; then
+      in_block=1
+      continue
+    fi
+    if [[ "$line" == "# RESTIC_BACKUP_END" ]]; then
+      in_block=0
+      continue
+    fi
+    if (( in_block == 1 )); then
+      if [[ -n "$block_entries" ]]; then
+        block_entries="${block_entries}"$'\n'"${line}"
+      else
+        block_entries="${line}"
+      fi
+    else
+      if [[ -n "$clean_cron" ]]; then
+        clean_cron="${clean_cron}"$'\n'"${line}"
+      else
+        clean_cron="${line}"
+      fi
+    fi
+  done <<< "$current_cron"
+
+  # Parse existing block entries into an associative array
+  declare -A active_jobs=()
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "$line" ]] || continue
+    if [[ "$line" == *"logger -t restic-backup-files"* ]]; then
+      active_jobs[files]="$line"
+    elif [[ "$line" == *"logger -t restic-backup-db"* ]]; then
+      active_jobs[db]="$line"
+    elif [[ "$line" == *"logger -t restic-backup-audit-daily"* ]]; then
+      active_jobs[daily]="$line"
+    elif [[ "$line" == *"logger -t restic-backup-audit-drill"* ]]; then
+      active_jobs[drill]="$line"
+    elif [[ "$line" == *"logger -t restic-backup-ntp-report"* ]]; then
+      active_jobs[ntp]="$line"
+    fi
+  done <<< "$block_entries"
+
+  # Update active jobs based on flags
+  if (( daily )); then
+    active_jobs[daily]="${cron_daily} ${path_env} ${install_path} audit --daily --report 2>&1 | logger -t restic-backup-audit-daily"
+  elif (( restore_drill )); then
+    active_jobs[drill]="${cron_drill} ${path_env} ${install_path} audit --restore-drill --report 2>&1 | logger -t restic-backup-audit-drill"
+  else
+    # Regular registration: rebuild all
+    active_jobs[files]="${cron_on_cal} ${path_env} resticprofile --config ${r_cfg_file} --name ${profile_name} backup 2>&1 | logger -t restic-backup-files"
+    if [[ -n "${BACKUP_DB_TYPE:-}" ]]; then
+      local db_cal="${BACKUP_DB_SCHEDULE:-$on_calendar}"
+      local cron_db; cron_db=$(convert_calendar_to_cron "$db_cal")
+      active_jobs[db]="${cron_db} ${path_env} resticprofile --config ${r_cfg_file} --name ${profile_name}-db backup 2>&1 | logger -t restic-backup-db"
+    else
+      unset 'active_jobs[db]'
+    fi
+    active_jobs[daily]="${cron_daily} ${path_env} ${install_path} audit --daily --report 2>&1 | logger -t restic-backup-audit-daily"
+    active_jobs[drill]="${cron_drill} ${path_env} ${install_path} audit --restore-drill --report 2>&1 | logger -t restic-backup-audit-drill"
+    if [[ "$ntp_report" == "1" ]]; then
+      active_jobs[ntp]="${cron_ntp} ${path_env} ${install_path} ntp --report 2>&1 | logger -t restic-backup-ntp-report"
+    else
+      unset 'active_jobs[ntp]'
+    fi
+  fi
+
+  # Build new entries string in a predictable order
+  local new_entries=""
+  for job_key in files db daily drill ntp; do
+    if [[ -n "${active_jobs[$job_key]:-}" ]]; then
+      if [[ -n "$new_entries" ]]; then
+        new_entries="${new_entries}"$'\n'"${active_jobs[$job_key]}"
+      else
+        new_entries="${active_jobs[$job_key]}"
+      fi
+    fi
+  done
+
+  # Combine clean_cron and new_entries
+  local final_cron=""
+  if [[ -n "$clean_cron" ]]; then
+    # Avoid extra newline if clean_cron is empty/whitespace only
+    local trimmed; trimmed=$(echo "$clean_cron" | xargs)
+    if [[ -n "$trimmed" ]]; then
+      final_cron="${clean_cron}"$'\n'
+    fi
+  fi
+  final_cron="${final_cron}# RESTIC_BACKUP_BEGIN"$'\n'"${new_entries}"$'\n'"# RESTIC_BACKUP_END"
+
+  # Write back to crontab
+  printf '%s\n' "$final_cron" | crontab -
+  log_info "schedule enable 완료 (cron)"
+}
+
+scheduler_cron_unregister() {
+  local profile_name="$1"
+  local target_type="$2"
+
+  local current_cron; current_cron=$(crontab -l 2>/dev/null || true)
+  [[ -n "$current_cron" ]] || return 0
+
+  local clean_cron=""
+  local in_block=0
+  local block_entries=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "# RESTIC_BACKUP_BEGIN" ]]; then
+      in_block=1
+      continue
+    fi
+    if [[ "$line" == "# RESTIC_BACKUP_END" ]]; then
+      in_block=0
+      # Process block entries if we selectively delete
+      if [[ "$target_type" == "daily" || "$target_type" == "drill" ]]; then
+        local entry_line
+        local updated_block=""
+        while IFS= read -r entry_line || [[ -n "$entry_line" ]]; do
+          [[ -z "$entry_line" ]] && continue
+          if [[ "$target_type" == "daily" && "$entry_line" == *"audit --daily"* ]]; then
+            continue
+          fi
+          if [[ "$target_type" == "drill" && "$entry_line" == *"audit --restore-drill"* ]]; then
+            continue
+          fi
+          if [[ -n "$updated_block" ]]; then
+            updated_block="${updated_block}"$'\n'"${entry_line}"
+          else
+            updated_block="${entry_line}"
+          fi
+        done <<< "$block_entries"
+
+        if [[ -n "$updated_block" ]]; then
+          if [[ -n "$clean_cron" ]]; then
+            clean_cron="${clean_cron}"$'\n'
+          fi
+          clean_cron="${clean_cron}# RESTIC_BACKUP_BEGIN"$'\n'"${updated_block}"$'\n'"# RESTIC_BACKUP_END"
+        fi
+      fi
+      block_entries=""
+      continue
+    fi
+
+    if (( in_block )); then
+      if [[ -n "$block_entries" ]]; then
+        block_entries="${block_entries}"$'\n'"${line}"
+      else
+        block_entries="${line}"
+      fi
+    else
+      if [[ -n "$clean_cron" ]]; then
+        clean_cron="${clean_cron}"$'\n'"${line}"
+      else
+        clean_cron="${line}"
+      fi
+    fi
+  done <<< "$current_cron"
+
+  # Write back if changed
+  if [[ -n "$clean_cron" ]]; then
+    # Trim and remove extra trailing newlines
+    local trimmed; trimmed=$(echo "$clean_cron" | xargs)
+    if [[ -n "$trimmed" ]]; then
+      printf '%s\n' "$clean_cron" | crontab -
+    else
+      crontab -r 2>/dev/null || true
+    fi
+  else
+    crontab -r 2>/dev/null || true
+  fi
+
+  log_info "schedule disable 완료 (cron: ${target_type})"
+}
+
+scheduler_cron_status() {
+  local profile_name="$1"
+  # shellcheck disable=SC2178,SC2154
+  local -n _c_stat="$2"
+
+  local current_cron; current_cron=$(crontab -l 2>/dev/null || true)
+  if [[ -z "$current_cron" ]]; then
+    _c_stat[backup]="inactive"
+    _c_stat[daily]="inactive"
+    _c_stat[drill]="inactive"
+    _c_stat[db_backup]="inactive"
+    return 0
+  fi
+
+  local has_backup=0 has_daily=0 has_drill=0 has_db=0
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == *"resticprofile"* && "$line" == *"--name ${profile_name}"* && "$line" == *"backup"* ]]; then
+      has_backup=1
+    fi
+    if [[ "$line" == *"audit --daily"* ]]; then
+      has_daily=1
+    fi
+    if [[ "$line" == *"audit --restore-drill"* ]]; then
+      has_drill=1
+    fi
+    if [[ "$line" == *"resticprofile"* && "$line" == *"--name ${profile_name}-db"* && "$line" == *"backup"* ]]; then
+      has_db=1
+    fi
+  done <<< "$current_cron"
+
+  # Assign active/inactive
+  if (( has_backup )); then _c_stat[backup]="active"; else _c_stat[backup]="inactive"; fi
+  if (( has_daily )); then _c_stat[daily]="active"; else _c_stat[daily]="inactive"; fi
+  if (( has_drill )); then _c_stat[drill]="active"; else _c_stat[drill]="inactive"; fi
+  if (( has_db )); then _c_stat[db_backup]="active"; else _c_stat[db_backup]="inactive"; fi
 }
 
 # --- 2) Systemd Scheduler Adapter ---
@@ -3691,6 +4017,53 @@ run_restore_drill() {
   fi
 
   return 0
+}
+
+generate_snapshot_table_html() {
+  local snapshots_json="$1"
+  python3 -c '
+import sys, json, subprocess
+try:
+    content = sys.stdin.read().strip()
+    if not content or content == "[]":
+        print("<tr><td colspan=\"4\">(스냅샷 없음)</td></tr>")
+        sys.exit(0)
+    data = json.loads(content)
+    data.sort(key=lambda x: x.get("time", ""), reverse=True)
+    recent = data[:3]
+    for snap in recent:
+        sid = snap.get("short_id", snap.get("id", "")[:8])
+        time_str = snap.get("time", "")[:19].replace("T", " ")
+        host = snap.get("hostname", "")
+        paths = ", ".join(snap.get("paths", []))
+        processed_bytes = None
+        summary = snap.get("summary")
+        if isinstance(summary, dict) and "total_bytes_processed" in summary:
+            processed_bytes = summary["total_bytes_processed"]
+        if processed_bytes is None:
+            try:
+                res = subprocess.run(["restic", "stats", "--json", snap.get("id")], capture_output=True, text=True, timeout=5)
+                if res.returncode == 0:
+                    stats_data = json.loads(res.stdout)
+                    processed_bytes = stats_data.get("total_size")
+            except Exception:
+                pass
+        size_str = ""
+        if processed_bytes is not None:
+            if processed_bytes >= 1073741824:
+                size_str = "%.2f GB" % (processed_bytes / 1073741824.0)
+            elif processed_bytes >= 1048576:
+                size_str = "%.2f MB" % (processed_bytes / 1048576.0)
+            elif processed_bytes >= 1024:
+                size_str = "%.2f KB" % (processed_bytes / 1024.0)
+            else:
+                size_str = "%d B" % processed_bytes
+        else:
+            size_str = "확인 불가"
+        print("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s (%s)</td></tr>" % (sid, time_str, host, paths, size_str))
+except Exception as e:
+    print("<tr><td colspan=\"4\">(스냅샷 정보 해석 실패: %s)</td></tr>" % e)
+' <<< "$snapshots_json"
 }
 
 render_audit_report_unified() {
@@ -4502,7 +4875,7 @@ render_daily_txt() {
 
   # [ISMS-P 규정 준수 검증 체크리스트 변수 동적 계산]
   local chrony_sync_status="만족"
-  if ! (systemctl is-active chronyd >/dev/null 2>&1 && chronyc tracking >/dev/null 2>&1); then
+  if ! check_ntp_sync_status; then
     chrony_sync_status="미흡"
   fi
 
@@ -4674,7 +5047,7 @@ render_daily_html() {
 
   # [ISMS-P 규정 준수 검증 체크리스트 변수 동적 계산]
   local chrony_sync_status="미흡"
-  if systemctl is-active chronyd >/dev/null 2>&1 && chronyc tracking >/dev/null 2>&1; then
+  if check_ntp_sync_status; then
     chrony_sync_status="만족"
   fi
 
@@ -5490,8 +5863,70 @@ EOF
 
 
 # ============================================================
-# chrony NTP 시각 동기화 설정 및 증적 생성
+# NTP 시각 동기화 설정 및 증적 생성 (Chrony / NTPd 지원)
 # ============================================================
+
+NTPD_CONF_CONTENT='# NTPd Configuration (Backup Pipeline Generated)
+driftfile /var/lib/ntp/drift
+
+# Security Restrictions
+restrict default nomodify notrap nopeer noquery
+restrict 127.0.0.1
+restrict ::1
+
+# Time Servers
+server time.krnic.net iburst prefer
+server time.kriss.re.kr iburst
+server time.google.com iburst
+server 0.kr.pool.ntp.org iburst'
+
+detect_ntp_service() {
+  if [[ -n "${MOCK_NTP_SERVICE:-}" ]]; then
+    NTP_SERVICE="$MOCK_NTP_SERVICE"
+    if [[ "$NTP_SERVICE" == "ntpd" ]]; then
+      NTP_CONF_PATH="${TEST_ROOT:-}/etc/ntp.conf"
+    else
+      NTP_CONF_PATH="${TEST_ROOT:-}/etc/chrony.conf"
+    fi
+    return 0
+  fi
+
+  if systemctl list-unit-files | grep -q "chronyd.service" 2>/dev/null || command -v chronyc >/dev/null 2>&1; then
+    NTP_SERVICE="chronyd"
+    NTP_CONF_PATH="${TEST_ROOT:-}/etc/chrony.conf"
+    if [[ -z "${TEST_ROOT:-}" && -f "/etc/chrony.conf" ]]; then
+      NTP_CONF_PATH="/etc/chrony.conf"
+    fi
+  elif systemctl list-unit-files | grep -q "ntpd.service" 2>/dev/null || command -v ntpq >/dev/null 2>&1; then
+    NTP_SERVICE="ntpd"
+    NTP_CONF_PATH="${TEST_ROOT:-}/etc/ntp.conf"
+    if [[ -z "${TEST_ROOT:-}" && -f "/etc/ntp.conf" ]]; then
+      NTP_CONF_PATH="/etc/ntp.conf"
+    fi
+  else
+    NTP_SERVICE="chronyd"
+    NTP_CONF_PATH="${TEST_ROOT:-}/etc/chrony.conf"
+  fi
+}
+
+check_ntp_sync_status() {
+  local NTP_SERVICE NTP_CONF_PATH
+  detect_ntp_service
+
+  if [[ "$NTP_SERVICE" == "chronyd" ]]; then
+    if systemctl is-active chronyd >/dev/null 2>&1 && chronyc tracking >/dev/null 2>&1; then
+      return 0
+    fi
+  elif [[ "$NTP_SERVICE" == "ntpd" ]]; then
+    if systemctl is-active ntpd >/dev/null 2>&1; then
+      local rv; rv=$(ntpq -c rv 2>/dev/null)
+      if [[ -n "$rv" && "$rv" != *"stratum=16"* && "$rv" != *"leap_alarm"* ]]; then
+        return 0
+      fi
+    fi
+  fi
+  return 1
+}
 
 CHRONY_CONF_CONTENT='# KRNIC (우선 적용)
 server time.krnic.net iburst prefer
@@ -5536,6 +5971,14 @@ render_ntp_txt() {
   local sources_output="${_ct_ref[sources_output]:-}"
   local tracking_output="${_ct_ref[tracking_output]:-}"
   local conf_perm="${_ct_ref[conf_perm]:-}"
+  local ntp_service="${_ct_ref[ntp_service]:-chronyd}"
+
+  local sources_title="chronyc sources -v"
+  local tracking_title="chronyc tracking"
+  if [[ "$ntp_service" == "ntpd" ]]; then
+    sources_title="ntpq -p"
+    tracking_title="ntpq -c rv"
+  fi
 
   cat <<EOF
 ======================================================================
@@ -5548,10 +5991,10 @@ render_ntp_txt() {
 - 자동 시작(Enabled): $service_enabled
 - 현재 실행(Active):  $service_active
 
-[2. 타임서버 연동 목록 (chronyc sources -v)]
+[2. 타임서버 연동 목록 ($sources_title)]
 $sources_output
 
-[3. 시각 오차 상세 (chronyc tracking)]
+[3. 시각 오차 상세 ($tracking_title)]
 $tracking_output
 
 [4. 설정 파일 권한 확인]
@@ -5573,6 +6016,7 @@ render_ntp_json() {
   local sources_output="${_cj_ref[sources_output]:-}"
   local tracking_output="${_cj_ref[tracking_output]:-}"
   local conf_perm="${_cj_ref[conf_perm]:-}"
+  local ntp_service="${_cj_ref[ntp_service]:-chronyd}"
 
   local sources_json; sources_json=$(printf '%s' "$sources_output" | sed 's/"/\\"/g')
   local tracking_json; tracking_json=$(printf '%s' "$tracking_output" | sed 's/"/\\"/g')
@@ -5583,6 +6027,7 @@ render_ntp_json() {
   "hostname": "${hostname_val//\"/\\\"}",
   "report_date": "${report_date}",
   "ntp_service": {
+    "name": "${ntp_service}",
     "enabled": "${service_enabled//\"/\\\"}",
     "active": "${service_active//\"/\\\"}"
   },
@@ -5603,6 +6048,14 @@ render_ntp_html() {
   local sources_output="${_ch_ref[sources_output]:-}"
   local tracking_output="${_ch_ref[tracking_output]:-}"
   local conf_perm="${_ch_ref[conf_perm]:-}"
+  local ntp_service="${_ch_ref[ntp_service]:-chronyd}"
+
+  local sources_title="chronyc sources -v"
+  local tracking_title="chronyc tracking"
+  if [[ "$ntp_service" == "ntpd" ]]; then
+    sources_title="ntpq -p"
+    tracking_title="ntpq -c rv"
+  fi
 
   local svc_badge_class="badge-success"
   if [[ "$service_active" != *"running"* && "$service_active" != "active"* ]]; then
@@ -5678,9 +6131,9 @@ render_ntp_html() {
       </tr>
     </tbody>
   </table>
-  <h2>2. 타임서버 연동 목록 (chronyc sources -v)</h2>
+  <h2>2. 타임서버 연동 목록 (${sources_title})</h2>
   <div class="pre-block">$sources_output</div>
-  <h2>3. 시각 오차 상세 (chronyc tracking)</h2>
+  <h2>3. 시각 오차 상세 (${tracking_title})</h2>
   <div class="pre-block">$tracking_output</div>
   <h2>4. 설정 파일 권한 확인</h2>
   <table class="data-table">
@@ -5724,7 +6177,7 @@ cmd_ntp() {
 사용법: backup.sh ntp <subcommand> [options]
 
 서브커맨드:
-  setup      NTP(Chrony) 설정 파일 적용 및 서비스 재시작 + 상태 검증
+  setup      NTP(Chrony/NTPd) 설정 파일 적용 및 서비스 재시작 + 상태 검증
   --report   ISMS-P 2.9.3 시각 동기화 증적 보고서 생성 (txt/json/html)
 
 옵션 (--report):
@@ -5742,6 +6195,10 @@ HELPEOF
   local action="${1:-}"
   shift || true
 
+  # 동적으로 NTP 서비스 및 설정 경로 감지
+  local NTP_SERVICE NTP_CONF_PATH
+  detect_ntp_service
+
   case "$action" in
     setup)
       require_root
@@ -5749,27 +6206,37 @@ HELPEOF
 
       # 1. 기존 설정 파일 백업
       if [[ -f "$NTP_CONF_PATH" ]]; then
-        local bak_path; bak_path="$(dirname "$NTP_CONF_PATH")/chrony.conf.bak.$(date +%Y%m%d)"
+        local conf_base; conf_base=$(basename "$NTP_CONF_PATH")
+        local bak_path; bak_path="$(dirname "$NTP_CONF_PATH")/${conf_base}.bak.$(date +%Y%m%d)"
         cp "$NTP_CONF_PATH" "$bak_path"
         log_info "기존 설정을 백업했습니다: $bak_path"
       fi
 
       # 2. 설정 파일 작성
-      printf '%s\n' "$CHRONY_CONF_CONTENT" > "$NTP_CONF_PATH"
+      local conf_content="$CHRONY_CONF_CONTENT"
+      if [[ "$NTP_SERVICE" == "ntpd" ]]; then
+        conf_content="$NTPD_CONF_CONTENT"
+      fi
+      printf '%s\n' "$conf_content" > "$NTP_CONF_PATH"
       chmod 644 "$NTP_CONF_PATH"
       log_info "NTP 설정 파일을 작성했습니다: $NTP_CONF_PATH"
 
-      # 3. chronyd 재시작
-      systemctl restart chronyd
-      log_info "chronyd 서비스를 재시작했습니다."
+      # 3. 서비스 재시작
+      systemctl restart "$NTP_SERVICE"
+      log_info "${NTP_SERVICE} 서비스를 재시작했습니다."
 
       # 4. 구문 에러 유무 로그 확인
-      log_info "=== journalctl -u chronyd -n 20 ==="
-      journalctl -u chronyd -n 20 --no-pager || true
+      log_info "=== journalctl -u ${NTP_SERVICE} -n 20 ==="
+      journalctl -u "$NTP_SERVICE" -n 20 --no-pager || true
 
       # 5. 타임서버 동기화 상태 점검
-      log_info "=== chronyc sources -v ==="
-      chronyc sources -v || true
+      if [[ "$NTP_SERVICE" == "chronyd" ]]; then
+        log_info "=== chronyc sources -v ==="
+        chronyc sources -v || true
+      else
+        log_info "=== ntpq -p ==="
+        ntpq -p || true
+      fi
 
       # 6. backup.env에 BACKUP_NTP_REPORT=1 기록
       # nameref 인자 전달용 설정 배열 선언
@@ -5801,10 +6268,15 @@ HELPEOF
 
       # 상태 수집
       local svc_enabled svc_active sources_out tracking_out conf_perm_out
-      svc_enabled=$(systemctl is-enabled chronyd 2>/dev/null || echo "unknown")
-      svc_active=$(systemctl is-active chronyd 2>/dev/null || echo "unknown")
-      sources_out=$(chronyc sources -v 2>/dev/null || echo "(chronyc 실행 불가)")
-      tracking_out=$(chronyc tracking 2>/dev/null || echo "(chronyc 실행 불가)")
+      svc_enabled=$(systemctl is-enabled "$NTP_SERVICE" 2>/dev/null || echo "unknown")
+      svc_active=$(systemctl is-active "$NTP_SERVICE" 2>/dev/null || echo "unknown")
+      if [[ "$NTP_SERVICE" == "chronyd" ]]; then
+        sources_out=$(chronyc sources -v 2>/dev/null || echo "(chronyc 실행 불가)")
+        tracking_out=$(chronyc tracking 2>/dev/null || echo "(chronyc 실행 불가)")
+      else
+        sources_out=$(ntpq -p 2>/dev/null || echo "(ntpq 실행 불가)")
+        tracking_out=$(ntpq -c rv 2>/dev/null || echo "(ntpq 실행 불가)")
+      fi
       conf_perm_out=$(ls -l "$NTP_CONF_PATH" 2>/dev/null || echo "(파일 없음)")
 
       local report_date; report_date=$(date '+%Y-%m-%d %H:%M:%S %Z')
@@ -5820,6 +6292,7 @@ HELPEOF
         [sources_output]="$sources_out"
         [tracking_output]="$tracking_out"
         [conf_perm]="$conf_perm_out"
+        [ntp_service]="$NTP_SERVICE"
       )
 
       write_evidence_report_bundle ntp_data "$report_file" "ntp"
@@ -5850,32 +6323,142 @@ cmd_audit() {
   require_backup_env
 
   local -A opts=()
-  parse_opts_into opts "report-file: report daily restore-drill tester: ciso: rto: target:" -- "$@"
-  local report_file="${opts[report-file]:-}"
+  parse_opts_into opts "report-file: path: report daily restore-drill ntp tester: ciso: rto: target: drill-restore-dir: audit-tester: audit-ciso: audit-rto:" -- "$@"
+  local report_file_val="${opts[report-file]:-}"
+  local report_path_val="${opts[path]:-}"
   local report="${opts[report]:-0}"
   local daily="${opts[daily]:-0}"
   local restore_drill="${opts[restore-drill]:-0}"
+  local ntp="${opts[ntp]:-0}"
 
-  if (( daily && restore_drill )); then
-    die "--daily와 --restore-drill 옵션은 동시에 사용할 수 없습니다."
+  local save_reports=0
+  if (( report )) || [[ -n "$report_file_val" ]]; then
+    save_reports=1
   fi
 
-  local date_suffix; date_suffix=$(date +%Y%m%d)
-  if (( report )) && [[ -z "$report_file" ]]; then
-    if (( daily )); then
-      report_file="/data/backup/reports/daily_backup_audit_report_${date_suffix}.txt"
-    elif (( restore_drill )); then
-      report_file="/data/backup/reports/restore_drill_report_${date_suffix}.txt"
-    else
-      report_file="/data/backup/reports/audit_report.txt"
+  if (( save_reports == 0 )); then
+    if (( daily && restore_drill )); then
+      die "--daily와 --restore-drill 옵션은 동시에 사용할 수 없습니다."
+    fi
+    if (( daily && ntp )); then
+      die "--daily와 --ntp 옵션은 동시에 사용할 수 없습니다."
+    fi
+    if (( restore_drill && ntp )); then
+      die "--restore-drill과 --ntp 옵션은 동시에 사용할 수 없습니다."
     fi
   fi
 
-  if (( restore_drill )); then
-    local tester; tester=$(resolve_value "${opts[tester]:-}" "${BACKUP_AUDIT_TESTER:-}" "" "홍길동 (인프라보안팀 선임연구원)")
-    local ciso; ciso=$(resolve_value "${opts[ciso]:-}" "${BACKUP_AUDIT_CISO:-}" "" "이몽룡 (정보보안책임자 CISO)")
-    local rto; rto=$(resolve_value "${opts[rto]:-}" "${BACKUP_AUDIT_RTO:-}" "" "120")
-    local target_dir="${opts[target]:-/tmp/restore_test}"
+  local run_general=0
+  local run_daily=0
+  local run_restore_drill=0
+  local run_ntp=0
+
+  if (( daily == 0 && restore_drill == 0 && ntp == 0 )); then
+    if (( report )); then
+      run_general=1
+      run_daily=1
+      run_restore_drill=1
+      run_ntp=1
+    else
+      run_general=1
+    fi
+  else
+    run_daily=$daily
+    run_restore_drill=$restore_drill
+    run_ntp=$ntp
+  fi
+
+  local report_dir=""
+  if [[ -n "$report_path_val" ]]; then
+    report_dir="$report_path_val"
+  elif [[ -n "$report_file_val" ]]; then
+    report_dir=$(dirname "$report_file_val")
+  else
+    report_dir=$(resolve_value BACKUP_REPORTS_DIR "/data/backup/reports")
+  fi
+
+  local date_suffix; date_suffix=$(date +%Y%m%d)
+
+  local tester_override="${opts[audit-tester]:-${opts[tester]:-}}"
+  local ciso_override="${opts[audit-ciso]:-${opts[ciso]:-}}"
+  local rto_override="${opts[audit-rto]:-${opts[rto]:-}}"
+  local drill_restore_dir_override="${opts[drill-restore-dir]:-${opts[target]:-}}"
+
+  local daily_file="${report_dir}/daily_backup_audit_report_${date_suffix}.txt"
+  if [[ -n "$report_file_val" ]] && (( run_daily && run_general == 0 && run_restore_drill == 0 && run_ntp == 0 )); then
+    daily_file="$report_file_val"
+  fi
+
+  local drill_file="${report_dir}/restore_drill_report_${date_suffix}.txt"
+  if [[ -n "$report_file_val" ]] && (( run_restore_drill && run_general == 0 && run_daily == 0 && run_ntp == 0 )); then
+    drill_file="$report_file_val"
+  fi
+
+  local ntp_file="${report_dir}/ntp_sync_evidence_${date_suffix}.txt"
+  if [[ -n "$report_file_val" ]] && (( run_ntp && run_general == 0 && run_daily == 0 && run_restore_drill == 0 )); then
+    ntp_file="$report_file_val"
+  fi
+
+  local general_file="${report_dir}/audit_report.txt"
+  if [[ -n "$report_file_val" ]] && (( run_general )); then
+    general_file="$report_file_val"
+  fi
+
+  local -a saved_files=()
+
+  # ----------------------------------------------------
+  # [1] NTP Sync Report
+  # ----------------------------------------------------
+  if (( run_ntp )); then
+    local NTP_SERVICE NTP_CONF_PATH
+    detect_ntp_service
+
+    local svc_enabled svc_active sources_out tracking_out conf_perm_out
+    svc_enabled=$(systemctl is-enabled "$NTP_SERVICE" 2>/dev/null || echo "unknown")
+    svc_active=$(systemctl is-active "$NTP_SERVICE" 2>/dev/null || echo "unknown")
+    if [[ "$NTP_SERVICE" == "chronyd" ]]; then
+      sources_out=$(chronyc sources -v 2>/dev/null || echo "(chronyc 실행 불가)")
+      tracking_out=$(chronyc tracking 2>/dev/null || echo "(chronyc 실행 불가)")
+    else
+      sources_out=$(ntpq -p 2>/dev/null || echo "(ntpq 실행 불가)")
+      tracking_out=$(ntpq -c rv 2>/dev/null || echo "(ntpq 실행 불가)")
+    fi
+    conf_perm_out=$(ls -l "$NTP_CONF_PATH" 2>/dev/null || echo "(파일 없음)")
+
+    local report_date; report_date=$(date '+%Y-%m-%d %H:%M:%S %Z')
+    local hostname_val; hostname_val=$(hostname 2>/dev/null || echo "unknown")
+
+    # nameref 인자로 전달되어 정적 분석기에서 미사용으로 오탐지 우회
+    # shellcheck disable=SC2034
+    local -A ntp_data=(
+      [hostname]="$hostname_val"
+      [report_date]="$report_date"
+      [service_enabled]="$svc_enabled"
+      [service_active]="$svc_active"
+      [sources_output]="$sources_out"
+      [tracking_output]="$tracking_out"
+      [conf_perm]="$conf_perm_out"
+      [ntp_service]="$NTP_SERVICE"
+    )
+
+    if (( report == 0 )) && [[ -z "$report_file_val" ]]; then
+      render_ntp_txt ntp_data
+    fi
+
+    if (( save_reports )); then
+      write_evidence_report_bundle ntp_data "$ntp_file" "ntp"
+      saved_files+=("$ntp_file" "${ntp_file%.*}.json" "${ntp_file%.*}.html")
+    fi
+  fi
+
+  # ----------------------------------------------------
+  # [2] Restore Drill Report
+  # ----------------------------------------------------
+  if (( run_restore_drill )); then
+    local tester; tester=$(resolve_value "$tester_override" "${BACKUP_AUDIT_TESTER:-}" "" "홍길동 (인프라보안팀 선임연구원)")
+    local ciso; ciso=$(resolve_value "$ciso_override" "${BACKUP_AUDIT_CISO:-}" "" "이몽룡 (정보보안책임자 CISO)")
+    local rto; rto=$(resolve_value "$rto_override" "${BACKUP_AUDIT_RTO:-}" "" "120")
+    local target_dir="${drill_restore_dir_override:-/tmp/restore_test}"
 
     # nameref 인자로 전달되어 정적 분석기에서 미사용으로 오탐지 우회
     # shellcheck disable=SC2034
@@ -5894,42 +6477,27 @@ cmd_audit() {
       die "${drill_res[error_message]}"
     fi
 
-    render_restore_drill_report drill_res
-
-    if [[ -n "$report_file" ]]; then
-      mkdir -p "$(dirname "$report_file")"
-      chmod 700 "$(dirname "$report_file")" 2>/dev/null || true
-      
-      write_audit_reports drill_res "$report_file"
-
-      local base_path
-      if [[ "$report_file" == *.md ]]; then
-        base_path="${report_file%.md}"
-      elif [[ "$report_file" == *.txt ]]; then
-        base_path="${report_file%.txt}"
-      else
-        base_path="$report_file"
-      fi
-
-      log_info "감사 보고서가 동시 저장되었습니다:"
-      log_info "  - 텍스트 보고서: $report_file"
-      log_info "  - JSON 보고서: ${base_path}.json"
-      log_info "  - HTML 보고서: ${base_path}.html"
+    if (( report == 0 )) && [[ -z "$report_file_val" ]]; then
+      render_restore_drill_report drill_res
     fi
 
-    return 0
+    if (( save_reports )); then
+      write_audit_reports drill_res "$drill_file"
+      saved_files+=("$drill_file" "${drill_file%.*}.json" "${drill_file%.*}.html")
+    fi
   fi
 
-
-  if (( daily )); then
-    local tester; tester=$(resolve_value "${opts[tester]:-}" "${BACKUP_AUDIT_TESTER:-}" "" "인프라보안팀 (시스템 자동 실행)")
+  # ----------------------------------------------------
+  # [3] Daily Backup Review Report
+  # ----------------------------------------------------
+  if (( run_daily )); then
+    local tester; tester=$(resolve_value "$tester_override" "${BACKUP_AUDIT_TESTER:-}" "" "인프라보안팀 (시스템 자동 실행)")
     local hostname_val; hostname_val=$(hostname 2>/dev/null || echo "unknown")
     local cur_time; cur_time=$(date "+%Y-%m-%d %H:%M:%S KST")
-    
+
     local snapshots_json
     snapshots_json=$(restic snapshots --json 2>/dev/null || echo "[]")
-    
-    # Calculate daily/weekly/monthly snapshot counts
+
     local counts
     counts=$(python3 -c '
 import sys, json, datetime
@@ -5958,41 +6526,36 @@ try:
 except Exception:
     print("0 0 0")
 ' <<< "$snapshots_json")
-    
+
     local actual_daily actual_weekly actual_monthly
     read -r actual_daily actual_weekly actual_monthly <<< "$counts"
-    
-    # Check retention satisfaction (baseline: daily>=7, weekly>=4, monthly>=12)
+
     local config_daily="${KEEP_DAILY:-0}"
     local config_weekly="${KEEP_WEEKLY:-0}"
     local config_monthly="${KEEP_MONTHLY:-0}"
-    
+
     local config_daily_status="미흡"; [[ "$config_daily" -ge 7 ]] && config_daily_status="만족"
     local actual_daily_status="미흡"; [[ "$actual_daily" -ge 7 ]] && actual_daily_status="만족"
     local config_weekly_status="미흡"; [[ "$config_weekly" -ge 4 ]] && config_weekly_status="만족"
     local actual_weekly_status="미흡"; [[ "$actual_weekly" -ge 4 ]] && actual_weekly_status="만족"
     local config_monthly_status="미흡"; [[ "$config_monthly" -ge 12 ]] && config_monthly_status="만족"
     local actual_monthly_status="미흡"; [[ "$actual_monthly" -ge 12 ]] && actual_monthly_status="만족"
-    
-    # Permissions
+
     local etc_perm; etc_perm="$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '700')"
     local env_perm; env_perm="$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '600')"
     local etc_safe_str="미흡"; [[ "$etc_perm" == "700" ]] && etc_safe_str="만족"
     local env_safe_str="미흡"; [[ "$env_perm" == "600" ]] && env_safe_str="만족"
-    
-    # Restic Integrity Check
+
     local check_status="미흡"
     if restic check >/dev/null 2>&1; then
       check_status="만족"
     fi
-    
-    # Backend detection
+
     local backend="s3"
     if [[ -n "${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" ]]; then
       backend="sftp"
     fi
-    
-    # Snapshot Table (last 3)
+
     local snapshot_table
     snapshot_table=$(python3 -c '
 import sys, json, subprocess
@@ -6011,28 +6574,28 @@ try:
         time_str = snap.get("time", "")[:19].replace("T", " ")
         host = snap.get("hostname", "")
         paths = ", ".join(snap.get("paths", []))
-        b = None
+        processed_bytes = None
         summary = snap.get("summary")
         if isinstance(summary, dict) and "total_bytes_processed" in summary:
-            b = summary["total_bytes_processed"]
-        if b is None:
+            processed_bytes = summary["total_bytes_processed"]
+        if processed_bytes is None:
             try:
                 res = subprocess.run(["restic", "stats", "--json", snap.get("id")], capture_output=True, text=True, timeout=5)
                 if res.returncode == 0:
                     stats_data = json.loads(res.stdout)
-                    b = stats_data.get("total_size")
+                    processed_bytes = stats_data.get("total_size")
             except Exception:
                 pass
         size_str = ""
-        if b is not None:
-            if b >= 1073741824:
-                size_str = " (%.2f GB)" % (b / 1073741824.0)
-            elif b >= 1048576:
-                size_str = " (%.2f MB)" % (b / 1048576.0)
-            elif b >= 1024:
-                size_str = " (%.2f KB)" % (b / 1024.0)
+        if processed_bytes is not None:
+            if processed_bytes >= 1073741824:
+                size_str = " (%.2f GB)" % (processed_bytes / 1073741824.0)
+            elif processed_bytes >= 1048576:
+                size_str = " (%.2f MB)" % (processed_bytes / 1048576.0)
+            elif processed_bytes >= 1024:
+                size_str = " (%.2f KB)" % (processed_bytes / 1024.0)
             else:
-                size_str = " (%d B)" % b
+                size_str = " (%d B)" % processed_bytes
         else:
             size_str = " (크기 확인 불가)"
         print("  %-10s  %-19s  %-18s  %s%s" % (sid, time_str, host, paths, size_str))
@@ -6040,53 +6603,9 @@ except Exception as e:
     print("  (스냅샷 정보 해석 실패: %s)" % e)
 ' <<< "$snapshots_json")
 
-    # Generate HTML snapshot table
-    local snapshot_table_html
-    snapshot_table_html=$(python3 -c '
-import sys, json, subprocess
-try:
-    content = sys.stdin.read().strip()
-    if not content or content == "[]":
-        print("<tr><td colspan=\"4\">(스냅샷 없음)</td></tr>")
-        sys.exit(0)
-    data = json.loads(content)
-    data.sort(key=lambda x: x.get("time", ""), reverse=True)
-    recent = data[:3]
-    for snap in recent:
-        sid = snap.get("short_id", snap.get("id", "")[:8])
-        time_str = snap.get("time", "")[:19].replace("T", " ")
-        host = snap.get("hostname", "")
-        paths = ", ".join(snap.get("paths", []))
-        b = None
-        summary = snap.get("summary")
-        if isinstance(summary, dict) and "total_bytes_processed" in summary:
-            b = summary["total_bytes_processed"]
-        if b is None:
-            try:
-                res = subprocess.run(["restic", "stats", "--json", snap.get("id")], capture_output=True, text=True, timeout=5)
-                if res.returncode == 0:
-                    stats_data = json.loads(res.stdout)
-                    b = stats_data.get("total_size")
-            except Exception:
-                pass
-        size_str = ""
-        if b is not None:
-            if b >= 1073741824:
-                size_str = "%.2f GB" % (b / 1073741824.0)
-            elif b >= 1048576:
-                size_str = "%.2f MB" % (b / 1048576.0)
-            elif b >= 1024:
-                size_str = "%.2f KB" % (b / 1024.0)
-            else:
-                size_str = "%d B" % b
-        else:
-            size_str = "확인 불가"
-        print("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s (%s)</td></tr>" % (sid, time_str, host, paths, size_str))
-except Exception as e:
-    print("<tr><td colspan=\"4\">(스냅샷 정보 해석 실패: %s)</td></tr>" % e)
-' <<< "$snapshots_json")
+    local snapshot_table_html; snapshot_table_html=$(generate_snapshot_table_html "$snapshots_json")
 
-    # nameref 전달용 daily 데이터 조립
+    # nameref 인자로 전달되어 정적 분석기에서 미사용으로 오탐지 우회
     # shellcheck disable=SC2034
     local -A daily_data=(
       [cur_time]="$cur_time"
@@ -6119,163 +6638,105 @@ except Exception as e:
       [snapshots_json]="$snapshots_json"
     )
 
-    render_daily_audit_report "$cur_time" "$hostname_val" "$tester" "$backend" "$RESTIC_REPOSITORY" \
-      "$BACKUP_TARGETS" "$config_daily" "$actual_daily" "$config_daily_status" "$actual_daily_status" \
-      "$config_weekly" "$actual_weekly" "$config_weekly_status" "$actual_weekly_status" \
-      "$config_monthly" "$actual_monthly" "$config_monthly_status" "$actual_monthly_status" \
-      "$RESTIC_ETC_DIR" "$etc_perm" "$etc_safe_str" "$BACKUP_ENV_FILE" "$env_perm" "$env_safe_str" \
-      "$check_status" "$snapshot_table"
-
-    if [[ -n "$report_file" ]]; then
-      write_evidence_report_bundle daily_data "$report_file" "daily"
-
-      local base_path
-      if [[ "$report_file" =~ \.(txt|md)$ ]]; then
-        base_path="${report_file%.*}"
-      else
-        base_path="$report_file"
-      fi
-
-      log_info "감사 보고서가 동시 저장되었습니다:"
-      log_info "  - 텍스트 보고서: $report_file"
-      log_info "  - JSON 보고서: ${base_path}.json"
-      log_info "  - HTML 보고서: ${base_path}.html"
+    if (( report == 0 )) && [[ -z "$report_file_val" ]]; then
+      render_daily_audit_report daily_data
     fi
 
-    return 0
+    if (( save_reports )); then
+      write_evidence_report_bundle daily_data "$daily_file" "daily"
+      saved_files+=("$daily_file" "${daily_file%.*}.json" "${daily_file%.*}.html")
+    fi
   fi
 
-  if (( report )) && [[ -z "$report_file" ]]; then
-    report_file="/data/backup/reports/audit_report.txt"
-  fi
+  # ----------------------------------------------------
+  # [4] General Audit Report
+  # ----------------------------------------------------
+  if (( run_general )); then
+    local profile_name; profile_name=$(resolve_profile_name)
+    local timer_unit; timer_unit=$(resticprofile_timer_unit_name "$profile_name")
 
-  local profile_name; profile_name=$(resolve_profile_name)
-  local timer_unit; timer_unit=$(resticprofile_timer_unit_name "$profile_name")
+    local timer_enabled; timer_enabled=$(systemctl is-enabled "$timer_unit" 2>/dev/null || echo "unknown")
+    local timer_active; timer_active=$(systemctl is-active "$timer_unit" 2>/dev/null || echo "unknown")
+    local next_run
+    next_run=$(systemctl list-timers "$timer_unit" --no-legend 2>/dev/null | awk '{print $1, $2, $3, $4}') || true
 
-  local timer_enabled; timer_enabled=$(systemctl is-enabled "$timer_unit" 2>/dev/null) || true
-  local timer_active; timer_active=$(systemctl is-active "$timer_unit" 2>/dev/null) || true
-  local next_run
-  next_run=$(systemctl list-timers "$timer_unit" --no-legend 2>/dev/null | awk '{print $1, $2, $3, $4}') || true
+    local on_calendar
+    on_calendar=$(systemctl cat "$timer_unit" 2>/dev/null | sed -n 's/^OnCalendar=//p' | head -1) || true
 
-  local on_calendar
-  on_calendar=$(systemctl cat "$timer_unit" 2>/dev/null | sed -n 's/^OnCalendar=//p' | head -1) || true
+    local backend="s3"
+    if [[ -n "${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" ]]; then
+      backend="sftp"
+    fi
 
-  local backend="s3"
-  if [[ -n "${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" ]]; then
-    backend="sftp"
-  fi
+    local etc_perm; etc_perm="$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '?')"
+    local env_perm; env_perm="$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '?')"
 
-  local etc_perm; etc_perm="$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '?')"
-  local env_perm; env_perm="$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '?')"
-
-  # Always print to screen
-  render_audit_report "$backend" "${on_calendar:-알 수 없음}" "${timer_enabled:-unknown}" \
-    "${timer_active:-unknown}" "${next_run:-알 수 없음}" \
-    "$etc_perm" "$env_perm"
-
-  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-    setup_colors
-    printf '\n%b⚙  백업 이력(restic snapshots)%b\n' "${C_CYAN}${C_BOLD}" "${C_RESET}"
-    restic snapshots 2>/dev/null | sed 's/^/  /' || printf '  (조회 실패 또는 미초기화)\n'
-  else
-    printf '\n=== 백업 이력(restic snapshots) ===\n'
-    restic snapshots 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
-  fi
-
-  # If report_file is requested, save both plain text and JSON versions
-  if [[ -n "$report_file" ]]; then
-    mkdir -p "$(dirname "$report_file")"
-    chmod 700 "$(dirname "$report_file")" 2>/dev/null || true
-
-    # Save plain text report
-    (
+    # Always print to screen
+    if (( report == 0 )) && [[ -z "$report_file_val" ]]; then
       render_audit_report "$backend" "${on_calendar:-알 수 없음}" "${timer_enabled:-unknown}" \
         "${timer_active:-unknown}" "${next_run:-알 수 없음}" \
         "$etc_perm" "$env_perm"
-      printf '\n=== 백업 이력(restic snapshots) ===\n'
-      restic snapshots 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
-    ) > "$report_file"
-    chmod 600 "$report_file"
 
-    # Save JSON report
-    local json_report_file
-    if [[ "$report_file" =~ \.(txt|md)$ ]]; then
-      json_report_file="${report_file%.*}.json"
-    else
-      json_report_file="${report_file}.json"
+      if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+        setup_colors
+        printf '\n%b⚙  백업 이력(restic snapshots)%b\n' "${C_CYAN}${C_BOLD}" "${C_RESET}"
+        restic snapshots 2>/dev/null | sed 's/^/  /' || printf '  (조회 실패 또는 미초기화)\n'
+      else
+        printf '\n=== 백업 이력(restic snapshots) ===\n'
+        restic snapshots 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
+      fi
     fi
 
-    render_audit_report_json "$backend" "${on_calendar:-알 수 없음}" "${timer_enabled:-unknown}" \
-      "${timer_active:-unknown}" "${next_run:-알 수 없음}" \
-      "$etc_perm" "$env_perm" > "$json_report_file"
-    chmod 600 "$json_report_file"
+    # If report_file is requested, save both plain text and JSON versions
+    if (( save_reports )); then
+      mkdir -p "$(dirname "$general_file")"
+      chmod 700 "$(dirname "$general_file")" 2>/dev/null || true
 
-    # Generate HTML snapshot table
-    local snapshots_json
-    snapshots_json=$(restic snapshots --json 2>/dev/null || echo "[]")
-    
-    local snapshot_table_html
-    snapshot_table_html=$(python3 -c '
-import sys, json, subprocess
-try:
-    content = sys.stdin.read().strip()
-    if not content or content == "[]":
-        print("<tr><td colspan=\"4\">(스냅샷 없음)</td></tr>")
-        sys.exit(0)
-    data = json.loads(content)
-    data.sort(key=lambda x: x.get("time", ""), reverse=True)
-    recent = data[:3]
-    for snap in recent:
-        sid = snap.get("short_id", snap.get("id", "")[:8])
-        time_str = snap.get("time", "")[:19].replace("T", " ")
-        host = snap.get("hostname", "")
-        paths = ", ".join(snap.get("paths", []))
-        b = None
-        summary = snap.get("summary")
-        if isinstance(summary, dict) and "total_bytes_processed" in summary:
-            b = summary["total_bytes_processed"]
-        if b is None:
-            try:
-                res = subprocess.run(["restic", "stats", "--json", snap.get("id")], capture_output=True, text=True, timeout=5)
-                if res.returncode == 0:
-                    stats_data = json.loads(res.stdout)
-                    b = stats_data.get("total_size")
-            except Exception:
-                pass
-        size_str = ""
-        if b is not None:
-            if b >= 1073741824:
-                size_str = "%.2f GB" % (b / 1073741824.0)
-            elif b >= 1048576:
-                size_str = "%.2f MB" % (b / 1048576.0)
-            elif b >= 1024:
-                size_str = "%.2f KB" % (b / 1024.0)
-            else:
-                size_str = "%d B" % b
-        else:
-            size_str = "확인 불가"
-        print("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s (%s)</td></tr>" % (sid, time_str, host, paths, size_str))
-except Exception as e:
-    print("<tr><td colspan=\"4\">(스냅샷 정보 해석 실패: %s)</td></tr>" % e)
-' <<< "$snapshots_json")
+      # Save plain text report
+      (
+        render_audit_report "$backend" "${on_calendar:-알 수 없음}" "${timer_enabled:-unknown}" \
+          "${timer_active:-unknown}" "${next_run:-알 수 없음}" \
+          "$etc_perm" "$env_perm"
+        printf '\n=== 백업 이력(restic snapshots) ===\n'
+        restic snapshots 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
+      ) > "$general_file"
+      chmod 600 "$general_file"
 
-    # Save HTML report
-    local html_report_file
-    if [[ "$report_file" =~ \.(txt|md)$ ]]; then
-      html_report_file="${report_file%.*}.html"
-    else
-      html_report_file="${report_file}.html"
+      # Save JSON report
+      local json_general_file="${general_file%.*}.json"
+      render_audit_report_json "$backend" "${on_calendar:-알 수 없음}" "${timer_enabled:-unknown}" \
+        "${timer_active:-unknown}" "${next_run:-알 수 없음}" \
+        "$etc_perm" "$env_perm" > "$json_general_file"
+      chmod 600 "$json_general_file"
+
+      # Generate HTML snapshot table
+      local snapshots_json
+      snapshots_json=$(restic snapshots --json 2>/dev/null || echo "[]")
+      local snapshot_table_html; snapshot_table_html=$(generate_snapshot_table_html "$snapshots_json")
+
+      # Save HTML report
+      local html_general_file="${general_file%.*}.html"
+      render_audit_report_html "$backend" "${on_calendar:-알 수 없음}" "${timer_enabled:-unknown}" \
+        "${timer_active:-unknown}" "${next_run:-알 수 없음}" \
+        "$etc_perm" "$env_perm" "$snapshot_table_html" > "$html_general_file"
+      chmod 600 "$html_general_file"
+
+      saved_files+=("$general_file" "$json_general_file" "$html_general_file")
     fi
+  fi
 
-    render_audit_report_html "$backend" "${on_calendar:-알 수 없음}" "${timer_enabled:-unknown}" \
-      "${timer_active:-unknown}" "${next_run:-알 수 없음}" \
-      "$etc_perm" "$env_perm" "$snapshot_table_html" > "$html_report_file"
-    chmod 600 "$html_report_file"
-
+  # ----------------------------------------------------
+  # [5] Print final status message if report generated
+  # ----------------------------------------------------
+  if (( save_reports )) && (( ${#saved_files[@]} > 0 )); then
     log_info "감사 보고서가 동시 저장되었습니다:"
-    log_info "  - 텍스트 보고서: $report_file"
-    log_info "  - JSON 보고서: $json_report_file"
-    log_info "  - HTML 보고서: $html_report_file"
+    log_info "  - 저장 경로: $report_dir"
+    local items=""
+    (( run_general )) && items="${items:+$items, }종합(audit_report)"
+    (( run_daily )) && items="${items:+$items, }일일(daily_backup_audit_report)"
+    (( run_restore_drill )) && items="${items:+$items, }복구훈련(restore_drill_report)"
+    (( run_ntp )) && items="${items:+$items, }시간동기화(ntp_sync_evidence)"
+    log_info "  - 생성 항목: $items"
   fi
 }
 
@@ -7665,15 +8126,20 @@ ISMS 및 ISO 27001 등 보안 컴플라이언스 대응을 위한 종합 백업 
   # 복구 모의훈련 수행 및 결과보고서를 자동 생성 및 저장
   backup.sh audit --restore-drill --report
 
+  # 모든 감사 보고서(종합, 일일, 복구훈련, NTP)를 지정한 디렉터리에 생성 및 저장
+  backup.sh audit --report --path /mnt/backup_reports
+
 플래그 (Flags):
-      --report              보고서 파일 생성 여부를 지정합니다. (자동으로 확장자를 .json, .html로 변환한 보고서도 함께 동시 저장됩니다)
+      --report              보고서 파일 생성 여부를 지정합니다.
       --report-file <경로>   생성될 텍스트 보고서 파일의 경로를 직접 지정합니다.
+      --path <경로>          생성될 보고서 파일들이 저장될 디렉터리 경로를 지정합니다. (기본값: /data/backup/reports)
       --daily               일일 백업 검토 보고서 모드로 실행합니다.
       --restore-drill       복구 모의훈련 보고서 모드로 실행합니다. (실제 복구 다운로드 수행 및 정합성 쿼리 테스트 트리거)
-      --tester <이름>        일일 백업 검토 및 복구 모의훈련 담당자 이름 (설정 파일값 무시하고 임시 지정)
-      --ciso <이름>          보고서 최종 승인 정보보안책임자 이름 (설정 파일값 무시하고 임시 지정)
-      --rto <분>             복구 목표 시간(RTO, 분 단위) (설정 파일값 무시하고 임시 지정)
-      --target <경로>        복구 모의훈련 시 임시 다운로드 및 쿼리 테스트를 수행할 임시 디렉터리 경로 (기본값: /tmp/restore_test)
+      --ntp                 NTP 시각 동기화 점검 보고서 모드로 실행합니다.
+      --audit-tester <이름> 일일 백업 검토 및 복구 모의훈련 담당자 이름 (설정 파일값 무시하고 임시 지정, Alias: --tester)
+      --audit-ciso <이름>   보고서 최종 승인 정보보안책임자 이름 (설정 파일값 무시하고 임시 지정, Alias: --ciso)
+      --audit-rto <분>      복구 목표 시간(RTO, 분 단위) (설정 파일값 무시하고 임시 지정, Alias: --rto)
+      --drill-restore-dir <경로> 복구 모의훈련 시 임시 다운로드 및 쿼리 테스트를 수행할 임시 디렉터리 경로 (기본값: /tmp/restore_test, Alias: --target)
 
 글로벌 플래그 (Global Flags):
   -v, --verbose             디버깅용 상세 로그 출력

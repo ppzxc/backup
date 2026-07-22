@@ -180,3 +180,75 @@ ENV
   [[ "$output" == *"ISMS-P 2.9.3"* ]]
   [[ "$output" == *"test-host"* ]]
 }
+
+@test "cmd_ntp setup under ntpd environment writes ntp.conf and restarts ntpd" {
+  export MOCK_NTP_SERVICE="ntpd"
+  # Remove chronyc stub from STUB_BIN to avoid chrony auto-detection
+  rm -f "${STUB_BIN}/chronyc"
+  
+  # Stub ntpq
+  stub_command "ntpq" 'echo "ntpq $*"'
+  
+  # Stub systemctl to list ntpd.service and log restart calls
+  stub_command "systemctl" '
+    if [[ "$*" == *"list-unit-files"* ]]; then
+      echo "ntpd.service enabled"
+    elif [[ "$*" == *"restart ntpd"* ]]; then
+      echo "systemctl restart ntpd" >> "'"${STUB_BIN}"'/systemctl.calls"
+    elif [[ "$*" == *"is-enabled ntpd"* || "$*" == *"is-active ntpd"* ]]; then
+      echo "active"
+    fi
+    exit 0
+  '
+
+  run cmd_ntp setup
+  [ "$status" -eq 0 ]
+
+  # NTP_CONF_PATH should be resolved to TEST_ROOT/etc/ntp.conf
+  local expected_ntp_conf="${TEST_ROOT}/etc/ntp.conf"
+  [ -f "$expected_ntp_conf" ]
+  grep -q "time.krnic.net" "$expected_ntp_conf"
+
+  # Check that restart ntpd was called
+  grep -q "restart ntpd" "${STUB_BIN}/systemctl.calls"
+}
+
+@test "cmd_ntp --report under ntpd environment uses ntpq and renders ntpq titles" {
+  export MOCK_NTP_SERVICE="ntpd"
+  rm -f "${STUB_BIN}/chronyc"
+  stub_command "ntpq" '
+    if [[ "$*" == "-p" ]]; then
+      echo "remote refid"
+      echo "*time.krnic.net .GPS."
+    elif [[ "$*" == "-c rv" ]]; then
+      echo "associd=0 status=0615 source_ip=... stratum=2 leap_none"
+    fi
+  '
+  stub_command "systemctl" '
+    if [[ "$*" == *"is-enabled"* ]]; then
+      echo "enabled"
+    elif [[ "$*" == *"is-active"* ]]; then
+      echo "active"
+    fi
+    exit 0
+  '
+
+  cat >> "$BACKUP_ENV_FILE" <<'ENV'
+export BACKUP_NTP_REPORT='1'
+ENV
+  export BACKUP_REPORTS_DIR="${TEST_ROOT}/data/backup/reports"
+  run cmd_ntp --report
+  [ "$status" -eq 0 ]
+
+  local date_suffix; date_suffix=$(date +%Y%m%d)
+  local report_file="${BACKUP_REPORTS_DIR}/ntp_sync_evidence_${date_suffix}.txt"
+  [ -f "$report_file" ]
+
+  run grep -F "ntpq -p" "$report_file"
+  [ "$status" -eq 0 ]
+  run grep -F "ntpq -c rv" "$report_file"
+  [ "$status" -eq 0 ]
+  run grep -F "*time.krnic.net" "$report_file"
+  [ "$status" -eq 0 ]
+}
+

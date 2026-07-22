@@ -463,6 +463,79 @@ ENV
   [[ "$output" == *"- 대상 호스트: test-host"* ]]
 }
 
+@test "cmd_audit accepts new ubiquitous flags and aliases" {
+  run cmd_audit --restore-drill --audit-tester "유비쿼터스테스터" --audit-ciso "유비쿼터스CISO" --audit-rto 90 --drill-restore-dir "/tmp/ubiquitous_test"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"훈련 담당: 유비쿼터스테스터"* ]]
+  [[ "$output" == *"승인자: 유비쿼터스CISO"* ]]
+  [[ "$output" == *"RTO 기준 90분"* ]]
+}
+
+@test "cmd_audit --ntp outputs chrony time sync status" {
+  run cmd_audit --ntp
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[보안 감사 증적] ISMS-P 2.9.3 시각 동기화 점검 보고서"* ]]
+  [[ "$output" == *"NTP 시각 동기화 서비스 상태"* ]]
+}
+
+@test "cmd_audit --report --path writes all four reports to directory" {
+  local report_dir="${TEST_ROOT}/reports_dir"
+  mkdir -p "$report_dir"
+
+  run cmd_audit --report --path "$report_dir"
+  [ "$status" -eq 0 ]
+  
+  local date_suffix; date_suffix=$(date +%Y%m%d)
+  
+  # 1. General report
+  [ -f "${report_dir}/audit_report.txt" ]
+  [ -f "${report_dir}/audit_report.json" ]
+  [ -f "${report_dir}/audit_report.html" ]
+
+  # 2. Daily report
+  [ -f "${report_dir}/daily_backup_audit_report_${date_suffix}.txt" ]
+  [ -f "${report_dir}/daily_backup_audit_report_${date_suffix}.json" ]
+  [ -f "${report_dir}/daily_backup_audit_report_${date_suffix}.html" ]
+
+  # 3. Restore drill report
+  [ -f "${report_dir}/restore_drill_report_${date_suffix}.txt" ]
+  [ -f "${report_dir}/restore_drill_report_${date_suffix}.json" ]
+  [ -f "${report_dir}/restore_drill_report_${date_suffix}.html" ]
+
+  # 4. NTP report
+  [ -f "${report_dir}/ntp_sync_evidence_${date_suffix}.txt" ]
+  [ -f "${report_dir}/ntp_sync_evidence_${date_suffix}.json" ]
+  [ -f "${report_dir}/ntp_sync_evidence_${date_suffix}.html" ]
+}
+
+@test "cmd_audit --ntp under ntpd environment outputs ntpq status and evidence" {
+  export MOCK_NTP_SERVICE="ntpd"
+  stub_command "ntpq" '
+    if [[ "$*" == "-p" ]]; then
+      echo "remote refid"
+      echo "*time.krnic.net .GPS."
+    elif [[ "$*" == "-c rv" ]]; then
+      echo "associd=0 status=0615 source_ip=... stratum=2 leap_none"
+    fi
+  '
+  stub_command "systemctl" '
+    if [[ "$*" == *"is-enabled"* ]]; then
+      echo "enabled"
+    elif [[ "$*" == *"is-active"* ]]; then
+      echo "active"
+    fi
+    exit 0
+  '
+
+  run cmd_audit --ntp
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[보안 감사 증적] ISMS-P 2.9.3 시각 동기화 점검 보고서"* ]]
+  [[ "$output" == *"ntpq -p"* ]]
+  [[ "$output" == *"ntpq -c rv"* ]]
+  [[ "$output" == *"*time.krnic.net"* ]]
+}
+
+
 
 
 
