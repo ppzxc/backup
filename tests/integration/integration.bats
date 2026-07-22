@@ -479,3 +479,124 @@ seed_databases() {
   [ "$status" -eq 0 ]
 }
 
+# 12. Failover: Dual Audit fallback to Secondary when Primary is unreachable
+@test "Failover: Dual Audit fallback to Secondary when Primary is unreachable" {
+  dc_exec exec -T minio mc mb -p local/restic-test-primary-failover || true
+  dc_exec exec -T sftp sh -c 'rm -rf /home/backup_migrate/backup/*'
+
+  dexec "bash backup.sh setting --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test-primary-failover \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --password test-repo-password \
+    --secondary-backend sftp \
+    --secondary-host sftp --secondary-port 22 --secondary-user backup_migrate \
+    --secondary-password test-sec-password --force"
+
+  register_sftp_keys "backup_migrate"
+  dexec "bash backup.sh init"
+  dexec "bash backup.sh run"
+
+  # Invalidate primary endpoint
+  dexec "sed -i 's|http://minio:9000/restic-test-primary-failover|http://minio:9000/non-existent-bucket|g' /etc/backup/backup.env"
+
+  run dexec "bash backup.sh audit --restore-drill --report-file /tmp/audit_failover.md"
+  dexec "test -f /tmp/audit_failover.md"
+  dexec "grep -q '2차 소산 저장소' /tmp/audit_failover.md"
+}
+
+# 13. Pipeline Resilience: Partial read warning (exit status 3) completes pipeline
+@test "Pipeline Resilience: Partial read warning (exit status 3) completes pipeline" {
+  dc_exec exec -T minio mc mb -p local/restic-test-status3 || true
+  dc_exec exec -T sftp sh -c 'rm -rf /home/backup_migrate/backup/*'
+
+  dexec "mkdir -p /tmp/unreadable_dir && touch /tmp/unreadable_dir/noperm.txt && chmod 000 /tmp/unreadable_dir/noperm.txt"
+
+  dexec "bash backup.sh setting --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test-status3 \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --password test-repo-password \
+    --targets '/tmp/unreadable_dir,/etc' \
+    --secondary-backend sftp \
+    --secondary-host sftp --secondary-port 22 --secondary-user backup_migrate \
+    --secondary-password test-sec-password --force"
+
+  register_sftp_keys "backup_migrate"
+  dexec "bash backup.sh init"
+
+  run dexec "bash backup.sh run"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Warning exit status 3"* || "$output" == *"완료"* ]]
+
+  dexec "chmod 755 /tmp/unreadable_dir && rm -rf /tmp/unreadable_dir"
+}
+
+# 14. Scheduler E2E: systemctl service unit execution
+@test "Scheduler E2E: systemctl service unit execution" {
+  dc_exec exec -T minio mc mb -p local/restic-test-systemd || true
+
+  dexec "bash backup.sh setting --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test-systemd \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --password test-repo-password --force"
+
+  dexec "bash backup.sh init"
+  dexec "bash backup.sh schedule enable"
+
+  local unit_name
+  unit_name=$(dexec "systemctl list-unit-files 'resticprofile-backup@*.service' --no-legend 2>/dev/null | head -n1 | awk '{print \$1}'")
+  if [[ -n "$unit_name" ]]; then
+    dexec "systemctl start '$unit_name' || true"
+  fi
+
+  run dexec "source /etc/backup/backup.env && restic snapshots --json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hostname"* ]]
+
+  dexec "bash backup.sh schedule disable || true"
+}
+
+# 15. Database integration: Custom DB Backup & Dual Audit
+@test "Database integration: Custom DB Backup & Dual Audit" {
+  dc_exec exec -T minio mc mb -p local/restic-test-custom-db || true
+  dc_exec exec -T sftp sh -c 'rm -rf /home/backup_migrate/backup/*'
+
+  dexec "bash backup.sh setting --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test-custom-db \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --password test-repo-password \
+    --secondary-backend sftp \
+    --secondary-host sftp --secondary-port 22 --secondary-user backup_migrate \
+    --secondary-password test-sec-password --force \
+    --db-type custom \
+    --db-command \"echo '-- Custom DB Dump'\" \
+    --db-keep-daily 7 --db-keep-weekly 4 --db-keep-monthly 12 \
+    --db-schedule \"*-*-* 03:00:00\""
+
+  register_sftp_keys "backup_migrate"
+  dexec "bash backup.sh init"
+  dexec "bash backup.sh run"
+
+  dexec "bash backup.sh audit --restore-drill --report-file /tmp/audit_report_custom_db.md"
+  dexec "test -f /tmp/audit_report_custom_db.md"
+  dexec "grep -q '데이터베이스(custom) 복원 무결성 검증: 성공' /tmp/audit_report_custom_db.md"
+}
+
+# 16. Notification: Custom webhook payload generation on run
+@test "Notification: Custom webhook payload generation on run" {
+  dc_exec exec -T minio mc mb -p local/restic-test-notify || true
+
+  dexec "bash backup.sh setting --backend s3 \
+    --endpoint http://minio:9000 --bucket restic-test-notify \
+    --access-key AKIAIOSFODNN7EXAMPLE --secret-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \
+    --password test-repo-password \
+    --notification-url 'http://127.0.0.1:9999/webhook' \
+    --notification-type 'slack' \
+    --notification-on 'both' --force"
+
+  dexec "bash backup.sh init"
+
+  run dexec "bash backup.sh run"
+  [ "$status" -eq 0 ]
+}
+
+
