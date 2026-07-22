@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.45"
+BACKUP_SCRIPT_VERSION="0.0.47"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -110,6 +110,7 @@ declare -A COMPATIBILITY_MAP=(
   ["BACKUP_SFTP_HOST"]="RCLONE_CONFIG_SYNO_BACKUP_HOST"
   ["BACKUP_SFTP_PORT"]="RCLONE_CONFIG_SYNO_BACKUP_PORT"
   ["BACKUP_SFTP_USER"]="RCLONE_CONFIG_SYNO_BACKUP_USER"
+  ["BACKUP_CHRONY_REPORT"]="BACKUP_NTP_REPORT"
 )
 
 # --- Configuration Registry Schema ---
@@ -458,6 +459,63 @@ log_warn() {
 die() {
   log_error "$1"
   exit "${2:-1}"
+}
+
+has_dependency() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+check_system_dependencies() {
+  local missing=()
+  local dep
+  for dep in python3 tar curl logger; do
+    if ! has_dependency "$dep"; then
+      missing+=("$dep")
+    fi
+  done
+
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    local joined
+    joined=$(IFS=,; echo "${missing[*]}")
+    local formatted_missing
+    formatted_missing="${joined//,/, }"
+
+    cat <<EOF >&2
+[!] 필수 시스템 도구가 누락되어 스크립트를 실행할 수 없습니다.
+* 누락된 도구: ${formatted_missing}
+
+다음 커맨드를 실행하여 필요한 패키지를 설치하세요:
+  - Debian/Ubuntu: sudo apt-get update && sudo apt-get install -y python3 tar curl bsdmainutils
+  - RHEL/Rocky/CentOS: sudo yum install -y python3 tar curl util-linux
+EOF
+    exit 1
+  fi
+}
+
+check_core_dependencies() {
+  local missing=()
+  local dep
+  for dep in restic rclone resticprofile; do
+    if ! has_dependency "$dep"; then
+      missing+=("$dep")
+    fi
+  done
+
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    local joined
+    joined=$(IFS=,; echo "${missing[*]}")
+    local formatted_missing
+    formatted_missing="${joined//,/, }"
+
+    cat <<EOF >&2
+[!] 백업 핵심 도구가 누락되어 백업 명령을 실행할 수 없습니다.
+* 누락된 도구: ${formatted_missing}
+
+다음 커맨드를 실행하여 백업 도구를 설치하세요:
+  sudo ./backup.sh install
+EOF
+    exit 1
+  fi
 }
 
 require_root() {
@@ -2662,8 +2720,9 @@ scheduler_mock_register() {
       local db_cal="${BACKUP_DB_SCHEDULE:-$on_cal}"
       printf 'db_backup_schedule=%s\ndb_backup_enabled=1\n' "$db_cal" >> "$state_file"
     fi
-    if [[ "${BACKUP_CHRONY_REPORT:-}" == "1" ]]; then
-      printf 'chrony_report_enabled=1\n' >> "$state_file"
+    local ntp_rep_val="${BACKUP_NTP_REPORT:-${BACKUP_CHRONY_REPORT:-}}"
+    if [[ "$ntp_rep_val" == "1" ]]; then
+      printf 'ntp_report_enabled=1\n' >> "$state_file"
     fi
   fi
 }
@@ -2740,7 +2799,7 @@ scheduler_systemd_register() {
   local drill_on_calendar="${_sys_cfg[on-calendar-drill]:-*-*-01 01:30:00}"
   local daily="${_sys_cfg[daily]:-0}"
   local restore_drill="${_sys_cfg[restore-drill]:-0}"
-  local ntp_report="${_sys_cfg[ntp_report]:-${_sys_cfg[chrony_report]:-${BACKUP_NTP_REPORT:-${BACKUP_CHRONY_REPORT:-}}}}"
+  local ntp_report="${_sys_cfg[ntp_report]:-${BACKUP_NTP_REPORT:-${BACKUP_CHRONY_REPORT:-}}}"
 
   if (( daily )); then
     write_systemd_timer_unit "backup-audit-daily" "Restic Daily Backup Audit Report" "Run Restic Daily Backup Audit Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH audit --daily --report" "$daily_on_calendar"
@@ -2759,6 +2818,13 @@ scheduler_systemd_register() {
     fi
     write_systemd_timer_unit "backup-audit-daily" "Restic Daily Backup Audit Report" "Run Restic Daily Backup Audit Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH audit --daily --report" "$daily_on_calendar"
     write_systemd_timer_unit "backup-audit-restore-drill" "Restic Restore Drill Report" "Run Restic Restore Drill Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH audit --restore-drill --report" "$drill_on_calendar"
+    # 구버전 chrony 타이머 잔재 정리
+    if [[ -f "$SYSTEMD_UNIT_DIR/backup-chrony-report.timer" ]]; then
+      systemd_disable_unit "backup-chrony-report.timer" >/dev/null 2>&1 || true
+      rm -f "$SYSTEMD_UNIT_DIR/backup-chrony-report.service"
+      rm -f "$SYSTEMD_UNIT_DIR/backup-chrony-report.timer"
+    fi
+
     if [[ "$ntp_report" == "1" ]]; then
       write_systemd_timer_unit "backup-ntp-report" "ISMS-P 2.9.3 NTP Sync Evidence Report" "Run ISMS-P NTP Sync Evidence Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH ntp --report" "${DEFAULT_NTP_ON_CALENDAR}"
       systemd_enable_unit "backup-ntp-report.timer"
@@ -6705,6 +6771,26 @@ HELPEOF
 
   require_root
 
+  if [[ -f "$BACKUP_ENV_FILE" ]]; then
+    log_info "기존 설정을 새 버전 규격으로 마이그레이션합니다..."
+    local -A resolved=()
+    local -a errors=()
+    local -A opts=()
+    if load_and_validate_config "" opts resolved errors; then
+      if save_profile_config resolved >/dev/null; then
+        log_info "설정 파일 마이그레이션 완료"
+      else
+        log_warn "설정 파일 마이그레이션 저장 실패"
+      fi
+    else
+      log_warn "기존 설정 검증 실패로 설정 파일 마이그레이션을 건너뜁니다."
+      local e
+      for e in "${errors[@]}"; do
+        log_warn " - ${e}"
+      done
+    fi
+  fi
+
   log_info "최신 스크립트 버전(${BACKUP_SCRIPT_VERSION})으로 설치본을 갱신합니다..."
   self_install_copy "$0" 1
 
@@ -7066,9 +7152,13 @@ cmd_wizard() {
   fi
 
   local ntp_report_active=0
-  local ntp_env_var="BACKUP_NTP_REPORT"
-  local chrony_env_var="BACKUP_CHRONY_REPORT"
-  if (( ntp_setup_done )) || [[ "${file_config[$ntp_env_var]:-}" == "1" || "${file_config[$chrony_env_var]:-}" == "1" || "${!ntp_env_var:-}" == "1" || "${!chrony_env_var:-}" == "1" ]]; then
+  local ntp_var="BACKUP_NTP_REPORT"
+  local chrony_var="BACKUP_CHRONY_REPORT"
+  local file_ntp_val="${file_config[$ntp_var]:-}"
+  local file_chrony_val="${file_config[$chrony_var]:-}"
+  local env_ntp_val="${!ntp_var:-}"
+  local env_chrony_val="${!chrony_var:-}"
+  if (( ntp_setup_done )) || [[ "$file_ntp_val" == "1" || "$file_chrony_val" == "1" || "$env_ntp_val" == "1" || "$env_chrony_val" == "1" ]]; then
     ntp_report_active=1
   fi
 
@@ -7627,6 +7717,8 @@ EOF
 }
 
 main() {
+  check_system_dependencies
+
   local -a args=()
   local arg
   for arg in "$@"; do
@@ -7636,6 +7728,19 @@ main() {
     esac
   done
   set -- "${args[@]}"
+
+  local skip_core_check=0
+  if [[ $# -eq 0 ]]; then
+    skip_core_check=1
+  else
+    case "$1" in
+      -h|--help|-V|--version|install) skip_core_check=1 ;;
+    esac
+  fi
+
+  if (( ! skip_core_check )); then
+    check_core_dependencies
+  fi
 
   if [[ $# -eq 0 ]]; then
     render_help

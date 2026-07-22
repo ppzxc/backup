@@ -113,3 +113,23 @@ ENV
   [[ "$output" == *"더 이상 사용되지 않습니다"* ]]
   [[ "$output" == *"이관할 로컬 데이터가 없습니다"* ]]
 }
+
+@test "/data/backup is guaranteed with 700 permissions upon script initialization" {
+  local target_dir="${TEST_ROOT}/data/backup"
+  [ ! -d "$target_dir" ]
+
+  cat > "$BACKUP_ENV_FILE" <<'ENV'
+export RESTIC_REPOSITORY="s3:https://s3.amazonaws.com/my-bucket/host"
+export RESTIC_PASSWORD="secret"
+ENV
+
+  source "${BATS_TEST_DIRNAME}/../backup.sh"
+  run require_backup_env
+  [ "$status" -eq 0 ]
+
+  [ -d "$target_dir" ]
+  local perm
+  perm=$(stat -c "%a" "$target_dir")
+  [ "$perm" = "700" ]
+}
+
