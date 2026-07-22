@@ -410,7 +410,7 @@ ENV
 
   run cmd_audit --restore-drill
   [ "$status" -eq 0 ]
-  [[ "$output" == *"데이터베이스(mysql) 복원: 만족"* ]]
+  [[ "$output" == *"데이터베이스(mysql) 복원 무결성 검증: 성공"* ]]
 }
 
 @test "render_audit_report_unified generates general JSON and daily text reports correctly" {

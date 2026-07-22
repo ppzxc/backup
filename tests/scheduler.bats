@@ -246,11 +246,11 @@ EOF
   [ "$status" -eq 0 ]
 
   # Check command lines
-  run grep -F "restic-backup-files" "$mock_cron"
+  run grep -F "backup.sh-files" "$mock_cron"
   [ "$status" -eq 0 ]
-  run grep -F "restic-backup-audit-daily" "$mock_cron"
+  run grep -F "backup.sh-audit-daily" "$mock_cron"
   [ "$status" -eq 0 ]
-  run grep -F "restic-backup-audit-drill" "$mock_cron"
+  run grep -F "backup.sh-audit-drill" "$mock_cron"
   [ "$status" -eq 0 ]
 }
 
@@ -281,18 +281,18 @@ EOF
   mkdir -p "$(dirname "$mock_cron")"
   cat > "$mock_cron" <<EOF
 # RESTIC_BACKUP_BEGIN
-0 2 * * * PATH=... resticprofile --config /etc/restic/profiles.yaml --name test-cron-profile backup 2>&1 | logger -t restic-backup-files
-0 3 * * * PATH=... /usr/local/bin/backup.sh audit --daily --report 2>&1 | logger -t restic-backup-audit-daily
-0 4 1 * * PATH=... /usr/local/bin/backup.sh audit --restore-drill --report 2>&1 | logger -t restic-backup-audit-drill
+0 2 * * * PATH=... resticprofile --config /etc/restic/profiles.yaml --name test-cron-profile backup 2>&1 | logger -t backup.sh-files
+0 3 * * * PATH=... /usr/local/bin/backup.sh audit --daily --report 2>&1 | logger -t backup.sh-audit-daily
+0 4 1 * * PATH=... /usr/local/bin/backup.sh audit --restore-drill --report 2>&1 | logger -t backup.sh-audit-drill
 # RESTIC_BACKUP_END
 EOF
 
   # Unregister daily audit only
   run scheduler_unregister "test-cron-profile" "daily"
   [ "$status" -eq 0 ]
-  run grep -F "restic-backup-audit-daily" "$mock_cron"
+  run grep -F "backup.sh-audit-daily" "$mock_cron"
   [ "$status" -ne 0 ]
-  run grep -F "restic-backup-files" "$mock_cron"
+  run grep -F "backup.sh-files" "$mock_cron"
   [ "$status" -eq 0 ]
 
   # Unregister all
@@ -329,8 +329,8 @@ EOF
   mkdir -p "$(dirname "$mock_cron")"
   cat > "$mock_cron" <<EOF
 # RESTIC_BACKUP_BEGIN
-0 2 * * * PATH=... resticprofile --config /etc/restic/profiles.yaml --name test-cron-profile backup 2>&1 | logger -t restic-backup-files
-0 4 1 * * PATH=... /usr/local/bin/backup.sh audit --restore-drill --report 2>&1 | logger -t restic-backup-audit-drill
+0 2 * * * PATH=... resticprofile --config /etc/restic/profiles.yaml --name test-cron-profile backup 2>&1 | logger -t backup.sh-files
+0 4 1 * * PATH=... /usr/local/bin/backup.sh audit --restore-drill --report 2>&1 | logger -t backup.sh-audit-drill
 # RESTIC_BACKUP_END
 EOF
 
@@ -408,9 +408,9 @@ EOF
   mkdir -p "$(dirname "$mock_cron")"
   cat > "$mock_cron" <<EOF
 # RESTIC_BACKUP_BEGIN
-0 2 * * * PATH=... resticprofile --config /etc/restic/profiles.yaml --name test-cron-profile backup 2>&1 | logger -t restic-backup-files
-0 3 * * * PATH=... /usr/local/bin/backup.sh audit --daily --report 2>&1 | logger -t restic-backup-audit-daily
-0 4 1 * * PATH=... /usr/local/bin/backup.sh audit --restore-drill --report 2>&1 | logger -t restic-backup-audit-drill
+0 2 * * * PATH=... resticprofile --config /etc/restic/profiles.yaml --name test-cron-profile backup 2>&1 | logger -t backup.sh-files
+0 3 * * * PATH=... /usr/local/bin/backup.sh audit --daily --report 2>&1 | logger -t backup.sh-audit-daily
+0 4 1 * * PATH=... /usr/local/bin/backup.sh audit --restore-drill --report 2>&1 | logger -t backup.sh-audit-drill
 # RESTIC_BACKUP_END
 EOF
 
@@ -425,9 +425,9 @@ EOF
   [ "$status" -eq 0 ]
 
   # Check that files and drill are still present, and daily is updated
-  run grep -F "restic-backup-files" "$mock_cron"
+  run grep -F "backup.sh-files" "$mock_cron"
   [ "$status" -eq 0 ]
-  run grep -F "restic-backup-audit-drill" "$mock_cron"
+  run grep -F "backup.sh-audit-drill" "$mock_cron"
   [ "$status" -eq 0 ]
   run grep -q "0 5 \* \* \*" "$mock_cron"
   [ "$status" -eq 0 ]
