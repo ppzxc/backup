@@ -485,7 +485,12 @@ safe_spin() {
       shift
       # shellcheck disable=SC2163
       export -f "$func_name" 2>/dev/null || true
-      export RESTIC_PASSWORD RESTIC_REPOSITORY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY RCLONE_CONFIG_SYNO_BACKUP_TYPE RCLONE_CONFIG_SYNO_BACKUP_HOST RCLONE_CONFIG_SYNO_BACKUP_PORT RCLONE_CONFIG_SYNO_BACKUP_USER RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE 2>/dev/null || true
+      export RESTIC_PASSWORD RESTIC_REPOSITORY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY 2>/dev/null || true
+      local rclone_var
+      for rclone_var in $(compgen -v RCLONE_CONFIG_ 2>/dev/null || true); do
+        # shellcheck disable=SC2163
+        export "$rclone_var" 2>/dev/null || true
+      done
       gum spin --spinner dot --title "$title" -- bash -c '"$@"' _ "$func_name" "$@"
     else
       gum spin --spinner dot --title "$title" -- "$@"
