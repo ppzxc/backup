@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.44"
+BACKUP_SCRIPT_VERSION="0.0.45"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -91,10 +91,16 @@ DEFAULT_KEEP_DAILY=7
 DEFAULT_KEEP_WEEKLY=4
 DEFAULT_KEEP_MONTHLY=12
 DEFAULT_ON_CALENDAR="*-*-* 02:00:00"
+DEFAULT_NTP_ON_CALENDAR="*-*-* 00:30:00"
+# 구버전과의 호환성을 위해 유지하는 시각 동기화 주기 기본값
+# shellcheck disable=SC2034
 DEFAULT_CHRONY_ON_CALENDAR="*-*-* 00:30:00"
 DEFAULT_SFTP_PORT=22
 BACKUP_VERBOSE="${BACKUP_VERBOSE:-0}"
-CHRONY_CONF_PATH="${CHRONY_CONF_PATH:-/etc/chrony.conf}"
+NTP_CONF_PATH="${NTP_CONF_PATH:-/etc/chrony.conf}"
+# 구버전과의 호환성을 위해 유지하는 chrony conf 경로
+# shellcheck disable=SC2034
+CHRONY_CONF_PATH="${NTP_CONF_PATH}"
 BACKUP_REPORTS_DIR="${BACKUP_REPORTS_DIR:-/data/backup/reports}"
 
 # 구버전 -> 신버전 환경변수 매핑 정의
@@ -181,8 +187,8 @@ init_config_schema() {
   register_config_field "keep_db_weekly" "KEEP_DB_WEEKLY" "" ""
   register_config_field "keep_db_monthly" "KEEP_DB_MONTHLY" "" ""
 
-  # Chrony NTP 속성
-  register_config_field "chrony_report" "BACKUP_CHRONY_REPORT" "" ""
+  # NTP 속성
+  register_config_field "ntp_report" "BACKUP_NTP_REPORT" "" ""
 }
 
 init_config_schema
@@ -544,7 +550,7 @@ require_backup_env() {
   for old_key in "${!COMPATIBILITY_MAP[@]}"; do
     new_key="${COMPATIBILITY_MAP[$old_key]}"
     if [[ -n "${file_config[$old_key]:-}" && -z "${file_config[$new_key]:-}" ]]; then
-      log_warn "구버전 설정 키(${old_key})가 감지되었습니다. '${new_key}' 값으로 자동 맵핑되어 실행되지만, 정상적인 유지를 위해 'backup.sh upgrade'를 실행해 주십시오."
+      log_warn "구버전 설정 키(${old_key})가 감지되었습니다. '${new_key}' 값으로 자동 맵핑되어 실행되지만, 정상적인 유지를 위해 'backup.sh import'를 실행해 주십시오."
       file_config["$new_key"]="${file_config[$old_key]}"
     fi
   done
@@ -842,7 +848,7 @@ resolve_and_validate_config() {
   local file_secondary_backend="" file_secondary_password="" file_secondary_keep_daily="" file_secondary_keep_weekly="" file_secondary_keep_monthly=""
   local file_secondary_endpoint="" file_secondary_bucket="" file_secondary_access_key="" file_secondary_secret_key=""
   local file_secondary_host="" file_secondary_port="" file_secondary_user="" file_secondary_repo=""
-  local file_db_type="" file_db_command="" file_db_filename="" file_db_schedule="" file_db_keep_daily="" file_db_keep_weekly="" file_db_keep_monthly="" file_chrony_report=""
+  local file_db_type="" file_db_command="" file_db_filename="" file_db_schedule="" file_db_keep_daily="" file_db_keep_weekly="" file_db_keep_monthly="" file_ntp_report=""
   if [[ -f "${BACKUP_ENV_FILE:-}" ]]; then
     declare -A file_config=()
     if ! load_backup_env_to_array "$BACKUP_ENV_FILE" file_config _errors; then
@@ -883,7 +889,7 @@ resolve_and_validate_config() {
     file_db_keep_daily="${file_config[KEEP_DB_DAILY]:-}"
     file_db_keep_weekly="${file_config[KEEP_DB_WEEKLY]:-}"
     file_db_keep_monthly="${file_config[KEEP_DB_MONTHLY]:-}"
-    file_chrony_report="${file_config[BACKUP_CHRONY_REPORT]:-}"
+    file_ntp_report="${file_config[BACKUP_NTP_REPORT]:-${file_config[BACKUP_CHRONY_REPORT]:-}}"
   fi
 
 
@@ -910,7 +916,7 @@ resolve_and_validate_config() {
   local env_db_keep_daily="${KEEP_DB_DAILY:-}"
   local env_db_keep_weekly="${KEEP_DB_WEEKLY:-}"
   local env_db_keep_monthly="${KEEP_DB_MONTHLY:-}"
-  local env_chrony_report="${BACKUP_CHRONY_REPORT:-}"
+  local env_ntp_report="${BACKUP_NTP_REPORT:-${BACKUP_CHRONY_REPORT:-}}"
 
   # Resolve values with priority: CLI option > Env variable > Config file > Default value
   local cli_targets="${_opts[targets]:-}"
@@ -963,10 +969,10 @@ resolve_and_validate_config() {
   local cli_db_keep_monthly="${_opts[db-keep-monthly]:-}"
   _resolved[db_keep_monthly]=$(resolve_value "$cli_db_keep_monthly" "$env_db_keep_monthly" "$file_db_keep_monthly" "" || true)
 
-  local cli_chrony_report="${_opts[chrony-report]:-}"
+  local cli_ntp_report="${_opts[ntp-report]:-${_opts[chrony-report]:-}}"
   # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
   # shellcheck disable=SC2154
-  _resolved[chrony_report]=$(resolve_value "$cli_chrony_report" "$env_chrony_report" "$file_chrony_report" "" || true)
+  _resolved[ntp_report]=$(resolve_value "$cli_ntp_report" "$env_ntp_report" "$file_ntp_report" "" || true)
 
   # DB 타입별 기본 명령어 채우기
   if [[ -n "${_resolved[db_type]:-}" ]]; then
@@ -1494,15 +1500,15 @@ EOF
   fi
 }
 
-render_chrony_env_block() {
-  local -n _res_chrony="$1"
-  if [[ -n "${_res_chrony[chrony_report]:-}" ]]; then
+render_ntp_env_block() {
+  local -n _res_ntp="$1"
+  if [[ -n "${_res_ntp[ntp_report]:-}" ]]; then
     cat <<EOF
 
 # ==========================================
-# Chrony NTP 시각 동기화 증적 생성 설정
+# NTP 시각 동기화 증적 생성 설정
 # ==========================================
-BACKUP_CHRONY_REPORT='$(escape_single_quotes "${_res_chrony[chrony_report]:-}")'
+BACKUP_NTP_REPORT='$(escape_single_quotes "${_res_ntp[ntp_report]:-}")'
 EOF
   fi
 }
@@ -2409,7 +2415,7 @@ EOF
   _out_env+="$(render_notification_env_block _resolved)"
   _out_env+="$(render_audit_env_block _resolved)"
   _out_env+="$(render_db_env_block _resolved)"
-  _out_env+="$(render_chrony_env_block _resolved)"
+  _out_env+="$(render_ntp_env_block _resolved)"
 
   # Render Notice
   _out_notice=$(cat <<EOF
@@ -2465,7 +2471,7 @@ EOF
   _out_env+="$(render_notification_env_block _resolved)"
   _out_env+="$(render_audit_env_block _resolved)"
   _out_env+="$(render_db_env_block _resolved)"
-  _out_env+="$(render_chrony_env_block _resolved)"
+  _out_env+="$(render_ntp_env_block _resolved)"
 
   # Render Notice
   _out_notice=$(cat <<EOF
@@ -2734,7 +2740,7 @@ scheduler_systemd_register() {
   local drill_on_calendar="${_sys_cfg[on-calendar-drill]:-*-*-01 01:30:00}"
   local daily="${_sys_cfg[daily]:-0}"
   local restore_drill="${_sys_cfg[restore-drill]:-0}"
-  local chrony_report="${_sys_cfg[chrony_report]:-${BACKUP_CHRONY_REPORT:-}}"
+  local ntp_report="${_sys_cfg[ntp_report]:-${_sys_cfg[chrony_report]:-${BACKUP_NTP_REPORT:-${BACKUP_CHRONY_REPORT:-}}}}"
 
   if (( daily )); then
     write_systemd_timer_unit "backup-audit-daily" "Restic Daily Backup Audit Report" "Run Restic Daily Backup Audit Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH audit --daily --report" "$daily_on_calendar"
@@ -2753,10 +2759,10 @@ scheduler_systemd_register() {
     fi
     write_systemd_timer_unit "backup-audit-daily" "Restic Daily Backup Audit Report" "Run Restic Daily Backup Audit Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH audit --daily --report" "$daily_on_calendar"
     write_systemd_timer_unit "backup-audit-restore-drill" "Restic Restore Drill Report" "Run Restic Restore Drill Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH audit --restore-drill --report" "$drill_on_calendar"
-    if [[ "$chrony_report" == "1" ]]; then
-      write_systemd_timer_unit "backup-chrony-report" "ISMS-P 2.9.3 NTP Sync Evidence Report" "Run ISMS-P NTP Sync Evidence Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH chrony --report" "${DEFAULT_CHRONY_ON_CALENDAR}"
-      systemd_enable_unit "backup-chrony-report.timer"
-      log_info "chrony NTP 증적 타이머도 등록했습니다 (${DEFAULT_CHRONY_ON_CALENDAR})"
+    if [[ "$ntp_report" == "1" ]]; then
+      write_systemd_timer_unit "backup-ntp-report" "ISMS-P 2.9.3 NTP Sync Evidence Report" "Run ISMS-P NTP Sync Evidence Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH ntp --report" "${DEFAULT_NTP_ON_CALENDAR}"
+      systemd_enable_unit "backup-ntp-report.timer"
+      log_info "NTP 증적 타이머도 등록했습니다 (${DEFAULT_NTP_ON_CALENDAR})"
     fi
     systemd_reload_daemon
     systemd_enable_unit "backup-audit-daily.timer"
@@ -2788,11 +2794,14 @@ scheduler_systemd_unregister() {
     fi
     systemd_disable_unit "backup-audit-daily.timer"
     systemd_disable_unit "backup-audit-restore-drill.timer"
-    systemd_disable_unit "backup-chrony-report.timer"
+    systemd_disable_unit "backup-ntp-report.timer" >/dev/null 2>&1 || true
+    systemd_disable_unit "backup-chrony-report.timer" >/dev/null 2>&1 || true
     rm -f "$SYSTEMD_UNIT_DIR/backup-audit-daily.service"
     rm -f "$SYSTEMD_UNIT_DIR/backup-audit-daily.timer"
     rm -f "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.service"
     rm -f "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.timer"
+    rm -f "$SYSTEMD_UNIT_DIR/backup-ntp-report.service"
+    rm -f "$SYSTEMD_UNIT_DIR/backup-ntp-report.timer"
     rm -f "$SYSTEMD_UNIT_DIR/backup-chrony-report.service"
     rm -f "$SYSTEMD_UNIT_DIR/backup-chrony-report.timer"
     systemd_reload_daemon
@@ -3565,10 +3574,10 @@ write_evidence_report_bundle() {
   mkdir -p "$(dirname "$base_path")"
   chmod 700 "$(dirname "$base_path")" 2>/dev/null || true
 
-  if [[ "$report_type" == "chrony" ]]; then
-    render_chrony_txt _werb_data > "$txt_path"
-    render_chrony_json _werb_data > "$json_path"
-    render_chrony_html _werb_data > "$html_path"
+  if [[ "$report_type" == "chrony" || "$report_type" == "ntp" ]]; then
+    render_ntp_txt _werb_data > "$txt_path"
+    render_ntp_json _werb_data > "$json_path"
+    render_ntp_html _werb_data > "$html_path"
   else
     render_audit_report_unified "$report_type" "txt" _werb_data > "$txt_path"
     render_audit_report_unified "$report_type" "json" _werb_data > "$json_path"
@@ -5321,7 +5330,7 @@ leapsectz right/UTC'
 
 # nameref 전달 변수 미사용 경고 우회
 # shellcheck disable=SC2034
-render_chrony_txt() {
+render_ntp_txt() {
   local -n _ct_ref="$1"
   local hostname_val="${_ct_ref[hostname]:-unknown}"
   local report_date="${_ct_ref[report_date]:-unknown}"
@@ -5338,7 +5347,7 @@ render_chrony_txt() {
 - 점검 일시: $report_date
 - 호스트명:  $hostname_val
 
-[1. Chrony 서비스 상태]
+[1. NTP 시각 동기화 서비스 상태]
 - 자동 시작(Enabled): $service_enabled
 - 현재 실행(Active):  $service_active
 
@@ -5358,7 +5367,7 @@ EOF
 }
 
 # shellcheck disable=SC2034
-render_chrony_json() {
+render_ntp_json() {
   local -n _cj_ref="$1"
   local hostname_val="${_cj_ref[hostname]:-unknown}"
   local report_date="${_cj_ref[report_date]:-unknown}"
@@ -5376,7 +5385,7 @@ render_chrony_json() {
   "report_type": "isms_p_2.9.3_ntp_sync",
   "hostname": "${hostname_val//\"/\\\"}",
   "report_date": "${report_date}",
-  "chrony_service": {
+  "ntp_service": {
     "enabled": "${service_enabled//\"/\\\"}",
     "active": "${service_active//\"/\\\"}"
   },
@@ -5388,7 +5397,7 @@ EOF
 }
 
 # shellcheck disable=SC2034
-render_chrony_html() {
+render_ntp_html() {
   local -n _ch_ref="$1"
   local hostname_val="${_ch_ref[hostname]:-unknown}"
   local report_date="${_ch_ref[report_date]:-unknown}"
@@ -5454,7 +5463,7 @@ render_chrony_html() {
       <td class="label">호스트명</td><td>$hostname_val</td>
     </tr>
   </table>
-  <h2>1. Chrony 서비스 상태</h2>
+  <h2>1. NTP 시각 동기화 서비스 상태</h2>
   <table class="data-table">
     <thead><tr><th>점검 항목</th><th>ISMS 합격 기준</th><th>현재 상태</th><th>결과</th></tr></thead>
     <tbody>
@@ -5481,7 +5490,7 @@ render_chrony_html() {
     <thead><tr><th>파일</th><th>ISMS 합격 기준</th><th>실제 권한</th><th>결과</th></tr></thead>
     <tbody>
       <tr>
-        <td>${CHRONY_CONF_PATH}</td>
+        <td>${NTP_CONF_PATH}</td>
         <td>root:root, 644 이하</td>
         <td>$conf_perm</td>
         <td><span class="badge $([[ "$conf_perm" == *"root"* ]] && echo "badge-success" || echo "badge-warning")">$([[ "$conf_perm" == *"root"* ]] && echo "적합" || echo "확인 필요")</span></td>
@@ -5498,25 +5507,27 @@ render_chrony_html() {
 HTMLEOF
 }
 
-# backup.env에 BACKUP_CHRONY_REPORT 플래그를 직접 추가/갱신한다
-_chrony_set_flag_in_env() {
+# backup.env에 BACKUP_NTP_REPORT 플래그를 직접 추가/갱신한다
+_ntp_set_flag_in_env() {
   local flag_val="$1"
   require_backup_env
-  if grep -q "BACKUP_CHRONY_REPORT=" "$BACKUP_ENV_FILE"; then
-    sed -i "s/BACKUP_CHRONY_REPORT='[01]'/BACKUP_CHRONY_REPORT='${flag_val}'/" "$BACKUP_ENV_FILE"
+  if grep -q "BACKUP_NTP_REPORT=" "$BACKUP_ENV_FILE"; then
+    sed -i "s/BACKUP_NTP_REPORT='[01]'/BACKUP_NTP_REPORT='${flag_val}'/" "$BACKUP_ENV_FILE"
+  elif grep -q "BACKUP_CHRONY_REPORT=" "$BACKUP_ENV_FILE"; then
+    sed -i "s/BACKUP_CHRONY_REPORT='[01]'/BACKUP_NTP_REPORT='${flag_val}'/" "$BACKUP_ENV_FILE"
   else
-    printf "\n# ==========================================\n# Chrony NTP 시각 동기화 증적 생성 설정\n# ==========================================\nBACKUP_CHRONY_REPORT='%s'\n" "$flag_val" >> "$BACKUP_ENV_FILE"
+    printf "\n# ==========================================\n# NTP 시각 동기화 증적 생성 설정\n# ==========================================\nBACKUP_NTP_REPORT='%s'\n" "$flag_val" >> "$BACKUP_ENV_FILE"
   fi
   chmod 600 "$BACKUP_ENV_FILE" 2>/dev/null || true
 }
 
-cmd_chrony() {
+cmd_ntp() {
   if has_help_flag "$@"; then
     cat <<'HELPEOF'
-사용법: backup.sh chrony <subcommand> [options]
+사용법: backup.sh ntp <subcommand> [options]
 
 서브커맨드:
-  setup      Chrony 설정 파일 적용 및 서비스 재시작 + 상태 검증
+  setup      NTP(Chrony) 설정 파일 적용 및 서비스 재시작 + 상태 검증
   --report   ISMS-P 2.9.3 시각 동기화 증적 보고서 생성 (txt/json/html)
 
 옵션 (--report):
@@ -5524,9 +5535,9 @@ cmd_chrony() {
                         (기본: /data/backup/reports/ntp_sync_evidence_YYYYMMDD.txt)
 
 예시:
-  backup.sh chrony setup
-  backup.sh chrony --report
-  backup.sh chrony --report --report-file /tmp/ntp_check.txt
+  backup.sh ntp setup
+  backup.sh ntp --report
+  backup.sh ntp --report --report-file /tmp/ntp_check.txt
 HELPEOF
     return 0
   fi
@@ -5540,16 +5551,16 @@ HELPEOF
       require_backup_env
 
       # 1. 기존 설정 파일 백업
-      if [[ -f "$CHRONY_CONF_PATH" ]]; then
-        local bak_path; bak_path="$(dirname "$CHRONY_CONF_PATH")/chrony.conf.bak.$(date +%Y%m%d)"
-        cp "$CHRONY_CONF_PATH" "$bak_path"
-        log_info "기존 chrony.conf를 백업했습니다: $bak_path"
+      if [[ -f "$NTP_CONF_PATH" ]]; then
+        local bak_path; bak_path="$(dirname "$NTP_CONF_PATH")/chrony.conf.bak.$(date +%Y%m%d)"
+        cp "$NTP_CONF_PATH" "$bak_path"
+        log_info "기존 설정을 백업했습니다: $bak_path"
       fi
 
       # 2. 설정 파일 작성
-      printf '%s\n' "$CHRONY_CONF_CONTENT" > "$CHRONY_CONF_PATH"
-      chmod 644 "$CHRONY_CONF_PATH"
-      log_info "chrony 설정 파일을 작성했습니다: $CHRONY_CONF_PATH"
+      printf '%s\n' "$CHRONY_CONF_CONTENT" > "$NTP_CONF_PATH"
+      chmod 644 "$NTP_CONF_PATH"
+      log_info "NTP 설정 파일을 작성했습니다: $NTP_CONF_PATH"
 
       # 3. chronyd 재시작
       systemctl restart chronyd
@@ -5563,23 +5574,23 @@ HELPEOF
       log_info "=== chronyc sources -v ==="
       chronyc sources -v || true
 
-      # 6. backup.env에 BACKUP_CHRONY_REPORT=1 기록 (Configuration Registry 우선 적용 및 폴백)
+      # 6. backup.env에 BACKUP_NTP_REPORT=1 기록
       # nameref 인자 전달용 설정 배열 선언
       # shellcheck disable=SC2034
-      local -A chrony_cfg=()
+      local -A ntp_cfg=()
       # nameref 인자 전달용 에러 배열 선언
       # shellcheck disable=SC2034
-      local -A chrony_errs=()
+      local -A ntp_errs=()
 
-      if load_and_validate_config "" chrony_cfg chrony_errs 2>/dev/null; then
+      if load_and_validate_config "" ntp_cfg ntp_errs 2>/dev/null; then
         # nameref 인자 변수 수정 분석 경고 우회
         # shellcheck disable=SC2034
-        chrony_cfg[chrony_report]="1"
-        save_profile_config chrony_cfg >/dev/null
+        ntp_cfg[ntp_report]="1"
+        save_profile_config ntp_cfg >/dev/null
       else
-        _chrony_set_flag_in_env "1"
+        _ntp_set_flag_in_env "1"
       fi
-      log_info "BACKUP_CHRONY_REPORT=1 이 backup.env에 저장되었습니다."
+      log_info "BACKUP_NTP_REPORT=1 이 backup.env에 저장되었습니다."
       ;;
 
     --report)
@@ -5597,14 +5608,14 @@ HELPEOF
       svc_active=$(systemctl is-active chronyd 2>/dev/null || echo "unknown")
       sources_out=$(chronyc sources -v 2>/dev/null || echo "(chronyc 실행 불가)")
       tracking_out=$(chronyc tracking 2>/dev/null || echo "(chronyc 실행 불가)")
-      conf_perm_out=$(ls -l "$CHRONY_CONF_PATH" 2>/dev/null || echo "(파일 없음)")
+      conf_perm_out=$(ls -l "$NTP_CONF_PATH" 2>/dev/null || echo "(파일 없음)")
 
       local report_date; report_date=$(date '+%Y-%m-%d %H:%M:%S %Z')
       local hostname_val; hostname_val=$(hostname 2>/dev/null || echo "unknown")
 
       # nameref 전달용 변수 — shellcheck 경고 우회
       # shellcheck disable=SC2034
-      local -A chrony_data=(
+      local -A ntp_data=(
         [hostname]="$hostname_val"
         [report_date]="$report_date"
         [service_enabled]="$svc_enabled"
@@ -5614,7 +5625,7 @@ HELPEOF
         [conf_perm]="$conf_perm_out"
       )
 
-      write_evidence_report_bundle chrony_data "$report_file" "chrony"
+      write_evidence_report_bundle ntp_data "$report_file" "ntp"
 
       log_info "NTP 증적 보고서가 생성되었습니다:"
       log_info "  - TXT:  $report_file"
@@ -5623,9 +5634,14 @@ HELPEOF
       ;;
 
     *)
-      die "chrony는 'setup' 또는 '--report'만 지원합니다 (입력값: '${action}')"
+      die "ntp는 'setup' 또는 '--report'만 지원합니다 (입력값: '${action}')"
       ;;
   esac
+}
+
+cmd_chrony() {
+  log_warn "'chrony' 명령어는 더 이상 사용되지 않습니다. 대신 'ntp'를 사용하십시오."
+  cmd_ntp "$@"
 }
 
 
@@ -6507,9 +6523,9 @@ prompt_backend_choice() {
   done
 }
 
-cmd_upgrade() {
+cmd_import() {
   if has_help_flag "$@"; then
-    help_upgrade
+    help_import
     return 0
   fi
   require_root
@@ -6644,20 +6660,20 @@ cmd_upgrade() {
   fi
 }
 
-help_upgrade() {
+help_import() {
   cat <<'EOF'
 기존의 1차 로컬 백업 데이터를 새로운 1차 원격 백업 저장소로 안전하게 마이그레이션(이관)하고,
 디스크 정리를 위한 가이드를 제공합니다.
 
 사용법:
-  backup.sh upgrade [flags]
+  backup.sh import [flags]
 
 사용법 예시:
   # 기본 경로(/var/restic-local)에 존재하는 로컬 데이터를 원격지로 이관
-  backup.sh upgrade
+  backup.sh import
 
   # 특정 경로에 있는 로컬 데이터를 원격지로 이관
-  backup.sh upgrade --legacy-dir /data/backup
+  backup.sh import --legacy-dir /data/backup
 
 플래그 (Flags):
       --legacy-dir <경로>     이관할 기존 로컬 restic 저장소 디렉터리 경로 (기본값: /var/restic-local)
@@ -6665,6 +6681,35 @@ help_upgrade() {
 글로벌 플래그 (Global Flags):
   -h, --help                  도움말 출력
 EOF
+}
+
+cmd_upgrade() {
+  log_warn "'upgrade' 명령어는 더 이상 사용되지 않습니다. 대신 'import'를 사용하십시오."
+  cmd_import "$@"
+}
+
+cmd_update() {
+  if has_help_flag "$@"; then
+    cat <<'HELPEOF'
+사용법: backup.sh update
+
+설명:
+  로컬의 최신 backup.sh 스크립트 실행본으로 설치 파일(/usr/local/sbin/backup.sh)을 갱신 설치하고,
+  새로운 템플릿 규격에 맞춰 Systemd 스케줄러 타이머 및 프로필 설정을 자동으로 갱신(마이그레이션)합니다.
+
+글로벌 플래그 (Global Flags):
+  -h, --help                  도움말 출력
+HELPEOF
+    return 0
+  fi
+
+  require_root
+
+  log_info "최신 스크립트 버전(${BACKUP_SCRIPT_VERSION})으로 설치본을 갱신합니다..."
+  self_install_copy "$0" 1
+
+  log_info "스케줄러 및 설정 프로필 구성을 새 버전 규격으로 업데이트합니다..."
+  cmd_schedule enable
 }
 
 cmd_wizard() {
@@ -6964,35 +7009,35 @@ cmd_wizard() {
 
   cmd_init
 
-  # ── chrony NTP 시각 동기화 설정 ──────────────────────────────────────────
-  local chrony_setup_done=0
+  # ── NTP 시각 동기화 설정 ──────────────────────────────────────────
+  local ntp_setup_done=0
   if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
     setup_colors
     printf '\n%b%b⚙  시각 동기화 설정 (NTP / Chrony)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
-    printf '%bISMS-P 2.9.3 시각 동기화 항목 대응을 위해 chrony NTP 설정을 적용할 수 있습니다.%b\n' "$C_DIM" "$C_RESET"
+    printf '%bISMS-P 2.9.3 시각 동기화 항목 대응을 위해 NTP 설정을 적용할 수 있습니다.%b\n' "$C_DIM" "$C_RESET"
     printf '%b시각 동기화 설정을 적용할까요? [y/%bN%b]: %b' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_RESET"
   else
     printf '\n--- 시각 동기화 설정 (NTP / Chrony) ---\n'
-    printf 'ISMS-P 2.9.3 시각 동기화 항목 대응을 위해 chrony NTP 설정을 적용할 수 있습니다.\n'
+    printf 'ISMS-P 2.9.3 시각 동기화 항목 대응을 위해 NTP 설정을 적용할 수 있습니다.\n'
     printf '시각 동기화 설정을 적용할까요? [y/N]: '
   fi
-  local chrony_choice; read -r chrony_choice || true
+  local ntp_choice; read -r ntp_choice || true
 
-  if [[ "$chrony_choice" =~ ^[Yy]$ ]]; then
+  if [[ "$ntp_choice" =~ ^[Yy]$ ]]; then
     local chrony_ready=0
     if type -P chronyc > /dev/null 2>&1 && systemctl is-active chronyd > /dev/null 2>&1; then
       chrony_ready=1
     fi
 
     if (( chrony_ready )); then
-      cmd_chrony setup
-      chrony_setup_done=1
+      cmd_ntp setup
+      ntp_setup_done=1
     else
       if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-        printf '%b안내: chrony(chronyd)가 설치되어 있지 않거나 실행 중이지 않습니다. 먼저 chrony를 설치하고 실행한 뒤\n        backup.sh chrony setup 을 단독으로 실행하세요.%b\n' "$C_YELLOW" "$C_RESET"
+        printf '%b안내: chrony(chronyd)가 설치되어 있지 않거나 실행 중이지 않습니다. 먼저 chrony를 설치하고 실행한 뒤\n        backup.sh ntp setup 을 단독으로 실행하세요.%b\n' "$C_YELLOW" "$C_RESET"
       else
         printf '안내: chrony(chronyd)가 설치되어 있지 않거나 실행 중이지 않습니다.\n'
-        printf '      먼저 chrony를 설치한 뒤 backup.sh chrony setup 을 실행하세요.\n'
+        printf '      먼저 chrony를 설치한 뒤 backup.sh ntp setup 을 실행하세요.\n'
       fi
     fi
   fi
@@ -7021,8 +7066,9 @@ cmd_wizard() {
   fi
 
   local ntp_report_active=0
+  local ntp_env_var="BACKUP_NTP_REPORT"
   local chrony_env_var="BACKUP_CHRONY_REPORT"
-  if (( chrony_setup_done )) || [[ "${file_config[$chrony_env_var]:-}" == "1" || "${!chrony_env_var:-}" == "1" ]]; then
+  if (( ntp_setup_done )) || [[ "${file_config[$ntp_env_var]:-}" == "1" || "${file_config[$chrony_env_var]:-}" == "1" || "${!ntp_env_var:-}" == "1" || "${!chrony_env_var:-}" == "1" ]]; then
     ntp_report_active=1
   fi
 
@@ -7037,9 +7083,9 @@ cmd_wizard() {
       printf ' %b├──%b 일일 검토 보고: %b등록됨 (%s)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "*-*-* 01:00:00" "$C_RESET"
       printf ' %b├──%b 복구 테스트 보고: %b등록됨 (%s)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "*-*-01 01:30:00" "$C_RESET"
       if (( ntp_report_active )); then
-        printf ' %b├──%b NTP 증적 보고:  %b등록됨 (%s)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "$DEFAULT_CHRONY_ON_CALENDAR" "$C_RESET"
+        printf ' %b├──%b NTP 증적 보고:  %b등록됨 (%s)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "$DEFAULT_NTP_ON_CALENDAR" "$C_RESET"
       else
-        printf ' %b├──%b NTP 증적 보고:  %b미등록 (backup.sh chrony setup으로 설정 가능)%b\n' "$C_GRAY" "$C_RESET" "$C_GRAY" "$C_RESET"
+        printf ' %b├──%b NTP 증적 보고:  %b미등록 (backup.sh ntp setup으로 설정 가능)%b\n' "$C_GRAY" "$C_RESET" "$C_GRAY" "$C_RESET"
       fi
     else
       printf ' %b├──%b 정기 백업:    %b등록하지 않음 (필요시 backup.sh schedule enable 실행)%b\n' "$C_GRAY" "$C_RESET" "$C_GRAY" "$C_RESET"
@@ -7057,9 +7103,9 @@ cmd_wizard() {
       printf ' 일일 검토 보고: 등록됨 (*-*-* 01:00:00)\n'
       printf ' 복구 테스트 보고: 등록됨 (*-*-01 01:30:00)\n'
       if (( ntp_report_active )); then
-        printf ' NTP 증적 보고: 등록됨 (%s)\n' "$DEFAULT_CHRONY_ON_CALENDAR"
+        printf ' NTP 증적 보고: 등록됨 (%s)\n' "$DEFAULT_NTP_ON_CALENDAR"
       else
-        printf ' NTP 증적 보고: 미등록 (backup.sh chrony setup으로 설정 가능)\n'
+        printf ' NTP 증적 보고: 미등록 (backup.sh ntp setup으로 설정 가능)\n'
       fi
     else
       printf ' 정기 백업: 등록하지 않음 (필요시 backup.sh schedule enable 실행)\n'
@@ -7088,7 +7134,7 @@ cmd_config() {
 
   # 2. 옵션 파싱
   local -A opts=()
-  parse_opts_into opts "targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: on-calendar: notification-url: notification-type: notification-on: audit-tester: audit-ciso: audit-rto: dry-run secondary-backend: secondary-password: secondary-endpoint: secondary-bucket: secondary-access-key: secondary-secret-key: secondary-host: secondary-user: secondary-port: secondary-keep-daily: secondary-keep-weekly: secondary-keep-monthly: db-type: db-command: db-filename: db-schedule: db-keep-daily: db-keep-weekly: db-keep-monthly:" -- "$@"
+  parse_opts_into opts "targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: on-calendar: notification-url: notification-type: notification-on: audit-tester: audit-ciso: audit-rto: dry-run secondary-backend: secondary-password: secondary-endpoint: secondary-bucket: secondary-access-key: secondary-secret-key: secondary-host: secondary-user: secondary-port: secondary-keep-daily: secondary-keep-weekly: secondary-keep-monthly: db-type: db-command: db-filename: db-schedule: db-keep-daily: db-keep-weekly: db-keep-monthly: ntp-report: chrony-report:" -- "$@"
 
 
   opts[backend]="$backend"
@@ -7144,7 +7190,7 @@ cmd_setting() {
   fi
   require_root
   local -A opts=()
-  parse_opts_into opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: notification-url: notification-type: notification-on: audit-tester: audit-ciso: audit-rto: force dry-run secondary-backend: secondary-password: secondary-endpoint: secondary-bucket: secondary-access-key: secondary-secret-key: secondary-host: secondary-user: secondary-port: secondary-keep-daily: secondary-keep-weekly: secondary-keep-monthly: db-type: db-command: db-filename: db-schedule: db-keep-daily: db-keep-weekly: db-keep-monthly:" -- "$@"
+  parse_opts_into opts "backend: targets: exclude: password: keep-daily: keep-weekly: keep-monthly: endpoint: bucket: access-key: secret-key: host: port: user: profile-name: notification-url: notification-type: notification-on: audit-tester: audit-ciso: audit-rto: force dry-run secondary-backend: secondary-password: secondary-endpoint: secondary-bucket: secondary-access-key: secondary-secret-key: secondary-host: secondary-user: secondary-port: secondary-keep-daily: secondary-keep-weekly: secondary-keep-monthly: db-type: db-command: db-filename: db-schedule: db-keep-daily: db-keep-weekly: db-keep-monthly: ntp-report: chrony-report:" -- "$@"
 
 
   local backend="${opts[backend]:-}"
@@ -7563,12 +7609,13 @@ restic 기반 백업 설치, 운영, 모니터링 및 감사 관리를 자동화
   run            수동 백업 즉시 실행 (resticprofile backup)
   status         저장소 연결성, 보안 권한 상태 및 최근 백업 스냅샷 요약 조회
   audit          ISMS/ISO 27001 컴플라이언스 감사 대응용 보고서 출력 및 저장
-  chrony         Chrony NTP 시각 동기화 설정(setup) 및 ISMS-P 2.9.3 증적 생성(--report)
+  ntp            NTP 시각 동기화 설정(setup) 및 ISMS-P 2.9.3 증적 생성(--report)
   uninstall      정기 스케줄 제거 및 설치된 바이너리/스크립트 삭제
   migrate        기존 저장소 백업 데이터를 새로운 스토리지 백엔드로 데이터 복제 및 설정 이관
   config         기존 백업 설정(backup.env) 수정 및 관련 자산 동기화
   wizard         단계별 설정을 위한 대화형 CLI 설정 마법사 실행
-  upgrade        기존 1차 로컬 백업 데이터를 새로운 1차 원격 저장소로 이관 및 환경 정리
+  import         기존 1차 로컬 백업 데이터를 새로운 1차 원격 저장소로 이관 및 환경 정리
+  update         최신 스크립트 실행본 설치 및 스케줄러/설정 갱신
 
 글로벌 플래그 (Global Flags):
   -h, --help     도움말 출력
@@ -7659,14 +7706,29 @@ main() {
       cmd_wizard "$@"
       return $?
       ;;
+    import)
+      shift
+      cmd_import "$@"
+      return $?
+      ;;
     upgrade)
       shift
       cmd_upgrade "$@"
       return $?
       ;;
+    ntp)
+      shift
+      cmd_ntp "$@"
+      return $?
+      ;;
     chrony)
       shift
       cmd_chrony "$@"
+      return $?
+      ;;
+    update)
+      shift
+      cmd_update "$@"
       return $?
       ;;
     *)
