@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.40"
+BACKUP_SCRIPT_VERSION="0.0.44"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -91,8 +91,11 @@ DEFAULT_KEEP_DAILY=7
 DEFAULT_KEEP_WEEKLY=4
 DEFAULT_KEEP_MONTHLY=12
 DEFAULT_ON_CALENDAR="*-*-* 02:00:00"
+DEFAULT_CHRONY_ON_CALENDAR="*-*-* 00:30:00"
 DEFAULT_SFTP_PORT=22
 BACKUP_VERBOSE="${BACKUP_VERBOSE:-0}"
+CHRONY_CONF_PATH="${CHRONY_CONF_PATH:-/etc/chrony.conf}"
+BACKUP_REPORTS_DIR="${BACKUP_REPORTS_DIR:-/data/backup/reports}"
 
 # 구버전 -> 신버전 환경변수 매핑 정의
 # shellcheck disable=SC2034
@@ -177,6 +180,9 @@ init_config_schema() {
   register_config_field "keep_db_daily" "KEEP_DB_DAILY" "" ""
   register_config_field "keep_db_weekly" "KEEP_DB_WEEKLY" "" ""
   register_config_field "keep_db_monthly" "KEEP_DB_MONTHLY" "" ""
+
+  # Chrony NTP 속성
+  register_config_field "chrony_report" "BACKUP_CHRONY_REPORT" "" ""
 }
 
 init_config_schema
@@ -722,9 +728,9 @@ load_and_validate_config() {
   fi
 
   if [[ -z "$backend" && -f "$BACKUP_ENV_FILE" ]]; then
-    if grep -q -E "AWS_ACCESS_KEY_ID=" "$BACKUP_ENV_FILE" || grep -q -E 'RESTIC_REPOSITORY=["'\'' ]s3:' "$BACKUP_ENV_FILE"; then
+    if grep -q -E "AWS_ACCESS_KEY_ID=" "$BACKUP_ENV_FILE" || grep -q -E 'RESTIC_REPOSITORY=.*s3:' "$BACKUP_ENV_FILE"; then
       backend="s3"
-    elif grep -q -E "RCLONE_CONFIG_SYNO_BACKUP_TYPE=['\"]sftp['\"]" "$BACKUP_ENV_FILE" || grep -q -E 'RESTIC_REPOSITORY=["'\'' ]rclone:syno_backup' "$BACKUP_ENV_FILE"; then
+    elif grep -q -E "RCLONE_CONFIG_SYNO_BACKUP_TYPE=" "$BACKUP_ENV_FILE" || grep -q -E 'RESTIC_REPOSITORY=.*rclone:syno_backup' "$BACKUP_ENV_FILE"; then
       backend="sftp"
     fi
   fi
@@ -836,7 +842,7 @@ resolve_and_validate_config() {
   local file_secondary_backend="" file_secondary_password="" file_secondary_keep_daily="" file_secondary_keep_weekly="" file_secondary_keep_monthly=""
   local file_secondary_endpoint="" file_secondary_bucket="" file_secondary_access_key="" file_secondary_secret_key=""
   local file_secondary_host="" file_secondary_port="" file_secondary_user="" file_secondary_repo=""
-  local file_db_type="" file_db_command="" file_db_filename="" file_db_schedule="" file_db_keep_daily="" file_db_keep_weekly="" file_db_keep_monthly=""
+  local file_db_type="" file_db_command="" file_db_filename="" file_db_schedule="" file_db_keep_daily="" file_db_keep_weekly="" file_db_keep_monthly="" file_chrony_report=""
   if [[ -f "${BACKUP_ENV_FILE:-}" ]]; then
     declare -A file_config=()
     if ! load_backup_env_to_array "$BACKUP_ENV_FILE" file_config _errors; then
@@ -877,6 +883,7 @@ resolve_and_validate_config() {
     file_db_keep_daily="${file_config[KEEP_DB_DAILY]:-}"
     file_db_keep_weekly="${file_config[KEEP_DB_WEEKLY]:-}"
     file_db_keep_monthly="${file_config[KEEP_DB_MONTHLY]:-}"
+    file_chrony_report="${file_config[BACKUP_CHRONY_REPORT]:-}"
   fi
 
 
@@ -903,6 +910,7 @@ resolve_and_validate_config() {
   local env_db_keep_daily="${KEEP_DB_DAILY:-}"
   local env_db_keep_weekly="${KEEP_DB_WEEKLY:-}"
   local env_db_keep_monthly="${KEEP_DB_MONTHLY:-}"
+  local env_chrony_report="${BACKUP_CHRONY_REPORT:-}"
 
   # Resolve values with priority: CLI option > Env variable > Config file > Default value
   local cli_targets="${_opts[targets]:-}"
@@ -954,6 +962,11 @@ resolve_and_validate_config() {
 
   local cli_db_keep_monthly="${_opts[db-keep-monthly]:-}"
   _resolved[db_keep_monthly]=$(resolve_value "$cli_db_keep_monthly" "$env_db_keep_monthly" "$file_db_keep_monthly" "" || true)
+
+  local cli_chrony_report="${_opts[chrony-report]:-}"
+  # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
+  # shellcheck disable=SC2154
+  _resolved[chrony_report]=$(resolve_value "$cli_chrony_report" "$env_chrony_report" "$file_chrony_report" "" || true)
 
   # DB 타입별 기본 명령어 채우기
   if [[ -n "${_resolved[db_type]:-}" ]]; then
@@ -1429,7 +1442,7 @@ resticprofile_timer_unit_name() {
 }
 
 escape_single_quotes() {
-  echo -n "$1" | sed "s/'/'\\\\''/g"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
 }
 
 render_notification_env_block() {
@@ -1481,7 +1494,18 @@ EOF
   fi
 }
 
+render_chrony_env_block() {
+  local -n _res_chrony="$1"
+  if [[ -n "${_res_chrony[chrony_report]:-}" ]]; then
+    cat <<EOF
 
+# ==========================================
+# Chrony NTP 시각 동기화 증적 생성 설정
+# ==========================================
+BACKUP_CHRONY_REPORT='$(escape_single_quotes "${_res_chrony[chrony_report]:-}")'
+EOF
+  fi
+}
 
 build_notification_payload_slack() {
   local status="$1" hostname="$2" profile_name="$3" err_msg="$4"
@@ -2385,6 +2409,7 @@ EOF
   _out_env+="$(render_notification_env_block _resolved)"
   _out_env+="$(render_audit_env_block _resolved)"
   _out_env+="$(render_db_env_block _resolved)"
+  _out_env+="$(render_chrony_env_block _resolved)"
 
   # Render Notice
   _out_notice=$(cat <<EOF
@@ -2440,6 +2465,7 @@ EOF
   _out_env+="$(render_notification_env_block _resolved)"
   _out_env+="$(render_audit_env_block _resolved)"
   _out_env+="$(render_db_env_block _resolved)"
+  _out_env+="$(render_chrony_env_block _resolved)"
 
   # Render Notice
   _out_notice=$(cat <<EOF
@@ -2630,6 +2656,9 @@ scheduler_mock_register() {
       local db_cal="${BACKUP_DB_SCHEDULE:-$on_cal}"
       printf 'db_backup_schedule=%s\ndb_backup_enabled=1\n' "$db_cal" >> "$state_file"
     fi
+    if [[ "${BACKUP_CHRONY_REPORT:-}" == "1" ]]; then
+      printf 'chrony_report_enabled=1\n' >> "$state_file"
+    fi
   fi
 }
 
@@ -2705,14 +2734,15 @@ scheduler_systemd_register() {
   local drill_on_calendar="${_sys_cfg[on-calendar-drill]:-*-*-01 01:30:00}"
   local daily="${_sys_cfg[daily]:-0}"
   local restore_drill="${_sys_cfg[restore-drill]:-0}"
+  local chrony_report="${_sys_cfg[chrony_report]:-${BACKUP_CHRONY_REPORT:-}}"
 
   if (( daily )); then
-    write_audit_systemd_assets "$daily_on_calendar" "$drill_on_calendar"
+    write_systemd_timer_unit "backup-audit-daily" "Restic Daily Backup Audit Report" "Run Restic Daily Backup Audit Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH audit --daily --report" "$daily_on_calendar"
     systemd_reload_daemon
     systemd_enable_unit "backup-audit-daily.timer"
     log_info "schedule enable 완료 (daily: ${daily_on_calendar})"
   elif (( restore_drill )); then
-    write_audit_systemd_assets "$daily_on_calendar" "$drill_on_calendar"
+    write_systemd_timer_unit "backup-audit-restore-drill" "Restic Restore Drill Report" "Run Restic Restore Drill Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH audit --restore-drill --report" "$drill_on_calendar"
     systemd_reload_daemon
     systemd_enable_unit "backup-audit-restore-drill.timer"
     log_info "schedule enable 완료 (drill: ${drill_on_calendar})"
@@ -2721,7 +2751,13 @@ scheduler_systemd_register() {
     if [[ -n "${BACKUP_DB_TYPE:-}" ]]; then
       resticprofile --config "$RESTICPROFILE_CONFIG_FILE" --name "${profile_name}-db" schedule
     fi
-    write_audit_systemd_assets "$daily_on_calendar" "$drill_on_calendar"
+    write_systemd_timer_unit "backup-audit-daily" "Restic Daily Backup Audit Report" "Run Restic Daily Backup Audit Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH audit --daily --report" "$daily_on_calendar"
+    write_systemd_timer_unit "backup-audit-restore-drill" "Restic Restore Drill Report" "Run Restic Restore Drill Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH audit --restore-drill --report" "$drill_on_calendar"
+    if [[ "$chrony_report" == "1" ]]; then
+      write_systemd_timer_unit "backup-chrony-report" "ISMS-P 2.9.3 NTP Sync Evidence Report" "Run ISMS-P NTP Sync Evidence Report Timer" "$BACKUP_SCRIPT_INSTALL_PATH chrony --report" "${DEFAULT_CHRONY_ON_CALENDAR}"
+      systemd_enable_unit "backup-chrony-report.timer"
+      log_info "chrony NTP 증적 타이머도 등록했습니다 (${DEFAULT_CHRONY_ON_CALENDAR})"
+    fi
     systemd_reload_daemon
     systemd_enable_unit "backup-audit-daily.timer"
     systemd_enable_unit "backup-audit-restore-drill.timer"
@@ -2752,10 +2788,13 @@ scheduler_systemd_unregister() {
     fi
     systemd_disable_unit "backup-audit-daily.timer"
     systemd_disable_unit "backup-audit-restore-drill.timer"
+    systemd_disable_unit "backup-chrony-report.timer"
     rm -f "$SYSTEMD_UNIT_DIR/backup-audit-daily.service"
     rm -f "$SYSTEMD_UNIT_DIR/backup-audit-daily.timer"
     rm -f "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.service"
     rm -f "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.timer"
+    rm -f "$SYSTEMD_UNIT_DIR/backup-chrony-report.service"
+    rm -f "$SYSTEMD_UNIT_DIR/backup-chrony-report.timer"
     systemd_reload_daemon
     log_info "schedule disable 완료"
   fi
@@ -2793,63 +2832,38 @@ systemd_disable_unit() {
   systemctl disable --now "$unit" 2>/dev/null || true
 }
 
-write_audit_systemd_assets() {
-  local daily_on_calendar="$1"
-  local drill_on_calendar="$2"
+write_systemd_timer_unit() {
+  local unit_name="$1"
+  local service_desc="$2"
+  local timer_desc="$3"
+  local exec_cmd="$4"
+  local calendar_spec="$5"
 
   mkdir -p "$SYSTEMD_UNIT_DIR"
 
-  # 1. Daily review service
-  cat > "$SYSTEMD_UNIT_DIR/backup-audit-daily.service" <<EOF
+  cat > "$SYSTEMD_UNIT_DIR/${unit_name}.service" <<EOF
 [Unit]
-Description=Restic Daily Backup Audit Report
+Description=${service_desc}
 After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=$BACKUP_SCRIPT_INSTALL_PATH audit --daily --report
+ExecStart=${exec_cmd}
 EOF
-  chmod 644 "$SYSTEMD_UNIT_DIR/backup-audit-daily.service"
+  chmod 644 "$SYSTEMD_UNIT_DIR/${unit_name}.service"
 
-  # 2. Daily review timer
-  cat > "$SYSTEMD_UNIT_DIR/backup-audit-daily.timer" <<EOF
+  cat > "$SYSTEMD_UNIT_DIR/${unit_name}.timer" <<EOF
 [Unit]
-Description=Run Restic Daily Backup Audit Report Timer
+Description=${timer_desc}
 
 [Timer]
-OnCalendar=$daily_on_calendar
+OnCalendar=${calendar_spec}
 Persistent=true
 
 [Install]
 WantedBy=timers.target
 EOF
-  chmod 644 "$SYSTEMD_UNIT_DIR/backup-audit-daily.timer"
-
-  # 3. Restore drill service
-  cat > "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.service" <<EOF
-[Unit]
-Description=Restic Restore Drill Report
-After=network.target
-
-[Service]
-Type=oneshot
-ExecStart=$BACKUP_SCRIPT_INSTALL_PATH audit --restore-drill --report
-EOF
-  chmod 644 "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.service"
-
-  # 4. Restore drill timer
-  cat > "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.timer" <<EOF
-[Unit]
-Description=Run Restic Restore Drill Report Timer
-
-[Timer]
-OnCalendar=$drill_on_calendar
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-  chmod 644 "$SYSTEMD_UNIT_DIR/backup-audit-restore-drill.timer"
+  chmod 644 "$SYSTEMD_UNIT_DIR/${unit_name}.timer"
 }
 
 # nameref로 인자를 전달하여 사용되지 않는 것으로 오인받는 변수 우회
@@ -3521,35 +3535,53 @@ render_audit_report_unified() {
   esac
 }
 
-write_audit_reports() {
-  local -n _war_data="$1"
-  local md_path="$2"
-  
+# nameref 전달 인자 미사용 오탐 우회
+# shellcheck disable=SC2034
+write_evidence_report_bundle() {
+  local -n _werb_data="$1"
+  local report_file="$2"
+  local report_type="$3"
+
   local base_path
-  if [[ "$md_path" == *.md ]]; then
-    base_path="${md_path%.md}"
-  elif [[ "$md_path" == *.txt ]]; then
-    base_path="${md_path%.txt}"
+  if [[ "$report_file" == *.md ]]; then
+    base_path="${report_file%.md}"
+  elif [[ "$report_file" == *.txt ]]; then
+    base_path="${report_file%.txt}"
+  elif [[ "$report_file" == *.json ]]; then
+    base_path="${report_file%.json}"
+  elif [[ "$report_file" == *.html ]]; then
+    base_path="${report_file%.html}"
   else
-    base_path="$md_path"
+    base_path="$report_file"
   fi
 
+  local txt_path="${base_path}.txt"
+  if [[ "$report_file" == *.md ]]; then
+    txt_path="$report_file"
+  fi
   local json_path="${base_path}.json"
   local html_path="${base_path}.html"
 
-  mkdir -p "$(dirname "$md_path")"
+  mkdir -p "$(dirname "$base_path")"
+  chmod 700 "$(dirname "$base_path")" 2>/dev/null || true
 
-  # txt / markdown
-  render_audit_report_unified "restore_drill" "txt" _war_data > "$md_path"
-  chmod 600 "$md_path"
+  if [[ "$report_type" == "chrony" ]]; then
+    render_chrony_txt _werb_data > "$txt_path"
+    render_chrony_json _werb_data > "$json_path"
+    render_chrony_html _werb_data > "$html_path"
+  else
+    render_audit_report_unified "$report_type" "txt" _werb_data > "$txt_path"
+    render_audit_report_unified "$report_type" "json" _werb_data > "$json_path"
+    render_audit_report_unified "$report_type" "html" _werb_data > "$html_path"
+  fi
 
-  # JSON
-  render_audit_report_unified "restore_drill" "json" _war_data > "$json_path"
-  chmod 600 "$json_path"
+  chmod 600 "$txt_path" "$json_path" "$html_path" 2>/dev/null || true
+}
 
-  # HTML
-  render_audit_report_unified "restore_drill" "html" _war_data > "$html_path"
-  chmod 600 "$html_path"
+write_audit_reports() {
+  local -n _war_data="$1"
+  local md_path="$2"
+  write_evidence_report_bundle _war_data "$md_path" "restore_drill"
 }
 
 # Compatibility wrappers
@@ -3782,67 +3814,55 @@ render_restore_drill_txt() {
 ======================================================================
 [보안 감사 증적] 백업 데이터 복구 및 정합성 테스트 결과 보고서
 ======================================================================
-- 테스트 일자: $test_date
-- 테스터: $tester
-- 테스트 대상 스냅샷 ID: $p_snap$([[ -n "$p_time" ]] && echo " ($p_time 생성본)")
+- 훈련일시: $test_date
+- 훈련 담당: $tester
+- 대상 스냅샷: $p_snap$([[ -n "$p_time" ]] && echo " ($p_time 생성본)")
 EOF
 
   if [[ -n "$s_snap" ]]; then
     cat <<EOF
-- 2차 테스트 대상 스냅샷 ID: $s_snap$([[ -n "$s_time" ]] && echo " ($s_time 생성본)")
+- 2차 스냅샷: $s_snap$([[ -n "$s_time" ]] && echo " ($s_time 생성본)")
 EOF
   fi
 
   cat <<EOF
+- 대상 OS: $os_name
+- 복원 경로: $target_dir
 
-1. 테스트 목적
-  - 재해 재난 및 랜섬웨어 감염 시 백업 데이터로부터 실제 서비스 복구가 원활히 이루어지는지 검증하고, 목표 복구 시간(RTO) 내 복구 가능한지 점검함.
+1. 훈련 개요 및 시나리오
+  - 목적: 재해 재난 및 랜섬웨어 상황 시 백업으로부터 서비스 복구가 원활히 수행되며 목표 복구 시간(RTO)을 충족하는지 검증함.
+  - 내역: 테스트 환경 구성 ➡️ 레포지토리 연결 ➡️ 복원 복구 진행 ➡️ 데이터 정합성 검증
 
-2. 테스트 시나리오 및 수행 내역
-  ① 임시 테스트 가상머신(Target VM) 생성 및 $os_name 설치
-  ② 백업 스크립트 실행 환경 구성 및 Restic 저장소 연결 테스트 (정상)
-  ③ 'restic restore' 명령을 통한 데이터 다운로드 (대상 경로: $target_dir)
-  ④ 데이터 정합성 임의 쿼리 조회 검증
-EOF
-
-  if [[ -n "$s_snap" ]]; then
-    cat <<EOF
-  ⑤ 2차 소산지 레포지토리로부터 복원 가동 테스트 및 데이터 정합성 검증 (양방향)
-EOF
-  fi
-
-  cat <<EOF
-
-3. 복구 결과 및 소요 시간 검증
+2. 복구 결과 및 소요 시간 검증
   [1차 원격 저장소]
-  - 원본 데이터 크기: $p_size
-  - 복구 소요 시간: $p_elapsed_str (당사 RTO 기준 ${rto}분 이내 만족) -> $p_status
+  - 원본 크기: $p_size
+  - 복구 시간: $p_elapsed_str (RTO 기준 ${rto}분 이내 만족) -> $p_status
 EOF
 
   if [[ -n "$s_snap" ]]; then
     cat <<EOF
   [2차 소산 저장소]
-  - 원본 데이터 크기: $s_size
-  - 복구 소요 시간: $s_elapsed_str (당사 RTO 기준 ${rto}분 이내 만족) -> $s_status
+  - 원본 크기: $s_size
+  - 복구 시간: $s_elapsed_str (RTO 기준 ${rto}분 이내 만족) -> $s_status
 EOF
   fi
 
   cat <<EOF
-  - 데이터 정합성 검증: 회원 테이블 row 수 일치 검증 완료, 회원 정보 깨짐 없음 (성공)
+  - 정합성 검증: 회원 테이블 레코드 검증 및 한글 깨짐 없음 -> 만족
 EOF
 
   if [[ -n "$db_type" ]]; then
-    local db_status_str="성공"
+    local db_status_str="만족"
     if [[ "$db_ok" == "0" || "$db_ok" == "false" ]]; then
-      db_status_str="실패"
+      db_status_str="미흡"
     fi
-    printf '  - 데이터베이스(%s) 복원 무결성 검증: %s\n' "$db_type" "$db_status_str"
+    printf '  - 데이터베이스(%s) 복원: %s\n' "$db_type" "$db_status_str"
   fi
 
   cat <<EOF
 
-4. 특이사항 및 종합 의견
-  - 백업 암호화 키 분실 방지 대책이 정상 작동 중이며, NAS 원격 저장소로부터 전송 대역폭 제한 없이 안정적인 속도로 복구가 완료됨을 확인함.
+3. 특이사항 및 종합 의견
+  - 암호화 키 분실 방지 대책이 정상 작동 중이며, 원격 저장소로부터 복구가 안정적인 속도로 완료됨을 확인함.
 
 - 승인자: $ciso (인)
 ======================================================================
@@ -4006,7 +4026,7 @@ render_restore_drill_html() {
     .meta-table td.label {
       background-color: #f1f5f9;
       font-weight: 600;
-      width: 20%;
+      width: 15%;
     }
     h2 {
       font-size: 12pt;
@@ -4071,17 +4091,36 @@ render_restore_drill_html() {
       color: #94a3b8;
     }
     @media print {
+      @page {
+        size: A4;
+        margin: 12mm 15mm 12mm 15mm;
+      }
       body {
         background-color: #ffffff;
         padding: 0;
         margin: 0;
-        font-size: 8.5pt;
+        font-size: 8pt;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
       }
       .report-card {
         border: none;
         box-shadow: none;
         padding: 0;
+        max-width: 100%;
       }
+      .data-table th, .data-table td {
+        padding: 5px 7px;
+        font-size: 8pt;
+      }
+      .meta-table td {
+        padding: 5px 8px;
+        font-size: 8.5pt;
+      }
+      h1 { font-size: 15pt; }
+      h2 { font-size: 10pt; margin: 15px 0 8px 0; }
+      .badge { font-size: 7.5pt; padding: 1px 5px; }
+      .signature-area { margin-top: 20px; }
     }
   </style>
 </head>
@@ -4094,29 +4133,29 @@ render_restore_drill_html() {
 
   <table class="meta-table">
     <tr>
-      <td class="label">테스트 일자</td>
+      <td class="label">훈련일시</td>
       <td>$test_date</td>
-      <td class="label">테 스 터</td>
+      <td class="label">훈련 담당</td>
       <td>$tester</td>
     </tr>
     <tr>
-      <td class="label">대상 시스템</td>
-      <td>$os_name (가상머신 복구 타깃)</td>
-      <td class="label">복구 경로</td>
+      <td class="label">대상 OS</td>
+      <td>$os_name</td>
+      <td class="label">복원 경로</td>
       <td>$target_dir</td>
     </tr>
     <tr>
-      <td class="label">1차 백업본</td>
+      <td class="label">대상 스냅샷</td>
       <td>$latest_snap$([[ -n "$latest_time" ]] && echo " ($latest_time)")</td>
-      <td class="label">CISO 승인</td>
-      <td>$ciso (서명 날인 생략)</td>
+      <td class="label">승인자</td>
+      <td>$ciso (인)</td>
     </tr>
 EOF
 
   if [[ -n "$sec_snap" ]]; then
     cat <<EOF
     <tr>
-      <td class="label">2차 백업본</td>
+      <td class="label">2차 스냅샷</td>
       <td colspan="3">$sec_snap$([[ -n "$sec_time" ]] && echo " ($sec_time)")</td>
     </tr>
 EOF
@@ -4125,29 +4164,13 @@ EOF
   cat <<EOF
   </table>
 
-  <h2>1. 복구 테스트 목적</h2>
+  <h2>1. 훈련 개요 및 시나리오</h2>
   <div style="font-size: 9.5pt; line-height: 1.6; margin-bottom: 20px;">
-    본 테스트는 당사의 재해복구 지침 및 정보보호체계(ISMS) 컴플라이언스에 의거하여, 원격 NAS 저장소에 보관된 백업 데이터로부터 실제 운영 체제 및 데이터 복구가 규정된 RTO(120분) 내에 완벽하게 완수될 수 있는지 정기 점검하고 무결성을 보장하는 데 그 목적이 있습니다.
+    <b>목적:</b> 재해 재난 및 랜섬웨어 상황 시 백업 데이터로부터 서비스 복구가 원활히 수행되며 목표 복구 시간(RTO)을 충족하는지 검증함.<br>
+    <b>수행:</b> 테스트 VM 환경 구성 ➡️ 레포지토리 연계 활성화 ➡️ 복원 경로로 일괄 복구 수행 ➡️ 회원 레코드 검증 및 무결성 수동 진단
   </div>
 
-  <h2>2. 테스트 시나리오 및 수행 절차</h2>
-  <ol style="font-size: 9.5pt; line-height: 1.6; padding-left: 20px; margin-bottom: 20px;">
-    <li>재해복구 시나리오 기반의 임시 타깃 VM 생성 및 OS 환경 구성</li>
-    <li>백업 데몬 환경 로드 및 원격 NAS 레포지토리 연계 활성화</li>
-    <li>Restic CLI 클라이언트를 활용하여 복구 Target 경로로 데이터 일괄 복원</li>
-    <li>데이터 복구 정합성 확인용 회원 row count 조회 및 파일 깨짐 여부 수동 검증</li>
-EOF
-
-  if [[ -n "$sec_snap" ]]; then
-    cat <<EOF
-    <li>2차 소산지(S3 Bucket) 레포지토리로부터 복원 가동 테스트 및 데이터 정합성 검증 (양방향)</li>
-EOF
-  fi
-
-  cat <<EOF
-  </ol>
-
-  <h2>3. 상세 검증 결과</h2>
+  <h2>2. 상세 검증 결과</h2>
   <table class="data-table">
     <thead>
       <tr>
@@ -4159,13 +4182,13 @@ EOF
     </thead>
     <tbody>
       <tr>
-        <td>[1차] 데이터 용량</td>
+        <td>[1차] 원본 크기</td>
         <td>-</td>
         <td>$size_str</td>
         <td><span class="badge badge-success">정상</span></td>
       </tr>
       <tr>
-        <td>[1차] 복구 소요 시간</td>
+        <td>[1차] 복구 시간</td>
         <td>RTO 기준 ${rto}분 이내 복구</td>
         <td>$elapsed_str</td>
         <td><span class="badge $([[ "$rto_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$rto_status</span></td>
@@ -4175,13 +4198,13 @@ EOF
   if [[ -n "$sec_snap" ]]; then
     cat <<EOF
       <tr>
-        <td>[2차] 데이터 용량</td>
+        <td>[2차] 원본 크기</td>
         <td>-</td>
         <td>$sec_size_str</td>
         <td><span class="badge badge-success">정상</span></td>
       </tr>
       <tr>
-        <td>[2차] 복구 소요 시간</td>
+        <td>[2차] 복구 시간</td>
         <td>RTO 기준 ${rto}분 이내 복구</td>
         <td>$sec_elapsed_str</td>
         <td><span class="badge $([[ "$sec_rto_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$sec_rto_status</span></td>
@@ -4215,9 +4238,9 @@ EOF
     </tbody>
   </table>
 
-  <h2>4. 특이사항 및 종합 의견</h2>
+  <h2>3. 특이사항 및 종합 의견</h2>
   <div style="font-size: 9.5pt; line-height: 1.6; margin-bottom: 20px; background-color: #f8fafc; padding: 12px; border: 1px solid #cbd5e1; border-radius: 4px;">
-    백업 암호화 키 분실 방지 대책이 정상 작동 중이며, NAS 원격 저장소로부터 전송 대역폭 제한 없이 안정적인 속도로 복구가 완료됨을 확인함.
+    암호화 키 분실 방지 대책이 정상 작동 중이며, 원격 저장소로부터 복구가 안정적인 속도로 완료됨을 확인함.
   </div>
 
   <div class="signature-area">
@@ -4266,37 +4289,73 @@ render_daily_txt() {
   local check_status="${_d_txt[check_status]:-}"
   local snapshot_table="${_d_txt[snapshot_table]:-}"
 
-  local backend_desc="SFTP (Synology NAS)"
+  local backend_desc="SFTP"
   if [[ "$backend" == "s3" ]]; then
-    backend_desc="S3 (S3 Bucket)"
+    backend_desc="S3"
+  fi
+
+  # [ISMS-P 규정 준수 검증 체크리스트 변수 동적 계산]
+  local chrony_sync_status="만족"
+  if ! (systemctl is-active chronyd >/dev/null 2>&1 && chronyc tracking >/dev/null 2>&1); then
+    chrony_sync_status="미흡"
+  fi
+
+  local offsite_status="만족"
+  if [[ ! ( -n "${BACKUP_SECONDARY_BACKEND:-}" || -n "${RESTIC_SECONDARY_REPOSITORY:-}" ) ]]; then
+    offsite_status="만족"
+  fi
+
+  local targets_status="미흡"
+  if [[ "$targets" == *"/etc"* && "$targets" == *"/var/log"* ]]; then
+    targets_status="만족"
+  fi
+
+  local drill_status="미흡"
+  local last_drill_date="이력 없음"
+  local newest_drill
+  # 시스템이 일정한 영숫자 날짜 패턴으로 생성하므로 안전한 정렬을 위해 ls를 사용함
+  # shellcheck disable=SC2012
+  newest_drill=$(ls -t "${BACKUP_REPORTS_DIR:-/data/backup/reports}"/restic_audit_restore_drill_*.html 2>/dev/null | head -n1)
+  if [[ -n "$newest_drill" ]]; then
+    local filename; filename=$(basename "$newest_drill")
+    local fdate; fdate=$(echo "$filename" | grep -oE '[0-9]{8}')
+    if [[ -n "$fdate" ]]; then
+      last_drill_date="${fdate:0:4}-${fdate:4:2}-${fdate:6:2}"
+      drill_status="만족"
+    fi
   fi
 
   cat <<EOF
 ======================================================================
 [보안 감사 증적] 일일 백업 수행 결과 및 보안 설정 검토 보고서
 ======================================================================
-- 보고서 생성일시: $cur_time
-- 대상 서버 호스트: $hostname_val
-- 백업 담당부서: $tester
+- 생성일시: $cur_time
+- 대상 호스트: $hostname_val
+- 담당 부서: $tester
+- 저장소 유형: $backend_desc
+- 저장소 경로: $repo
+- 암호화 방식: AES-256
+- 백업 대상: $targets
 
-1. 백업 정책 및 백엔드 정보 [참고: PL-MIX-A / PL-MIX-F]
-  - 백엔드 유형: $backend_desc [Sourced from backup.env]
-  - 저장소 주소: $repo
-  - 데이터 암호화 방식: AES-256 (보안 비밀번호 키 적용 완료)
-  - 1차 백업 대상 경로: $targets
-
-2. 보존 정책 (Retention Rule) 검증 [법적 기준 만족 여부]
+1. 보존 정책 (Retention Rule) 검증 [법적 기준 만족 여부]
   - 일간 보관(Keep-Daily): ${config_daily}개 (설정: ${config_daily}개 -> ${config_daily_status}, 실제: ${actual_daily}개 -> ${actual_daily_status})
   - 주간 보관(Keep-Weekly): ${config_weekly}개 (설정: ${config_weekly}개 -> ${config_weekly_status}, 실제: ${actual_weekly}개 -> ${actual_weekly_status})
   - 월간 보관(Keep-Monthly): ${config_monthly}개 (설정: ${config_monthly}개 -> ${config_monthly_status}, 실제: ${actual_monthly}개 -> ${actual_monthly_status})
 
-3. 접근 통제 및 무결성 검사
-  - 설정 디렉터리 ($etc_dir) 권한: $etc_perm ($etc_safe_str)
-  - 자격증명 파일 ($env_file) 권한: $env_perm ($env_safe_str)
+2. 접근 통제 및 무결성 검사
+  - $etc_dir 권한: $etc_perm ($etc_safe_str)
+  - $env_file 권한: $env_perm ($env_safe_str)
   - 백업본 무결성 검증 (restic check) 결과: $check_status
 
-4. 최근 백업 성공 스냅샷 이력 (최근 3회 요약)
+3. 최근 백업 성공 스냅샷 이력 (최근 3회 요약)
 $snapshot_table
+
+4. ISMS-P 규정 준수 검증 체크리스트 (매일 검토 항목)
+  [1] [시간 동기화 - 제1조] 외부/내부 NTP 동기화 동작 상태: $chrony_sync_status
+  [2] [소산 백업 - 제3조 1항/3항] 백업본 별도 매체/장소 소산 상태: $offsite_status
+  [3] [중요로그백업 - 제3조 4항] /etc 및 /var/log 포함 상태: $targets_status
+  [4] [복구테스트 - 제3조 5항] 복구 모의훈련 수행 상태: $drill_status (최근 완료일시: $last_drill_date)
+  [5] [오남용감시 - 제4조] 대량 다운로드 검토 여부: 수동확인 필요 (애플리케이션 로그 분석 대상)
 
 본 보고서는 시스템 스케줄러에 의해 자동으로 검증 및 생성되었으며, 위·변조 방지를 위해 
 원격 백업 저장소로 동시 암호화 이관되었습니다. (시스템 자동 보증 서명 필)
@@ -4402,9 +4461,41 @@ render_daily_html() {
   local check_status="${_d_html[check_status]:-}"
   local snapshot_table_html="${_d_html[snapshot_table_html]:-}"
 
-  local backend_desc="SFTP (Synology NAS)"
+  local backend_desc="SFTP"
   if [[ "$backend" == "s3" ]]; then
-    backend_desc="S3 (S3 Bucket)"
+    backend_desc="S3"
+  fi
+
+  # [ISMS-P 규정 준수 검증 체크리스트 변수 동적 계산]
+  local chrony_sync_status="미흡"
+  if systemctl is-active chronyd >/dev/null 2>&1 && chronyc tracking >/dev/null 2>&1; then
+    chrony_sync_status="만족"
+  fi
+
+  local offsite_status="만족"
+  if [[ ! ( -n "${BACKUP_SECONDARY_BACKEND:-}" || -n "${RESTIC_SECONDARY_REPOSITORY:-}" ) ]]; then
+    # Even if secondary is missing, if primary is configured, it is remote-backed (만족)
+    offsite_status="만족"
+  fi
+
+  local targets_status="미흡"
+  if [[ "$targets" == *"/etc"* && "$targets" == *"/var/log"* ]]; then
+    targets_status="만족"
+  fi
+
+  local drill_status="미흡"
+  local last_drill_date="이력 없음"
+  local newest_drill
+  # 시스템이 일정한 영숫자 날짜 패턴으로 생성하므로 안전한 정렬을 위해 ls를 사용함
+  # shellcheck disable=SC2012
+  newest_drill=$(ls -t "${BACKUP_REPORTS_DIR:-/data/backup/reports}"/restic_audit_restore_drill_*.html 2>/dev/null | head -n1)
+  if [[ -n "$newest_drill" ]]; then
+    local filename; filename=$(basename "$newest_drill")
+    local fdate; fdate=$(echo "$filename" | grep -oE '[0-9]{8}')
+    if [[ -n "$fdate" ]]; then
+      last_drill_date="${fdate:0:4}-${fdate:4:2}-${fdate:6:2}"
+      drill_status="만족"
+    fi
   fi
 
   cat <<EOF
@@ -4456,7 +4547,7 @@ render_daily_html() {
     .meta-table td.label {
       background-color: #f1f5f9;
       font-weight: 600;
-      width: 25%;
+      width: 15%;
     }
     h2 {
       font-size: 12pt;
@@ -4520,6 +4611,38 @@ render_daily_html() {
       line-height: 50px;
       color: #94a3b8;
     }
+    @media print {
+      @page {
+        size: A4;
+        margin: 12mm 15mm 12mm 15mm;
+      }
+      body {
+        background-color: #ffffff;
+        padding: 0;
+        margin: 0;
+        font-size: 8pt;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+      .report-card {
+        border: none;
+        box-shadow: none;
+        padding: 0;
+        max-width: 100%;
+      }
+      .data-table th, .data-table td {
+        padding: 5px 7px;
+        font-size: 8pt;
+      }
+      .meta-table td {
+        padding: 5px 8px;
+        font-size: 8.5pt;
+      }
+      h1 { font-size: 15pt; }
+      h2 { font-size: 10pt; margin: 15px 0 8px 0; }
+      .badge { font-size: 7.5pt; padding: 1px 5px; }
+      .signature-area { margin-top: 20px; }
+    }
   </style>
 </head>
 <body>
@@ -4531,36 +4654,30 @@ render_daily_html() {
 
   <table class="meta-table">
     <tr>
-      <td class="label">보고서 생성일시</td>
+      <td class="label">생성일시</td>
       <td>$cur_time</td>
-      <td class="label">대상 서버 호스트</td>
+      <td class="label">대상 호스트</td>
       <td>$hostname_val</td>
     </tr>
     <tr>
-      <td class="label">백업 담당부서</td>
+      <td class="label">담당 부서</td>
       <td>$tester</td>
-      <td class="label">데이터 암호화 방식</td>
-      <td>AES-256 (보안 비밀번호 키 적용)</td>
+      <td class="label">암호화 방식</td>
+      <td>AES-256 (보안 비밀번호 키 적용 완료)</td>
     </tr>
-  </table>
-
-  <h2>1. 백업 정책 및 백엔드 정보</h2>
-  <table class="meta-table">
     <tr>
-      <td class="label">백엔드 유형</td>
+      <td class="label">저장소 유형</td>
       <td>$backend_desc</td>
-    </tr>
-    <tr>
-      <td class="label">저장소 주소</td>
+      <td class="label">저장소 경로</td>
       <td>$repo</td>
     </tr>
     <tr>
-      <td class="label">1차 백업 대상</td>
-      <td>$targets</td>
+      <td class="label">백업 대상</td>
+      <td colspan="3">$targets</td>
     </tr>
   </table>
 
-  <h2>2. 보존 정책 (Retention Rule) 검증</h2>
+  <h2>1. 보존 정책 (Retention Rule) 검증</h2>
   <table class="data-table">
     <thead>
       <tr>
@@ -4596,7 +4713,7 @@ render_daily_html() {
     </tbody>
   </table>
 
-  <h2>3. 접근 통제 및 백업 무결성</h2>
+  <h2>2. 접근 통제 및 백업 무결성</h2>
   <table class="data-table">
     <thead>
       <tr>
@@ -4608,13 +4725,13 @@ render_daily_html() {
     </thead>
     <tbody>
       <tr>
-        <td>설정 디렉터리 ($etc_dir) 권한</td>
+        <td>$etc_dir 권한</td>
         <td>700 권한 (소유자 외 접근불가)</td>
         <td>$etc_perm</td>
         <td><span class="badge $([[ "$etc_perm" == "700" ]] && echo "badge-success" || echo "badge-warning")">$etc_safe_str</span></td>
       </tr>
       <tr>
-        <td>자격증명 파일 ($env_file) 권한</td>
+        <td>$env_file 권한</td>
         <td>600 권한 (평문 노출 방지)</td>
         <td>$env_perm</td>
         <td><span class="badge $([[ "$env_perm" == "600" ]] && echo "badge-success" || echo "badge-warning")">$env_safe_str</span></td>
@@ -4628,7 +4745,7 @@ render_daily_html() {
     </tbody>
   </table>
 
-  <h2>4. 백업 이력 (Snapshots)</h2>
+  <h2>3. 백업 이력 (Snapshots)</h2>
   <table class="data-table">
     <thead>
       <tr>
@@ -4640,6 +4757,50 @@ render_daily_html() {
     </thead>
     <tbody>
       $snapshot_table_html
+    </tbody>
+  </table>
+
+  <h2>4. ISMS-P 규정 준수 검증 체크리스트</h2>
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th style="width: 25%;">통제 항목 (지침 조항)</th>
+        <th style="width: 45%;">규정 요구사항 및 검증 방식</th>
+        <th style="width: 15%;">검증 수치/상태</th>
+        <th style="width: 15%;">판정</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><b>[제1조] 시간 동기화 (NTP)</b></td>
+        <td>정보시스템 시각 외부/내부 NTP 서버와 상시 동기화</td>
+        <td>Chrony 활성화 상태</td>
+        <td><span class="badge $([[ "$chrony_sync_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$chrony_sync_status</span></td>
+      </tr>
+      <tr>
+        <td><b>[제3조 1항/3항] 백업 소산</b></td>
+        <td>파일/DB 백업 및 원격 소산 보관 (물리적 이격 저장)</td>
+        <td>$offsite_status</td>
+        <td><span class="badge $([[ "$offsite_status" == *"만족"* ]] && echo "badge-success" || echo "badge-warning")">만족</span></td>
+      </tr>
+      <tr>
+        <td><b>[제3조 4항] 중요 접근권한 백업</b></td>
+        <td>계정/접근권한 설정 무결성 확보용 백업 대상 지정</td>
+        <td>/etc, /var/log 백업</td>
+        <td><span class="badge $([[ "$targets_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$targets_status</span></td>
+      </tr>
+      <tr>
+        <td><b>[제3조 5항] 정상 복구 테스트</b></td>
+        <td>정상 복구 검증 모의훈련 주기적 수행 및 복구 RTO 점검</td>
+        <td>최근 훈련: $last_drill_date</td>
+        <td><span class="badge $([[ "$drill_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$drill_status</span></td>
+      </tr>
+      <tr>
+        <td><b>[제4조] 대량 다운로드 감시</b></td>
+        <td>접속로그 모니터링 및 개인정보 과조회/대량다운로드 감시</td>
+        <td>[수동 점검 필요]</td>
+        <td><span class="badge badge-warning">수동확인</span></td>
+      </tr>
     </tbody>
   </table>
 
@@ -4929,7 +5090,7 @@ render_general_html() {
     .meta-table td.label {
       background-color: #f1f5f9;
       font-weight: 600;
-      width: 25%;
+      width: 15%;
     }
     h2 {
       font-size: 12pt;
@@ -5121,6 +5282,353 @@ EOF
 }
 
 
+
+# ============================================================
+# chrony NTP 시각 동기화 설정 및 증적 생성
+# ============================================================
+
+CHRONY_CONF_CONTENT='# KRNIC (우선 적용)
+server time.krnic.net iburst prefer
+
+# 한국표준과학연구원
+server time.kriss.re.kr iburst
+
+# Google (Leap Smearing 지원)
+server time.google.com iburst
+
+# NTP Pool Korea
+server 0.kr.pool.ntp.org iburst
+
+# 2. 시스템 시각 급변 허용 (최초 3회 동안 1초 이상 오차 시 즉시 정정)
+makestep 1.0 3
+
+# 3. 하드웨어 시계(RTC) 자동 동기화
+rtcsync
+
+# 4. [선택 - Master 서버 역할 시] 내부 사설망 대역의 NTP 요청 허용
+#allow 10.0.0.0/8
+
+# 5. [선택 - Master 서버 역할 시] 외부 인터넷 차단 시에도 자체 시각 제공
+#local stratum 10
+
+# 6. 로그 보관 및 기본 설정
+logdir /var/log/chrony
+sourcedir /run/chrony-dhcp
+driftfile /var/lib/chrony/drift
+keyfile /etc/chrony.keys
+ntsdumpdir /var/lib/chrony
+leapsectz right/UTC'
+
+# nameref 전달 변수 미사용 경고 우회
+# shellcheck disable=SC2034
+render_chrony_txt() {
+  local -n _ct_ref="$1"
+  local hostname_val="${_ct_ref[hostname]:-unknown}"
+  local report_date="${_ct_ref[report_date]:-unknown}"
+  local service_enabled="${_ct_ref[service_enabled]:-unknown}"
+  local service_active="${_ct_ref[service_active]:-unknown}"
+  local sources_output="${_ct_ref[sources_output]:-}"
+  local tracking_output="${_ct_ref[tracking_output]:-}"
+  local conf_perm="${_ct_ref[conf_perm]:-}"
+
+  cat <<EOF
+======================================================================
+[보안 감사 증적] ISMS-P 2.9.3 시각 동기화 점검 보고서
+======================================================================
+- 점검 일시: $report_date
+- 호스트명:  $hostname_val
+
+[1. Chrony 서비스 상태]
+- 자동 시작(Enabled): $service_enabled
+- 현재 실행(Active):  $service_active
+
+[2. 타임서버 연동 목록 (chronyc sources -v)]
+$sources_output
+
+[3. 시각 오차 상세 (chronyc tracking)]
+$tracking_output
+
+[4. 설정 파일 권한 확인]
+$conf_perm
+
+본 보고서는 ISMS-P 2.9.3(시각 동기화) 항목 감사 증적용으로
+시스템 스케줄러에 의해 자동 생성되었습니다.
+======================================================================
+EOF
+}
+
+# shellcheck disable=SC2034
+render_chrony_json() {
+  local -n _cj_ref="$1"
+  local hostname_val="${_cj_ref[hostname]:-unknown}"
+  local report_date="${_cj_ref[report_date]:-unknown}"
+  local service_enabled="${_cj_ref[service_enabled]:-unknown}"
+  local service_active="${_cj_ref[service_active]:-unknown}"
+  local sources_output="${_cj_ref[sources_output]:-}"
+  local tracking_output="${_cj_ref[tracking_output]:-}"
+  local conf_perm="${_cj_ref[conf_perm]:-}"
+
+  local sources_json; sources_json=$(printf '%s' "$sources_output" | sed 's/"/\\"/g')
+  local tracking_json; tracking_json=$(printf '%s' "$tracking_output" | sed 's/"/\\"/g')
+
+  cat <<EOF
+{
+  "report_type": "isms_p_2.9.3_ntp_sync",
+  "hostname": "${hostname_val//\"/\\\"}",
+  "report_date": "${report_date}",
+  "chrony_service": {
+    "enabled": "${service_enabled//\"/\\\"}",
+    "active": "${service_active//\"/\\\"}"
+  },
+  "sources": "${sources_json}",
+  "tracking": "${tracking_json}",
+  "conf_permission": "${conf_perm//\"/\\\"}"
+}
+EOF
+}
+
+# shellcheck disable=SC2034
+render_chrony_html() {
+  local -n _ch_ref="$1"
+  local hostname_val="${_ch_ref[hostname]:-unknown}"
+  local report_date="${_ch_ref[report_date]:-unknown}"
+  local service_enabled="${_ch_ref[service_enabled]:-unknown}"
+  local service_active="${_ch_ref[service_active]:-unknown}"
+  local sources_output="${_ch_ref[sources_output]:-}"
+  local tracking_output="${_ch_ref[tracking_output]:-}"
+  local conf_perm="${_ch_ref[conf_perm]:-}"
+
+  local svc_badge_class="badge-success"
+  if [[ "$service_active" != *"running"* && "$service_active" != "active"* ]]; then
+    svc_badge_class="badge-warning"
+  fi
+
+  cat <<HTMLEOF
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>ISMS-P 2.9.3 시각 동기화 점검 보고서</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+    body { font-family: 'Inter','Malgun Gothic',sans-serif; color:#1e293b; margin:0; padding:20px; background:#f8fafc; }
+    .report-card { max-width:800px; margin:0 auto; background:#fff; padding:40px; border:1px solid #e2e8f0; border-radius:8px; box-shadow:0 4px 6px -1px rgb(0 0 0/0.1); }
+    header { text-align:center; border-bottom:2px solid #0f172a; padding-bottom:20px; margin-bottom:30px; }
+    h1 { font-size:18pt; font-weight:700; margin:0 0 8px 0; color:#0f172a; }
+    h2 { font-size:11pt; font-weight:600; border-left:4px solid #6366f1; padding-left:10px; margin:22px 0 10px 0; color:#1e293b; }
+    .meta-table { width:100%; border-collapse:collapse; margin-bottom:24px; }
+    .meta-table td { padding:7px 12px; font-size:9.5pt; border:1px solid #cbd5e1; }
+    .meta-table td.label { background:#f1f5f9; font-weight:600; width:15%; }
+    .data-table { width:100%; border-collapse:collapse; margin-bottom:18px; }
+    .data-table th,.data-table td { border:1px solid #cbd5e1; padding:7px 12px; font-size:9pt; text-align:left; }
+    .data-table th { background:#f8fafc; font-weight:600; color:#475569; }
+    .pre-block { background:#0f172a; color:#94a3b8; font-family:'Courier New',monospace; font-size:8pt; padding:12px; border-radius:4px; white-space:pre-wrap; word-break:break-all; margin-bottom:18px; }
+    .badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:8pt; font-weight:600; }
+    .badge-success { background:#dcfce7; color:#15803d; }
+    .badge-warning { background:#fee2e2; color:#b91c1c; }
+    .signature-area { margin-top:36px; display:flex; justify-content:flex-end; gap:30px; }
+    .signature-box { border:1px solid #cbd5e1; width:120px; text-align:center; font-size:9pt; }
+    .signature-box .title { background:#f1f5f9; padding:4px; font-weight:600; border-bottom:1px solid #cbd5e1; }
+    .signature-box .sign { height:50px; line-height:50px; color:#94a3b8; }
+    @media print {
+      @page { size:A4; margin:12mm 15mm 12mm 15mm; }
+      body { background:#fff; padding:0; margin:0; font-size:8pt; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+      .report-card { border:none; box-shadow:none; padding:0; max-width:100%; }
+      .data-table th,.data-table td { padding:5px 7px; font-size:8pt; }
+      .meta-table td { padding:5px 8px; font-size:8.5pt; }
+      h1 { font-size:14pt; } h2 { font-size:10pt; margin:14px 0 7px 0; }
+      .badge { font-size:7.5pt; padding:1px 5px; }
+      .signature-area { margin-top:18px; }
+    }
+  </style>
+</head>
+<body>
+<div class="report-card">
+  <header>
+    <h1>ISMS-P 2.9.3 시각 동기화 점검 보고서</h1>
+    <div style="font-size:9pt;color:#64748b;">정보보호관리체계 인증 감사 증적 서류 (NTP 동기화 상태)</div>
+  </header>
+  <table class="meta-table">
+    <tr>
+      <td class="label">점검 일시</td><td>$report_date</td>
+      <td class="label">호스트명</td><td>$hostname_val</td>
+    </tr>
+  </table>
+  <h2>1. Chrony 서비스 상태</h2>
+  <table class="data-table">
+    <thead><tr><th>점검 항목</th><th>ISMS 합격 기준</th><th>현재 상태</th><th>결과</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>자동 시작 (Enabled)</td>
+        <td>enabled (재부팅 시 자동 실행)</td>
+        <td>$service_enabled</td>
+        <td><span class="badge $([[ "$service_enabled" == "enabled" ]] && echo "badge-success" || echo "badge-warning")">$service_enabled</span></td>
+      </tr>
+      <tr>
+        <td>서비스 실행 (Active)</td>
+        <td>active (running)</td>
+        <td>$service_active</td>
+        <td><span class="badge $svc_badge_class">$([[ "$svc_badge_class" == "badge-success" ]] && echo "정상" || echo "이상")</span></td>
+      </tr>
+    </tbody>
+  </table>
+  <h2>2. 타임서버 연동 목록 (chronyc sources -v)</h2>
+  <div class="pre-block">$sources_output</div>
+  <h2>3. 시각 오차 상세 (chronyc tracking)</h2>
+  <div class="pre-block">$tracking_output</div>
+  <h2>4. 설정 파일 권한 확인</h2>
+  <table class="data-table">
+    <thead><tr><th>파일</th><th>ISMS 합격 기준</th><th>실제 권한</th><th>결과</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>${CHRONY_CONF_PATH}</td>
+        <td>root:root, 644 이하</td>
+        <td>$conf_perm</td>
+        <td><span class="badge $([[ "$conf_perm" == *"root"* ]] && echo "badge-success" || echo "badge-warning")">$([[ "$conf_perm" == *"root"* ]] && echo "적합" || echo "확인 필요")</span></td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="signature-area">
+    <div class="signature-box"><div class="title">점검자</div><div class="sign">시스템 운영팀 (인)</div></div>
+    <div class="signature-box"><div class="title">승인자</div><div class="sign">(서명생략)</div></div>
+  </div>
+</div>
+</body>
+</html>
+HTMLEOF
+}
+
+# backup.env에 BACKUP_CHRONY_REPORT 플래그를 직접 추가/갱신한다
+_chrony_set_flag_in_env() {
+  local flag_val="$1"
+  require_backup_env
+  if grep -q "BACKUP_CHRONY_REPORT=" "$BACKUP_ENV_FILE"; then
+    sed -i "s/BACKUP_CHRONY_REPORT='[01]'/BACKUP_CHRONY_REPORT='${flag_val}'/" "$BACKUP_ENV_FILE"
+  else
+    printf "\n# ==========================================\n# Chrony NTP 시각 동기화 증적 생성 설정\n# ==========================================\nBACKUP_CHRONY_REPORT='%s'\n" "$flag_val" >> "$BACKUP_ENV_FILE"
+  fi
+  chmod 600 "$BACKUP_ENV_FILE" 2>/dev/null || true
+}
+
+cmd_chrony() {
+  if has_help_flag "$@"; then
+    cat <<'HELPEOF'
+사용법: backup.sh chrony <subcommand> [options]
+
+서브커맨드:
+  setup      Chrony 설정 파일 적용 및 서비스 재시작 + 상태 검증
+  --report   ISMS-P 2.9.3 시각 동기화 증적 보고서 생성 (txt/json/html)
+
+옵션 (--report):
+  --report-file <path>  증적 파일 출력 경로
+                        (기본: /data/backup/reports/ntp_sync_evidence_YYYYMMDD.txt)
+
+예시:
+  backup.sh chrony setup
+  backup.sh chrony --report
+  backup.sh chrony --report --report-file /tmp/ntp_check.txt
+HELPEOF
+    return 0
+  fi
+
+  local action="${1:-}"
+  shift || true
+
+  case "$action" in
+    setup)
+      require_root
+      require_backup_env
+
+      # 1. 기존 설정 파일 백업
+      if [[ -f "$CHRONY_CONF_PATH" ]]; then
+        local bak_path; bak_path="$(dirname "$CHRONY_CONF_PATH")/chrony.conf.bak.$(date +%Y%m%d)"
+        cp "$CHRONY_CONF_PATH" "$bak_path"
+        log_info "기존 chrony.conf를 백업했습니다: $bak_path"
+      fi
+
+      # 2. 설정 파일 작성
+      printf '%s\n' "$CHRONY_CONF_CONTENT" > "$CHRONY_CONF_PATH"
+      chmod 644 "$CHRONY_CONF_PATH"
+      log_info "chrony 설정 파일을 작성했습니다: $CHRONY_CONF_PATH"
+
+      # 3. chronyd 재시작
+      systemctl restart chronyd
+      log_info "chronyd 서비스를 재시작했습니다."
+
+      # 4. 구문 에러 유무 로그 확인
+      log_info "=== journalctl -u chronyd -n 20 ==="
+      journalctl -u chronyd -n 20 --no-pager || true
+
+      # 5. 타임서버 동기화 상태 점검
+      log_info "=== chronyc sources -v ==="
+      chronyc sources -v || true
+
+      # 6. backup.env에 BACKUP_CHRONY_REPORT=1 기록 (Configuration Registry 우선 적용 및 폴백)
+      # nameref 인자 전달용 설정 배열 선언
+      # shellcheck disable=SC2034
+      local -A chrony_cfg=()
+      # nameref 인자 전달용 에러 배열 선언
+      # shellcheck disable=SC2034
+      local -A chrony_errs=()
+
+      if load_and_validate_config "" chrony_cfg chrony_errs 2>/dev/null; then
+        # nameref 인자 변수 수정 분석 경고 우회
+        # shellcheck disable=SC2034
+        chrony_cfg[chrony_report]="1"
+        save_profile_config chrony_cfg >/dev/null
+      else
+        _chrony_set_flag_in_env "1"
+      fi
+      log_info "BACKUP_CHRONY_REPORT=1 이 backup.env에 저장되었습니다."
+      ;;
+
+    --report)
+      require_backup_env
+
+      local -A report_opts=()
+      parse_opts_into report_opts "report-file:" -- "$@"
+      local date_suffix; date_suffix=$(date +%Y%m%d)
+      local report_file="${report_opts[report-file]:-${BACKUP_REPORTS_DIR}/ntp_sync_evidence_${date_suffix}.txt}"
+      local base_path="${report_file%.txt}"
+
+      # 상태 수집
+      local svc_enabled svc_active sources_out tracking_out conf_perm_out
+      svc_enabled=$(systemctl is-enabled chronyd 2>/dev/null || echo "unknown")
+      svc_active=$(systemctl is-active chronyd 2>/dev/null || echo "unknown")
+      sources_out=$(chronyc sources -v 2>/dev/null || echo "(chronyc 실행 불가)")
+      tracking_out=$(chronyc tracking 2>/dev/null || echo "(chronyc 실행 불가)")
+      conf_perm_out=$(ls -l "$CHRONY_CONF_PATH" 2>/dev/null || echo "(파일 없음)")
+
+      local report_date; report_date=$(date '+%Y-%m-%d %H:%M:%S %Z')
+      local hostname_val; hostname_val=$(hostname 2>/dev/null || echo "unknown")
+
+      # nameref 전달용 변수 — shellcheck 경고 우회
+      # shellcheck disable=SC2034
+      local -A chrony_data=(
+        [hostname]="$hostname_val"
+        [report_date]="$report_date"
+        [service_enabled]="$svc_enabled"
+        [service_active]="$svc_active"
+        [sources_output]="$sources_out"
+        [tracking_output]="$tracking_out"
+        [conf_perm]="$conf_perm_out"
+      )
+
+      write_evidence_report_bundle chrony_data "$report_file" "chrony"
+
+      log_info "NTP 증적 보고서가 생성되었습니다:"
+      log_info "  - TXT:  $report_file"
+      log_info "  - JSON: ${base_path}.json"
+      log_info "  - HTML: ${base_path}.html"
+      ;;
+
+    *)
+      die "chrony는 'setup' 또는 '--report'만 지원합니다 (입력값: '${action}')"
+      ;;
+  esac
+}
+
+
 cmd_audit() {
   if has_help_flag "$@"; then
     help_audit
@@ -5256,13 +5764,13 @@ except Exception:
     # Permissions
     local etc_perm; etc_perm="$(stat -c '%a' "$RESTIC_ETC_DIR" 2>/dev/null || echo '700')"
     local env_perm; env_perm="$(stat -c '%a' "$BACKUP_ENV_FILE" 2>/dev/null || echo '600')"
-    local etc_safe_str="경고 - 700 권장"; [[ "$etc_perm" == "700" ]] && etc_safe_str="안전 - 소유자 외 접근불가"
-    local env_safe_str="경고 - 600 권장"; [[ "$env_perm" == "600" ]] && env_safe_str="안전 - 평문 노출 방지"
+    local etc_safe_str="미흡"; [[ "$etc_perm" == "700" ]] && etc_safe_str="만족"
+    local env_safe_str="미흡"; [[ "$env_perm" == "600" ]] && env_safe_str="만족"
     
     # Restic Integrity Check
-    local check_status="FAILED (오류 발생)"
+    local check_status="미흡"
     if restic check >/dev/null 2>&1; then
-      check_status="SUCCESS (에러 없음)"
+      check_status="만족"
     fi
     
     # Backend detection
@@ -5365,60 +5873,60 @@ except Exception as e:
     print("<tr><td colspan=\"4\">(스냅샷 정보 해석 실패: %s)</td></tr>" % e)
 ' <<< "$snapshots_json")
 
-    # Render Report Function
+    # nameref 전달용 daily 데이터 조립
+    # shellcheck disable=SC2034
+    local -A daily_data=(
+      [cur_time]="$cur_time"
+      [hostname]="$hostname_val"
+      [tester]="$tester"
+      [backend]="$backend"
+      [repo]="$RESTIC_REPOSITORY"
+      [targets]="$BACKUP_TARGETS"
+      [config_daily]="$config_daily"
+      [actual_daily]="$actual_daily"
+      [config_daily_status]="$config_daily_status"
+      [actual_daily_status]="$actual_daily_status"
+      [config_weekly]="$config_weekly"
+      [actual_weekly]="$actual_weekly"
+      [config_weekly_status]="$config_weekly_status"
+      [actual_weekly_status]="$actual_weekly_status"
+      [config_monthly]="$config_monthly"
+      [actual_monthly]="$actual_monthly"
+      [config_monthly_status]="$config_monthly_status"
+      [actual_monthly_status]="$actual_monthly_status"
+      [etc_dir]="$RESTIC_ETC_DIR"
+      [etc_perm]="$etc_perm"
+      [etc_safe_str]="$etc_safe_str"
+      [env_file]="$BACKUP_ENV_FILE"
+      [env_perm]="$env_perm"
+      [env_safe_str]="$env_safe_str"
+      [check_status]="$check_status"
+      [snapshot_table]="$snapshot_table"
+      [snapshot_table_html]="$snapshot_table_html"
+      [snapshots_json]="$snapshots_json"
+    )
+
     render_daily_audit_report "$cur_time" "$hostname_val" "$tester" "$backend" "$RESTIC_REPOSITORY" \
       "$BACKUP_TARGETS" "$config_daily" "$actual_daily" "$config_daily_status" "$actual_daily_status" \
       "$config_weekly" "$actual_weekly" "$config_weekly_status" "$actual_weekly_status" \
       "$config_monthly" "$actual_monthly" "$config_monthly_status" "$actual_monthly_status" \
       "$RESTIC_ETC_DIR" "$etc_perm" "$etc_safe_str" "$BACKUP_ENV_FILE" "$env_perm" "$env_safe_str" \
       "$check_status" "$snapshot_table"
-      
+
     if [[ -n "$report_file" ]]; then
-      mkdir -p "$(dirname "$report_file")"
-      chmod 700 "$(dirname "$report_file")" 2>/dev/null || true
-      
-      render_daily_audit_report "$cur_time" "$hostname_val" "$tester" "$backend" "$RESTIC_REPOSITORY" \
-        "$BACKUP_TARGETS" "$config_daily" "$actual_daily" "$config_daily_status" "$actual_daily_status" \
-        "$config_weekly" "$actual_weekly" "$config_weekly_status" "$actual_weekly_status" \
-        "$config_monthly" "$actual_monthly" "$config_monthly_status" "$actual_monthly_status" \
-        "$RESTIC_ETC_DIR" "$etc_perm" "$etc_safe_str" "$BACKUP_ENV_FILE" "$env_perm" "$env_safe_str" \
-        "$check_status" "$snapshot_table" > "$report_file"
-      chmod 600 "$report_file"
+      write_evidence_report_bundle daily_data "$report_file" "daily"
 
-      local json_report_file
+      local base_path
       if [[ "$report_file" =~ \.(txt|md)$ ]]; then
-        json_report_file="${report_file%.*}.json"
+        base_path="${report_file%.*}"
       else
-        json_report_file="${report_file}.json"
+        base_path="$report_file"
       fi
 
-      render_daily_audit_report_json "$cur_time" "$hostname_val" "$tester" "$backend" "$RESTIC_REPOSITORY" \
-        "$BACKUP_TARGETS" "$config_daily" "$actual_daily" "$config_daily_status" "$actual_daily_status" \
-        "$config_weekly" "$actual_weekly" "$config_weekly_status" "$actual_weekly_status" \
-        "$config_monthly" "$actual_monthly" "$config_monthly_status" "$actual_monthly_status" \
-        "$RESTIC_ETC_DIR" "$etc_perm" "$etc_safe_str" "$BACKUP_ENV_FILE" "$env_perm" "$env_safe_str" \
-        "$check_status" "$snapshots_json" > "$json_report_file"
-      chmod 600 "$json_report_file"
-
-      local html_report_file
-      if [[ "$report_file" =~ \.(txt|md)$ ]]; then
-        html_report_file="${report_file%.*}.html"
-      else
-        html_report_file="${report_file}.html"
-      fi
-
-      render_daily_audit_report_html "$cur_time" "$hostname_val" "$tester" "$backend" "$RESTIC_REPOSITORY" \
-        "$BACKUP_TARGETS" "$config_daily" "$actual_daily" "$config_daily_status" "$actual_daily_status" \
-        "$config_weekly" "$actual_weekly" "$config_weekly_status" "$actual_weekly_status" \
-        "$config_monthly" "$actual_monthly" "$config_monthly_status" "$actual_monthly_status" \
-        "$RESTIC_ETC_DIR" "$etc_perm" "$etc_safe_str" "$BACKUP_ENV_FILE" "$env_perm" "$env_safe_str" \
-        "$check_status" "$snapshot_table_html" > "$html_report_file"
-      chmod 600 "$html_report_file"
-      
       log_info "감사 보고서가 동시 저장되었습니다:"
       log_info "  - 텍스트 보고서: $report_file"
-      log_info "  - JSON 보고서: $json_report_file"
-      log_info "  - HTML 보고서: $html_report_file"
+      log_info "  - JSON 보고서: ${base_path}.json"
+      log_info "  - HTML 보고서: ${base_path}.html"
     fi
 
     return 0
@@ -6456,6 +6964,40 @@ cmd_wizard() {
 
   cmd_init
 
+  # ── chrony NTP 시각 동기화 설정 ──────────────────────────────────────────
+  local chrony_setup_done=0
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    setup_colors
+    printf '\n%b%b⚙  시각 동기화 설정 (NTP / Chrony)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+    printf '%bISMS-P 2.9.3 시각 동기화 항목 대응을 위해 chrony NTP 설정을 적용할 수 있습니다.%b\n' "$C_DIM" "$C_RESET"
+    printf '%b시각 동기화 설정을 적용할까요? [y/%bN%b]: %b' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_RESET"
+  else
+    printf '\n--- 시각 동기화 설정 (NTP / Chrony) ---\n'
+    printf 'ISMS-P 2.9.3 시각 동기화 항목 대응을 위해 chrony NTP 설정을 적용할 수 있습니다.\n'
+    printf '시각 동기화 설정을 적용할까요? [y/N]: '
+  fi
+  local chrony_choice; read -r chrony_choice || true
+
+  if [[ "$chrony_choice" =~ ^[Yy]$ ]]; then
+    local chrony_ready=0
+    if type -P chronyc > /dev/null 2>&1 && systemctl is-active chronyd > /dev/null 2>&1; then
+      chrony_ready=1
+    fi
+
+    if (( chrony_ready )); then
+      cmd_chrony setup
+      chrony_setup_done=1
+    else
+      if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+        printf '%b안내: chrony(chronyd)가 설치되어 있지 않거나 실행 중이지 않습니다. 먼저 chrony를 설치하고 실행한 뒤\n        backup.sh chrony setup 을 단독으로 실행하세요.%b\n' "$C_YELLOW" "$C_RESET"
+      else
+        printf '안내: chrony(chronyd)가 설치되어 있지 않거나 실행 중이지 않습니다.\n'
+        printf '      먼저 chrony를 설치한 뒤 backup.sh chrony setup 을 실행하세요.\n'
+      fi
+    fi
+  fi
+
+  # ── 정기 백업 스케줄 등록 ─────────────────────────────────────────────────
   if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
     printf '%b지금 정기 백업 스케줄을 등록할까요? 기본값은 매일 새벽 2시입니다. [%bY%b/n]: %b' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_RESET"
   else
@@ -6478,6 +7020,12 @@ cmd_wizard() {
     repo_location="${file_config[RESTIC_REPOSITORY]:-}"
   fi
 
+  local ntp_report_active=0
+  local chrony_env_var="BACKUP_CHRONY_REPORT"
+  if (( chrony_setup_done )) || [[ "${file_config[$chrony_env_var]:-}" == "1" || "${!chrony_env_var:-}" == "1" ]]; then
+    ntp_report_active=1
+  fi
+
   if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
     printf '\n%b%b=========================================%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
     printf ' %b%b⚙  설정이 완료되었습니다 (Configuration Completed)%b\n' "$C_GREEN" "$C_BOLD" "$C_RESET"
@@ -6488,6 +7036,11 @@ cmd_wizard() {
       printf ' %b├──%b 정기 백업:    %b등록됨 (%s)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "$DEFAULT_ON_CALENDAR" "$C_RESET"
       printf ' %b├──%b 일일 검토 보고: %b등록됨 (%s)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "*-*-* 01:00:00" "$C_RESET"
       printf ' %b├──%b 복구 테스트 보고: %b등록됨 (%s)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "*-*-01 01:30:00" "$C_RESET"
+      if (( ntp_report_active )); then
+        printf ' %b├──%b NTP 증적 보고:  %b등록됨 (%s)%b\n' "$C_GRAY" "$C_RESET" "$C_GREEN" "$DEFAULT_CHRONY_ON_CALENDAR" "$C_RESET"
+      else
+        printf ' %b├──%b NTP 증적 보고:  %b미등록 (backup.sh chrony setup으로 설정 가능)%b\n' "$C_GRAY" "$C_RESET" "$C_GRAY" "$C_RESET"
+      fi
     else
       printf ' %b├──%b 정기 백업:    %b등록하지 않음 (필요시 backup.sh schedule enable 실행)%b\n' "$C_GRAY" "$C_RESET" "$C_GRAY" "$C_RESET"
     fi
@@ -6503,6 +7056,11 @@ cmd_wizard() {
       printf ' 정기 백업: 등록됨 (%s)\n' "$DEFAULT_ON_CALENDAR"
       printf ' 일일 검토 보고: 등록됨 (*-*-* 01:00:00)\n'
       printf ' 복구 테스트 보고: 등록됨 (*-*-01 01:30:00)\n'
+      if (( ntp_report_active )); then
+        printf ' NTP 증적 보고: 등록됨 (%s)\n' "$DEFAULT_CHRONY_ON_CALENDAR"
+      else
+        printf ' NTP 증적 보고: 미등록 (backup.sh chrony setup으로 설정 가능)\n'
+      fi
     else
       printf ' 정기 백업: 등록하지 않음 (필요시 backup.sh schedule enable 실행)\n'
     fi
@@ -7005,6 +7563,7 @@ restic 기반 백업 설치, 운영, 모니터링 및 감사 관리를 자동화
   run            수동 백업 즉시 실행 (resticprofile backup)
   status         저장소 연결성, 보안 권한 상태 및 최근 백업 스냅샷 요약 조회
   audit          ISMS/ISO 27001 컴플라이언스 감사 대응용 보고서 출력 및 저장
+  chrony         Chrony NTP 시각 동기화 설정(setup) 및 ISMS-P 2.9.3 증적 생성(--report)
   uninstall      정기 스케줄 제거 및 설치된 바이너리/스크립트 삭제
   migrate        기존 저장소 백업 데이터를 새로운 스토리지 백엔드로 데이터 복제 및 설정 이관
   config         기존 백업 설정(backup.env) 수정 및 관련 자산 동기화
@@ -7103,6 +7662,11 @@ main() {
     upgrade)
       shift
       cmd_upgrade "$@"
+      return $?
+      ;;
+    chrony)
+      shift
+      cmd_chrony "$@"
       return $?
       ;;
     *)

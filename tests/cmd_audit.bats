@@ -173,20 +173,20 @@ ENV
   run cmd_audit --daily
   [ "$status" -eq 0 ]
   [[ "$output" == *"[보안 감사 증적] 일일 백업 수행 결과 및 보안 설정 검토 보고서"* ]]
-  [[ "$output" == *"1. 백업 정책 및 백엔드 정보"* ]]
-  [[ "$output" == *"2. 보존 정책 (Retention Rule) 검증"* ]]
-  [[ "$output" == *"3. 접근 통제 및 무결성 검사"* ]]
-  [[ "$output" == *"4. 최근 백업 성공 스냅샷 이력"* ]]
-  [[ "$output" == *"설정 디렉터리"* ]]
+  [[ "$output" == *"1. 보존 정책 (Retention Rule) 검증"* ]]
+  [[ "$output" == *"2. 접근 통제 및 무결성 검사"* ]]
+  [[ "$output" == *"3. 최근 백업 성공 스냅샷 이력"* ]]
+  [[ "$output" == *"4. ISMS-P 규정 준수 검증 체크리스트"* ]]
+  [[ "$output" == *"권한"* ]]
 }
 
 @test "cmd_audit --restore-drill performs restore and outputs drill report" {
   run cmd_audit --restore-drill --tester "테스터" --ciso "보안책임자" --rto 60
   [ "$status" -eq 0 ]
   [[ "$output" == *"[보안 감사 증적] 백업 데이터 복구 및 정합성 테스트 결과 보고서"* ]]
-  [[ "$output" == *"테스터: 테스터"* ]]
+  [[ "$output" == *"훈련 담당: 테스터"* ]]
   [[ "$output" == *"승인자: 보안책임자"* ]]
-  [[ "$output" == *"복구 소요 시간"* ]]
+  [[ "$output" == *"복구 시간"* ]]
 }
 
 @test "cmd_schedule enable registers backup and audit reports timers" {
@@ -266,7 +266,7 @@ ENV
 
   run cmd_audit --restore-drill
   [ "$status" -eq 0 ]
-  [[ "$output" == *"테스터: 김철수 (시스템 담당자)"* ]]
+  [[ "$output" == *"훈련 담당: 김철수 (시스템 담당자)"* ]]
   [[ "$output" == *"승인자: CISO 박영희"* ]]
   [[ "$output" == *"RTO 기준 45분"* ]]
 }
@@ -321,9 +321,9 @@ ENV
   source "${BATS_TEST_DIRNAME}/../backup.sh"
   local output; output=$(render_report_markdown test_report_data)
   [ "$?" -eq 0 ]
-  [[ "$output" == *"- 테스터: 홍길동"* ]]
+  [[ "$output" == *"- 훈련 담당: 홍길동"* ]]
   [[ "$output" == *"- 승인자: 이몽룡"* ]]
-  [[ "$output" == *"2차 테스트 대상 스냅샷 ID: b20f4685"* ]]
+  [[ "$output" == *"- 2차 스냅샷: b20f4685"* ]]
 }
 
 @test "render_report_json outputs valid json audit report" {
@@ -410,7 +410,7 @@ ENV
 
   run cmd_audit --restore-drill
   [ "$status" -eq 0 ]
-  [[ "$output" == *"데이터베이스(mysql) 복원 무결성 검증: 성공"* ]]
+  [[ "$output" == *"데이터베이스(mysql) 복원: 만족"* ]]
 }
 
 @test "render_audit_report_unified generates general JSON and daily text reports correctly" {
@@ -460,7 +460,7 @@ ENV
   run render_audit_report_unified "daily" "txt" daily_data
   [ "$status" -eq 0 ]
   [[ "$output" == *"[보안 감사 증적] 일일 백업 수행 결과"* ]]
-  [[ "$output" == *"- 대상 서버 호스트: test-host"* ]]
+  [[ "$output" == *"- 대상 호스트: test-host"* ]]
 }
 
 
