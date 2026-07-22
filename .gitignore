@@ -11,6 +11,7 @@
 !/tests/**
 !/docs/
 /docs/*
+!/docs/prd-codebase-architecture-improvements.md
 !/docs/adr/
 !/docs/adr/**
 !/docs/agents/

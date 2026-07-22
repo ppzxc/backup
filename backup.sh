@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.47"
+BACKUP_SCRIPT_VERSION="0.0.48"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -102,6 +102,10 @@ NTP_CONF_PATH="${NTP_CONF_PATH:-/etc/chrony.conf}"
 # shellcheck disable=SC2034
 CHRONY_CONF_PATH="${NTP_CONF_PATH}"
 BACKUP_REPORTS_DIR="${BACKUP_REPORTS_DIR:-/data/backup/reports}"
+
+has_function() {
+  declare -f "$1" >/dev/null
+}
 
 # 구버전 -> 신버전 환경변수 매핑 정의
 # shellcheck disable=SC2034
@@ -724,11 +728,12 @@ validate_resolved_config() {
     _validate_primary_fields[secret_key]="${resolved_ref[secret_key]:-}"
     
     local primary_err
-    if ! primary_err=$(case "$backend" in
-      sftp) backend_sftp_validate _validate_primary_fields 2>&1 ;;
-      s3) backend_s3_validate _validate_primary_fields 2>&1 ;;
-    esac); then
-      errors_ref+=("$primary_err")
+    if has_function "backend_${backend}_validate"; then
+      if ! primary_err=$("backend_${backend}_validate" _validate_primary_fields 2>&1); then
+        errors_ref+=("$primary_err")
+      fi
+    else
+      errors_ref+=("지원하지 않는 백엔드 유형입니다: $backend")
     fi
     unset _validate_primary_fields
   fi
@@ -746,11 +751,12 @@ validate_resolved_config() {
     _validate_sec_fields[secret_key]="${resolved_ref[secondary_secret_key]:-}"
     
     local sec_err
-    if ! sec_err=$(case "$sec_backend" in
-      sftp) backend_sftp_validate _validate_sec_fields 2>&1 ;;
-      s3) backend_s3_validate _validate_sec_fields 2>&1 ;;
-    esac); then
-      errors_ref+=("Secondary backend error: $sec_err")
+    if has_function "backend_${sec_backend}_validate"; then
+      if ! sec_err=$("backend_${sec_backend}_validate" _validate_sec_fields 2>&1); then
+        errors_ref+=("Secondary backend error: $sec_err")
+      fi
+    else
+      errors_ref+=("Secondary backend error: 지원하지 않는 백엔드 유형입니다: $sec_backend")
     fi
     unset _validate_sec_fields
   fi
@@ -761,6 +767,21 @@ validate_resolved_config() {
     local path_err
     if ! path_err=$(validate_absolute_path "$targets" "백업 대상 경로" 2>&1); then
       errors_ref+=("$path_err")
+    fi
+  fi
+
+  # 4. 데이터베이스 백업 유효성 검증
+  local db_type="${resolved_ref[db_type]:-}"
+  if [[ -n "$db_type" ]]; then
+    if ! has_function "database_${db_type}_default_command"; then
+      errors_ref+=("지원하지 않는 데이터베이스 엔진 유형입니다: ${db_type}")
+    else
+      if has_function "database_${db_type}_validate_config"; then
+        local db_err
+        if ! db_err=$("database_${db_type}_validate_config" resolved_ref 2>&1); then
+          errors_ref+=("$db_err")
+        fi
+      fi
     fi
   fi
 }
@@ -1035,17 +1056,9 @@ resolve_and_validate_config() {
   # DB 타입별 기본 명령어 채우기
   if [[ -n "${_resolved[db_type]:-}" ]]; then
     if [[ -z "${_resolved[db_command]:-}" ]]; then
-      case "${_resolved[db_type]}" in
-        mysql)
-          _resolved[db_command]="mysqldump --all-databases --single-transaction --quick --order-by-primary"
-          ;;
-        mariadb)
-          _resolved[db_command]="mariadb-dump --all-databases --single-transaction --quick --order-by-primary"
-          ;;
-        postgres)
-          _resolved[db_command]="pg_dumpall -U postgres"
-          ;;
-      esac
+      if has_function "database_${_resolved[db_type]}_default_command"; then
+        _resolved[db_command]=$("database_${_resolved[db_type]}_default_command")
+      fi
     fi
   fi
 
@@ -1172,8 +1185,15 @@ resolve_and_validate_config() {
     fi
 
     if [[ -n "$type" ]]; then
-      if [[ "$type" != "slack" && "$type" != "discord" && "$type" != "custom" ]]; then
-        _errors+=("지원하지 않는 알람 타입입니다: ${type} (slack, discord, custom 중 하나여야 합니다.)")
+      if ! has_function "notification_${type}_send"; then
+        _errors+=("지원하지 않는 알람 타입입니다: ${type}")
+      else
+        if has_function "notification_${type}_validate"; then
+          local validate_err
+          if ! validate_err=$("notification_${type}_validate" 2>&1); then
+            _errors+=("$validate_err")
+          fi
+        fi
       fi
     fi
 
@@ -1204,8 +1224,10 @@ resolve_and_validate_config() {
     backend_cli[port]="${_opts[port]:-}"
     backend_cli[user]="${_opts[user]:-}"
 
-    local env_vars_mapping
-    env_vars_mapping=$(case "$backend" in sftp) backend_sftp_env_vars ;; s3) backend_s3_env_vars ;; esac)
+    local env_vars_mapping=""
+    if has_function "backend_${backend}_env_vars"; then
+      env_vars_mapping=$("backend_${backend}_env_vars")
+    fi
     local field_key var_name
     while IFS=$'\t' read -r field_key var_name; do
       [[ -z "$field_key" ]] && continue
@@ -1232,10 +1254,9 @@ resolve_and_validate_config() {
     fi
 
     local -A backend_fields=()
-    case "$backend" in
-      sftp) backend_sftp_resolve backend_cli backend_env backend_file backend_fields ;;
-      s3) backend_s3_resolve backend_cli backend_env backend_file backend_fields ;;
-    esac
+    if has_function "backend_${backend}_resolve"; then
+      "backend_${backend}_resolve" backend_cli backend_env backend_file backend_fields
+    fi
 
     # Copy to main resolved array
     local key
@@ -1295,10 +1316,9 @@ resolve_and_validate_config() {
     if [[ -z "${sec_backend_file[bucket]:-}" ]]; then sec_backend_file[bucket]="$sec_parsed_bucket"; fi
 
     local -A sec_fields=()
-    case "$sec_backend" in
-      sftp) backend_sftp_resolve sec_backend_cli sec_backend_env sec_backend_file sec_fields ;;
-      s3) backend_s3_resolve sec_backend_cli sec_backend_env sec_backend_file sec_fields ;;
-    esac
+    if has_function "backend_${sec_backend}_resolve"; then
+      "backend_${sec_backend}_resolve" sec_backend_cli sec_backend_env sec_backend_file sec_fields
+    fi
 
     local skey
     for skey in "${!sec_fields[@]}"; do
@@ -1662,25 +1682,17 @@ dispatch_notification() {
 
   log_info "통합 알림 전송 중... ($status)"
   local res=0
-  case "$type" in
-    slack)
-      send_notification_slack "$url" "$status" "$hostname_val" "$profile_name_val" "$err_msg" || res=$?
-      ;;
-    discord)
-      send_notification_discord "$url" "$status" "$hostname_val" "$profile_name_val" "$err_msg" || res=$?
-      ;;
-    custom)
-      local method="${_ctx[method]:-${BACKUP_NOTIFICATION_METHOD:-POST}}"
-      local headers="${_ctx[headers]:-${BACKUP_NOTIFICATION_HEADERS:-}}"
-      local body_success="${_ctx[body_success]:-${BACKUP_NOTIFICATION_BODY_SUCCESS:-}}"
-      local body_failure="${_ctx[body_failure]:-${BACKUP_NOTIFICATION_BODY_FAILURE:-}}"
-      local profile_command="${_ctx[profile_command]:-}"
-      send_notification_custom "$url" "$status" "$hostname_val" "$profile_name_val" "$err_msg" "$method" "$headers" "$body_success" "$body_failure" "$profile_command" || res=$?
-      ;;
-    *)
-      return 0
-      ;;
-  esac
+  if has_function "notification_${type}_send"; then
+    local method="${_ctx[method]:-${BACKUP_NOTIFICATION_METHOD:-POST}}"
+    local headers="${_ctx[headers]:-${BACKUP_NOTIFICATION_HEADERS:-}}"
+    local body_success="${_ctx[body_success]:-${BACKUP_NOTIFICATION_BODY_SUCCESS:-}}"
+    local body_failure="${_ctx[body_failure]:-${BACKUP_NOTIFICATION_BODY_FAILURE:-}}"
+    local profile_command="${_ctx[profile_command]:-}"
+    "notification_${type}_send" "$url" "$status" "$hostname_val" "$profile_name_val" "$err_msg" "$method" "$headers" "$body_success" "$body_failure" "$profile_command" || res=$?
+  else
+    log_warn "지원하지 않거나 정의되지 않은 알림 전송 어댑터입니다: ${type}"
+    return 0
+  fi
 
   if [[ $res -ne 0 ]]; then
     log_warn "통합 알림 웹훅 전송 실패 (exit code: $res)"
@@ -2227,7 +2239,27 @@ backend_sftp_render_env() {
   # 다른 함수의 같은 이름 nameref 사용과 겹쳐 shellcheck가 배열/스칼라 재할당으로 오인한다.
   # shellcheck disable=SC2178
   local -n fields_ref="$2" policy_ref="$3"
-  cat <<EOF
+  local slot="${4:-primary}"
+
+  if [[ "$slot" == "secondary" ]]; then
+    local sec_password="${policy_ref[secondary_password]:-${policy_ref[password]:-}}"
+    local sec_keep_daily="${policy_ref[secondary_keep_daily]:-${policy_ref[keep_daily]:-}}"
+    local sec_keep_weekly="${policy_ref[secondary_keep_weekly]:-${policy_ref[keep_weekly]:-}}"
+    local sec_keep_monthly="${policy_ref[secondary_keep_monthly]:-${policy_ref[keep_monthly]:-}}"
+    cat <<EOF
+SECONDARY_RESTIC_REPOSITORY='rclone:syno_backup_sec:/backup/$(escape_single_quotes "${hostname_tag}")'
+SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE='sftp'
+SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST='$(escape_single_quotes "${fields_ref[host]}")'
+SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER='$(escape_single_quotes "${fields_ref[user]}")'
+SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT='$(escape_single_quotes "${fields_ref[port]:-22}")'
+SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE='$(escape_single_quotes "${BACKUP_SSH_KEY}")'
+SECONDARY_RESTIC_PASSWORD='$(escape_single_quotes "${sec_password}")'
+SECONDARY_KEEP_DAILY='$(escape_single_quotes "${sec_keep_daily}")'
+SECONDARY_KEEP_WEEKLY='$(escape_single_quotes "${sec_keep_weekly}")'
+SECONDARY_KEEP_MONTHLY='$(escape_single_quotes "${sec_keep_monthly}")'
+EOF
+  else
+    cat <<EOF
 export RESTIC_REPOSITORY='rclone:syno_backup:/backup/$(escape_single_quotes "${hostname_tag}")'
 export RCLONE_CONFIG_SYNO_BACKUP_TYPE='sftp'
 export RCLONE_CONFIG_SYNO_BACKUP_HOST='$(escape_single_quotes "${fields_ref[host]}")'
@@ -2242,14 +2274,20 @@ export KEEP_WEEKLY='$(escape_single_quotes "${policy_ref[keep_weekly]}")'
 export KEEP_MONTHLY='$(escape_single_quotes "${policy_ref[keep_monthly]}")'
 export BACKUP_PROFILE_NAME='$(escape_single_quotes "${policy_ref[profile_name]}")'
 EOF
+  fi
 }
 
 backend_sftp_render_notice() {
   # 같은 이유의 nameref 오탐.
   # shellcheck disable=SC2178
   local -n fields_ref="$1"
+  local slot="${2:-primary}"
+  local prefix=""
+  if [[ "$slot" == "secondary" ]]; then
+    prefix="[2차 소산지 SFTP] "
+  fi
   cat <<EOF
-아래 공개키를 NAS의 authorized_keys(또는 File Station)에 등록하세요:
+${prefix}아래 공개키를 NAS의 authorized_keys(또는 File Station)에 등록하세요:
 ----------------------------------------------------------
 ${fields_ref[pubkey]}
 ----------------------------------------------------------
@@ -2328,7 +2366,24 @@ backend_s3_prepare() {
 backend_s3_render_env() {
   local hostname_tag="$1"
   local -n fields_ref="$2" policy_ref="$3"
-  cat <<EOF
+  local slot="${4:-primary}"
+
+  if [[ "$slot" == "secondary" ]]; then
+    local sec_password="${policy_ref[secondary_password]:-${policy_ref[password]:-}}"
+    local sec_keep_daily="${policy_ref[secondary_keep_daily]:-${policy_ref[keep_daily]:-}}"
+    local sec_keep_weekly="${policy_ref[secondary_keep_weekly]:-${policy_ref[keep_weekly]:-}}"
+    local sec_keep_monthly="${policy_ref[secondary_keep_monthly]:-${policy_ref[keep_monthly]:-}}"
+    cat <<EOF
+SECONDARY_RESTIC_REPOSITORY='s3:$(escape_single_quotes "${fields_ref[endpoint]}")/$(escape_single_quotes "${fields_ref[bucket]}")/$(escape_single_quotes "${hostname_tag}")'
+SECONDARY_AWS_ACCESS_KEY_ID='$(escape_single_quotes "${fields_ref[access_key]}")'
+SECONDARY_AWS_SECRET_ACCESS_KEY='$(escape_single_quotes "${fields_ref[secret_key]}")'
+SECONDARY_RESTIC_PASSWORD='$(escape_single_quotes "${sec_password}")'
+SECONDARY_KEEP_DAILY='$(escape_single_quotes "${sec_keep_daily}")'
+SECONDARY_KEEP_WEEKLY='$(escape_single_quotes "${sec_keep_weekly}")'
+SECONDARY_KEEP_MONTHLY='$(escape_single_quotes "${sec_keep_monthly}")'
+EOF
+  else
+    cat <<EOF
 export RESTIC_REPOSITORY='s3:$(escape_single_quotes "${fields_ref[endpoint]}")/$(escape_single_quotes "${fields_ref[bucket]}")/$(escape_single_quotes "${hostname_tag}")'
 export AWS_ACCESS_KEY_ID='$(escape_single_quotes "${fields_ref[access_key]}")'
 export AWS_SECRET_ACCESS_KEY='$(escape_single_quotes "${fields_ref[secret_key]}")'
@@ -2340,6 +2395,7 @@ export KEEP_WEEKLY='$(escape_single_quotes "${policy_ref[keep_weekly]}")'
 export KEEP_MONTHLY='$(escape_single_quotes "${policy_ref[keep_monthly]}")'
 export BACKUP_PROFILE_NAME='$(escape_single_quotes "${policy_ref[profile_name]}")'
 EOF
+  fi
 }
 
 render_s3_bucket_policy() {
@@ -2377,26 +2433,17 @@ render_secondary_config() {
   printf 'SECONDARY_KEEP_WEEKLY="%s"\n' "$sec_keep_weekly"
   printf 'SECONDARY_KEEP_MONTHLY="%s"\n' "$sec_keep_monthly"
 
-  if [[ "$sec_backend" == "s3" ]]; then
-    local sec_endpoint="${__res_sec_ref[secondary_endpoint]}"
-    local sec_bucket="${__res_sec_ref[secondary_bucket]}"
-    local sec_access_key="${__res_sec_ref[secondary_access_key]}"
-    local sec_secret_key="${__res_sec_ref[secondary_secret_key]}"
-    
-    printf 'SECONDARY_RESTIC_REPOSITORY="s3:%s/%s/%s"\n' "$sec_endpoint" "$sec_bucket" "$profile_name"
-    printf 'SECONDARY_AWS_ACCESS_KEY_ID="%s"\n' "$sec_access_key"
-    printf 'SECONDARY_AWS_SECRET_ACCESS_KEY="%s"\n' "$sec_secret_key"
-  elif [[ "$sec_backend" == "sftp" ]]; then
-    local sec_host="${__res_sec_ref[secondary_host]}"
-    local sec_port="${__res_sec_ref[secondary_port]:-22}"
-    local sec_user="${__res_sec_ref[secondary_user]}"
-    
-    printf 'SECONDARY_RESTIC_REPOSITORY="rclone:syno_backup_sec:/backup/%s"\n' "$profile_name"
-    printf 'SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_TYPE="sftp"\n'
-    printf 'SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_HOST="%s"\n' "$sec_host"
-    printf 'SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="%s"\n' "$sec_port"
-    printf 'SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="%s"\n' "$sec_user"
-    printf 'SECONDARY_RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="%s"\n' "${BACKUP_SSH_KEY}"
+  local -A fields=()
+  fields[host]="${__res_sec_ref[secondary_host]:-}"
+  fields[port]="${__res_sec_ref[secondary_port]:-22}"
+  fields[user]="${__res_sec_ref[secondary_user]:-}"
+  fields[endpoint]="${__res_sec_ref[secondary_endpoint]:-}"
+  fields[bucket]="${__res_sec_ref[secondary_bucket]:-}"
+  fields[access_key]="${__res_sec_ref[secondary_access_key]:-}"
+  fields[secret_key]="${__res_sec_ref[secondary_secret_key]:-}"
+
+  if has_function "backend_${sec_backend}_render_env"; then
+    "backend_${sec_backend}_render_env" "$profile_name" fields __res_sec_ref "secondary"
   fi
 }
 
@@ -2405,23 +2452,29 @@ append_secondary_config_and_notice() {
   local -n __content_sec_ref="$2"
   local -n __notice_sec_ref="$3"
 
-  if [[ -n "${__res_sec_ref[secondary_backend]:-}" ]]; then
+  local sec_backend="${__res_sec_ref[secondary_backend]:-}"
+  if [[ -n "$sec_backend" ]]; then
     __content_sec_ref+="$(render_secondary_config "$1")"
-    local sec_notice=""
-    if [[ "${__res_sec_ref[secondary_backend]}" == "s3" ]]; then
-      sec_notice="[2차 소산지 S3] 최소권한 버킷 정책을 적용하세요:
-\$(render_s3_bucket_policy \"${__res_sec_ref[secondary_bucket]}\")"
-
-    elif [[ "${__res_sec_ref[secondary_backend]}" == "sftp" ]]; then
+    
+    local -A fields=()
+    fields[host]="${__res_sec_ref[secondary_host]:-}"
+    fields[port]="${__res_sec_ref[secondary_port]:-22}"
+    fields[user]="${__res_sec_ref[secondary_user]:-}"
+    fields[endpoint]="${__res_sec_ref[secondary_endpoint]:-}"
+    fields[bucket]="${__res_sec_ref[secondary_bucket]:-}"
+    fields[access_key]="${__res_sec_ref[secondary_access_key]:-}"
+    fields[secret_key]="${__res_sec_ref[secondary_secret_key]:-}"
+    if [[ "$sec_backend" == "sftp" ]]; then
       generate_ssh_key_if_missing
-      local pubkey; pubkey="$(cat "${BACKUP_SSH_KEY}.pub")"
-      sec_notice="[2차 소산지 SFTP] 아래 공개키를 2차 NAS에 등록하세요:
-----------------------------------------------------------
-${pubkey}
-----------------------------------------------------------"
+      fields[pubkey]="$(cat "${BACKUP_SSH_KEY}.pub")"
     fi
+
+    local sec_notice=""
+    if has_function "backend_${sec_backend}_render_notice"; then
+      sec_notice=$("backend_${sec_backend}_render_notice" fields "secondary")
+    fi
+    
     if [[ -n "$sec_notice" ]]; then
-      # If notice is evaluated later, evaluate helper render_s3_bucket_policy
       if [[ "$sec_notice" == *"\$(render_s3_bucket_policy"* ]]; then
         sec_notice=$(eval "cat <<EOF
 ${sec_notice}
@@ -2438,10 +2491,16 @@ ${sec_notice}"
 
 backend_s3_render_notice() {
   local -n fields_ref="$1"
-  printf '최소권한 버킷 정책을 아래와 같이 적용하세요:\n'
+  local slot="${2:-primary}"
+  local prefix=""
+  if [[ "$slot" == "secondary" ]]; then
+    prefix="[2차 소산지 S3] "
+  fi
+  printf '%s최소권한 버킷 정책을 아래와 같이 적용하세요:\n' "$prefix"
   render_s3_bucket_policy "${fields_ref[bucket]}"
 }
 
+# shellcheck disable=SC2034
 backend_sftp_configure() {
   # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
   # shellcheck disable=SC2178
@@ -2451,43 +2510,22 @@ backend_sftp_configure() {
 
   # Prepare keys
   generate_ssh_key_if_missing
-  local pubkey; pubkey="$(cat "${BACKUP_SSH_KEY}.pub")"
+  local -A fields=()
+  fields[pubkey]="$(cat "${BACKUP_SSH_KEY}.pub")"
+  fields[host]="${_resolved[host]:-}"
+  fields[port]="${_resolved[port]:-22}"
+  fields[user]="${_resolved[user]:-}"
 
   # Render Env
-  _out_env=$(cat <<EOF
-RESTIC_REPOSITORY='rclone:syno_backup:/backup/$(escape_single_quotes "${_resolved[profile_name]:-$(hostname)}")'
-RCLONE_CONFIG_SYNO_BACKUP_TYPE='sftp'
-RCLONE_CONFIG_SYNO_BACKUP_HOST='$(escape_single_quotes "${_resolved[host]}")'
-RCLONE_CONFIG_SYNO_BACKUP_USER='$(escape_single_quotes "${_resolved[user]}")'
-RCLONE_CONFIG_SYNO_BACKUP_PORT='$(escape_single_quotes "${_resolved[port]}")'
-RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE='$(escape_single_quotes "${BACKUP_SSH_KEY}")'
-RESTIC_PASSWORD='$(escape_single_quotes "${_resolved[password]}")'
-BACKUP_TARGETS='$(escape_single_quotes "${_resolved[targets]}")'
-BACKUP_EXCLUDES='$(escape_single_quotes "${_resolved[excludes_csv]:-}")'
-KEEP_DAILY='$(escape_single_quotes "${_resolved[keep_daily]}")'
-KEEP_WEEKLY='$(escape_single_quotes "${_resolved[keep_weekly]}")'
-KEEP_MONTHLY='$(escape_single_quotes "${_resolved[keep_monthly]}")'
-BACKUP_PROFILE_NAME='$(escape_single_quotes "${_resolved[profile_name]}")'
-EOF
-)
+  _out_env=$(backend_sftp_render_env "${_resolved[profile_name]:-$(hostname)}" fields _resolved "primary")
+  _out_env+=$'\n'
   _out_env+="$(render_notification_env_block _resolved)"
   _out_env+="$(render_audit_env_block _resolved)"
   _out_env+="$(render_db_env_block _resolved)"
   _out_env+="$(render_ntp_env_block _resolved)"
 
   # Render Notice
-  _out_notice=$(cat <<EOF
-아래 공개키를 NAS의 authorized_keys(또는 File Station)에 등록하세요:
-----------------------------------------------------------
-\${pubkey}
-----------------------------------------------------------
-등록 후 'backup.sh init'을 실행하세요.
-EOF
-)
-  # Evaluate any variables in notice like pubkey
-  _out_notice=$(eval "cat <<EOF
-${_out_notice}
-EOF" 2>/dev/null || echo "$_out_notice")
+  _out_notice=$(backend_sftp_render_notice fields "primary")
 }
 
 backend_sftp_test_connectivity() {
@@ -2505,6 +2543,7 @@ backend_sftp_test_connectivity() {
   )
 }
 
+# shellcheck disable=SC2034
 backend_s3_configure() {
   # nameref로 넘어온 연관 배열에 접근하므로 scalar/array 재할당 경고 우회
   # shellcheck disable=SC2178
@@ -2512,38 +2551,130 @@ backend_s3_configure() {
   local -n _out_env="$2"
   local -n _out_notice="$3"
 
+  local -A fields=()
+  fields[endpoint]="${_resolved[endpoint]:-}"
+  fields[bucket]="${_resolved[bucket]:-}"
+  fields[access_key]="${_resolved[access_key]:-}"
+  fields[secret_key]="${_resolved[secret_key]:-}"
+
   # Render Env
-  _out_env=$(cat <<EOF
-RESTIC_REPOSITORY='s3:$(escape_single_quotes "${_resolved[endpoint]}")/$(escape_single_quotes "${_resolved[bucket]}")/$(escape_single_quotes "${_resolved[profile_name]:-$(hostname)}")'
-AWS_ACCESS_KEY_ID='$(escape_single_quotes "${_resolved[access_key]}")'
-AWS_SECRET_ACCESS_KEY='$(escape_single_quotes "${_resolved[secret_key]}")'
-RESTIC_PASSWORD='$(escape_single_quotes "${_resolved[password]}")'
-BACKUP_TARGETS='$(escape_single_quotes "${_resolved[targets]}")'
-BACKUP_EXCLUDES='$(escape_single_quotes "${_resolved[excludes_csv]:-}")'
-KEEP_DAILY='$(escape_single_quotes "${_resolved[keep_daily]}")'
-KEEP_WEEKLY='$(escape_single_quotes "${_resolved[keep_weekly]}")'
-KEEP_MONTHLY='$(escape_single_quotes "${_resolved[keep_monthly]}")'
-BACKUP_PROFILE_NAME='$(escape_single_quotes "${_resolved[profile_name]}")'
-EOF
-)
+  _out_env=$(backend_s3_render_env "${_resolved[profile_name]:-$(hostname)}" fields _resolved "primary")
+  _out_env+=$'\n'
   _out_env+="$(render_notification_env_block _resolved)"
   _out_env+="$(render_audit_env_block _resolved)"
   _out_env+="$(render_db_env_block _resolved)"
   _out_env+="$(render_ntp_env_block _resolved)"
 
   # Render Notice
-  _out_notice=$(cat <<EOF
-최소권한 버킷 정책을 아래와 같이 적용하세요:
-\$(render_s3_bucket_policy "${_resolved[bucket]}")
-EOF
-)
-  # Evaluate helper function render_s3_bucket_policy in notice
-  _out_notice=$(eval "cat <<EOF
-${_out_notice}
+  _out_notice=$(backend_s3_render_notice fields "primary")
+  if [[ "$_out_notice" == *"\$(render_s3_bucket_policy"* ]]; then
+    _out_notice=$(eval "cat <<EOF
+$_out_notice
 EOF" 2>/dev/null || echo "$_out_notice")
+  fi
 }
 
 backend_s3_test_connectivity() {
+  return 0
+}
+
+# --- notification slack adapter ---
+notification_slack_validate() {
+  return 0
+}
+
+notification_slack_send() {
+  local url="$1" status="$2" hostname="$3" profile_name="$4" err_msg="$5"
+  send_notification_slack "$url" "$status" "$hostname" "$profile_name" "$err_msg"
+}
+
+# --- notification discord adapter ---
+notification_discord_validate() {
+  return 0
+}
+
+notification_discord_send() {
+  local url="$1" status="$2" hostname="$3" profile_name="$4" err_msg="$5"
+  send_notification_discord "$url" "$status" "$hostname" "$profile_name" "$err_msg"
+}
+
+# --- notification custom adapter ---
+notification_custom_validate() {
+  return 0
+}
+
+notification_custom_send() {
+  local url="$1" status="$2" hostname="$3" profile_name="$4" err_msg="$5"
+  local method="${6:-${BACKUP_NOTIFICATION_METHOD:-POST}}"
+  local headers_val="${7:-${BACKUP_NOTIFICATION_HEADERS:-}}"
+  local body_success="${8:-${BACKUP_NOTIFICATION_BODY_SUCCESS:-}}"
+  local body_failure="${9:-${BACKUP_NOTIFICATION_BODY_FAILURE:-}}"
+  local profile_command="${10:-}"
+
+  send_notification_custom "$url" "$status" "$hostname" "$profile_name" "$err_msg" "$method" "$headers_val" "$body_success" "$body_failure" "$profile_command"
+}
+
+# --- database mysql adapter ---
+database_mysql_default_command() {
+  printf 'mysqldump --all-databases --single-transaction --quick --order-by-primary'
+}
+
+database_mysql_validate_config() {
+  return 0
+}
+
+database_mysql_validate_dump() {
+  local header="$1"
+  if [[ "$header" == *"MySQL dump"* || "$header" == *"MariaDB dump"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+# --- database mariadb adapter ---
+database_mariadb_default_command() {
+  printf 'mariadb-dump --all-databases --single-transaction --quick --order-by-primary'
+}
+
+database_mariadb_validate_config() {
+  return 0
+}
+
+database_mariadb_validate_dump() {
+  local header="$1"
+  if [[ "$header" == *"MySQL dump"* || "$header" == *"MariaDB dump"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+# --- database postgres adapter ---
+database_postgres_default_command() {
+  printf 'pg_dumpall -U postgres'
+}
+
+database_postgres_validate_config() {
+  return 0
+}
+
+database_postgres_validate_dump() {
+  local header="$1"
+  if [[ "$header" == *"PostgreSQL database dump"* || "$header" == *"PostgreSQL database cluster dump"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+# --- database custom adapter ---
+database_custom_default_command() {
+  printf ''
+}
+
+database_custom_validate_config() {
+  return 0
+}
+
+database_custom_validate_dump() {
   return 0
 }
 
@@ -3446,21 +3577,13 @@ run_restore_drill() {
       if [[ -f "$file_path" && -s "$file_path" ]]; then
         local header
         header=$(head -n 10 "$file_path" 2>/dev/null) || true
-        case "${BACKUP_DB_TYPE}" in
-          mysql|mariadb)
-            if [[ "$header" == *"MySQL dump"* || "$header" == *"MariaDB dump"* ]]; then
-              db_valid=1
-            fi
-            ;;
-          postgres)
-            if [[ "$header" == *"PostgreSQL database dump"* || "$header" == *"PostgreSQL database cluster dump"* ]]; then
-              db_valid=1
-            fi
-            ;;
-          custom)
+        if has_function "database_${BACKUP_DB_TYPE}_validate_dump"; then
+          if "database_${BACKUP_DB_TYPE}_validate_dump" "$header"; then
             db_valid=1
-            ;;
-        esac
+          fi
+        else
+          db_valid=1
+        fi
       fi
     fi
 
