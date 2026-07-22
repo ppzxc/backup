@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.54"
+BACKUP_SCRIPT_VERSION="0.0.55"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -463,17 +463,17 @@ setup_colors() {
 
 log_info() {
   printf '%s\n' "$1"
-  command -v logger >/dev/null 2>&1 && logger -t restic-backup -- "$1" || true
+  command -v logger >/dev/null 2>&1 && logger -t backup.sh -- "$1" || true
 }
 
 log_error() {
   printf 'ERROR: %s\n' "$1" >&2
-  command -v logger >/dev/null 2>&1 && logger -t restic-backup -- "ERROR: $1" || true
+  command -v logger >/dev/null 2>&1 && logger -t backup.sh -- "ERROR: $1" || true
 }
 
 log_warn() {
   printf 'WARNING: %s\n' "$1" >&2
-  command -v logger >/dev/null 2>&1 && logger -t restic-backup -- "WARNING: $1" || true
+  command -v logger >/dev/null 2>&1 && logger -t backup.sh -- "WARNING: $1" || true
 }
 
 die() {
@@ -3180,38 +3180,38 @@ scheduler_cron_register() {
   declare -A active_jobs=()
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -n "$line" ]] || continue
-    if [[ "$line" == *"logger -t restic-backup-files"* ]]; then
+    if [[ "$line" == *"logger -t backup.sh-files"* ]]; then
       active_jobs[files]="$line"
-    elif [[ "$line" == *"logger -t restic-backup-db"* ]]; then
+    elif [[ "$line" == *"logger -t backup.sh-db"* ]]; then
       active_jobs[db]="$line"
-    elif [[ "$line" == *"logger -t restic-backup-audit-daily"* ]]; then
+    elif [[ "$line" == *"logger -t backup.sh-audit-daily"* ]]; then
       active_jobs[daily]="$line"
-    elif [[ "$line" == *"logger -t restic-backup-audit-drill"* ]]; then
+    elif [[ "$line" == *"logger -t backup.sh-audit-drill"* ]]; then
       active_jobs[drill]="$line"
-    elif [[ "$line" == *"logger -t restic-backup-ntp-report"* ]]; then
+    elif [[ "$line" == *"logger -t backup.sh-ntp-report"* ]]; then
       active_jobs[ntp]="$line"
     fi
   done <<< "$block_entries"
 
   # Update active jobs based on flags
   if (( daily )); then
-    active_jobs[daily]="${cron_daily} ${path_env} ${install_path} audit --daily --report 2>&1 | logger -t restic-backup-audit-daily"
+    active_jobs[daily]="${cron_daily} ${path_env} ${install_path} audit --daily --report 2>&1 | logger -t backup.sh-audit-daily"
   elif (( restore_drill )); then
-    active_jobs[drill]="${cron_drill} ${path_env} ${install_path} audit --restore-drill --report 2>&1 | logger -t restic-backup-audit-drill"
+    active_jobs[drill]="${cron_drill} ${path_env} ${install_path} audit --restore-drill --report 2>&1 | logger -t backup.sh-audit-drill"
   else
     # Regular registration: rebuild all
-    active_jobs[files]="${cron_on_cal} ${path_env} resticprofile --config ${r_cfg_file} --name ${profile_name} backup 2>&1 | logger -t restic-backup-files"
+    active_jobs[files]="${cron_on_cal} ${path_env} resticprofile --config ${r_cfg_file} --name ${profile_name} backup 2>&1 | logger -t backup.sh-files"
     if [[ -n "${BACKUP_DB_TYPE:-}" ]]; then
       local db_cal="${BACKUP_DB_SCHEDULE:-$on_calendar}"
       local cron_db; cron_db=$(convert_calendar_to_cron "$db_cal")
-      active_jobs[db]="${cron_db} ${path_env} resticprofile --config ${r_cfg_file} --name ${profile_name}-db backup 2>&1 | logger -t restic-backup-db"
+      active_jobs[db]="${cron_db} ${path_env} resticprofile --config ${r_cfg_file} --name ${profile_name}-db backup 2>&1 | logger -t backup.sh-db"
     else
       unset 'active_jobs[db]'
     fi
-    active_jobs[daily]="${cron_daily} ${path_env} ${install_path} audit --daily --report 2>&1 | logger -t restic-backup-audit-daily"
-    active_jobs[drill]="${cron_drill} ${path_env} ${install_path} audit --restore-drill --report 2>&1 | logger -t restic-backup-audit-drill"
+    active_jobs[daily]="${cron_daily} ${path_env} ${install_path} audit --daily --report 2>&1 | logger -t backup.sh-audit-daily"
+    active_jobs[drill]="${cron_drill} ${path_env} ${install_path} audit --restore-drill --report 2>&1 | logger -t backup.sh-audit-drill"
     if [[ "$ntp_report" == "1" ]]; then
-      active_jobs[ntp]="${cron_ntp} ${path_env} ${install_path} ntp --report 2>&1 | logger -t restic-backup-ntp-report"
+      active_jobs[ntp]="${cron_ntp} ${path_env} ${install_path} ntp --report 2>&1 | logger -t backup.sh-ntp-report"
     else
       unset 'active_jobs[ntp]'
     fi
