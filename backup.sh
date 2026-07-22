@@ -504,7 +504,7 @@ safe_spin() {
 safe_confirm() {
   local prompt="$1"
   local default_ans="${2:-n}"
-  if is_interactive && [[ -e /dev/tty ]]; then
+  if is_interactive; then
     if [[ "$default_ans" == "y" ]]; then
       gum confirm --default=true "$prompt" < /dev/tty > /dev/tty
     else
@@ -532,7 +532,7 @@ safe_input() {
   local prompt="$1"
   local default_val="${2:-}"
   local is_password="${3:-0}"
-  if is_interactive && [[ -e /dev/tty ]]; then
+  if is_interactive; then
     local -a gum_opts=(--placeholder "$prompt")
     if [[ -n "$default_val" ]]; then
       gum_opts+=(--value "$default_val")
@@ -560,7 +560,7 @@ safe_choose() {
   local header="$1"
   shift
   local options=("$@")
-  if is_interactive && [[ -e /dev/tty ]]; then
+  if is_interactive; then
     gum choose --header "$header" "${options[@]}" < /dev/tty
   else
     if [[ ! -t 0 ]]; then
@@ -7406,7 +7406,7 @@ prompt_validated() {
   local message="$1" default="$2" validate_fn="$3"
   local value err
   while true; do
-    if is_interactive && [[ -e /dev/tty ]]; then
+    if is_interactive; then
       value=$(safe_input "$message" "$default" 0)
     else
       if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
@@ -7443,7 +7443,7 @@ prompt_secret_required() {
   local message="$1"
   local value
   while true; do
-    if is_interactive && [[ -e /dev/tty ]]; then
+    if is_interactive; then
       value=$(safe_input "$message" "" 1)
     else
       if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
@@ -7469,7 +7469,7 @@ prompt_secret_required() {
 }
 
 prompt_backend_choice() {
-  if is_interactive && [[ -e /dev/tty ]]; then
+  if is_interactive; then
     local choice
     choice=$(safe_choose "백엔드 선택 (Choose Backend)" "s3" "sftp")
     if [[ "$choice" == "s3" || "$choice" == "sftp" ]]; then
@@ -7763,31 +7763,22 @@ cmd_wizard() {
   setting_args+=(--password "$password")
 
   # 1. Ask about targets
-  local use_default=1
-  if is_interactive && [[ -e /dev/tty ]]; then
-    if ! safe_confirm "기본 경로(/data/backup, /etc)를 백업 대상에 포함하시겠습니까?" "y"; then
-      use_default=0
-    fi
+  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+    setup_colors
+    printf '\n%b%b⚙  백업 대상 경로 설정 (Backup Target Paths)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+    printf '%b보안 컴플라이언스(ISMS/ISO 27001) 기준에 부합하기 위해, 중요 설정 파일(/etc) 및 중요 업무 데이터(/data/backup)가 기본 백업 경로로 지정되어 있습니다.%b\n' "$C_DIM" "$C_RESET"
+    printf '  * %b/etc%b: 사용자 계정, 권한 설정 및 네트워크 구성을 보존하여 설정의 무결성을 입증합니다.\n' "$C_BOLD" "$C_RESET"
+    printf '  * %b/data/backup%b: 정보 유출 방지 및 중요 업무 데이터 보존을 지원합니다.\n\n' "$C_BOLD" "$C_RESET"
   else
-    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-      setup_colors
-      printf '\n%b%b⚙  백업 대상 경로 설정 (Backup Target Paths)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
-      printf '%b보안 컴플라이언스(ISMS/ISO 27001) 기준에 부합하기 위해, 중요 설정 파일(/etc) 및 중요 업무 데이터(/data/backup)가 기본 백업 경로로 지정되어 있습니다.%b\n' "$C_DIM" "$C_RESET"
-      printf '  * %b/etc%b: 사용자 계정, 권한 설정 및 네트워크 구성을 보존하여 설정의 무결성을 입증합니다.\n' "$C_BOLD" "$C_RESET"
-      printf '  * %b/data/backup%b: 정보 유출 방지 및 중요 업무 데이터 보존을 지원합니다.\n\n' "$C_BOLD" "$C_RESET"
-      printf '%b기본 경로(/data/backup, /etc)를 백업 대상에 포함하시겠습니까? [%bY%b/n]: %b' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_RESET"
-    else
-      printf '\n--- 백업 대상 경로 설정 ---\n'
-      printf '보안 컴플라이언스(ISMS/ISO 27001) 기준에 부합하기 위해, 중요 설정 파일(/etc) 및 중요 업무 데이터(/data/backup)가 기본 백업 경로로 지정되어 있습니다.\n'
-      printf '  * /etc: 사용자 계정, 권한 설정 및 네트워크 구성을 보존하여 설정의 무결성을 입증합니다.\n'
-      printf '  * /data/backup: 정보 유출 방지 및 중요 업무 데이터 보존을 지원합니다.\n\n'
-      printf '기본 경로(/data/backup, /etc)를 백업 대상에 포함하시겠습니까? [Y/n]: '
-    fi
-    local use_default_targets
-    read -r use_default_targets
-    if [[ -n "$use_default_targets" && ! "$use_default_targets" =~ ^[Yy]$ ]]; then
-      use_default=0
-    fi
+    printf '\n--- 백업 대상 경로 설정 ---\n'
+    printf '보안 컴플라이언스(ISMS/ISO 27001) 기준에 부합하기 위해, 중요 설정 파일(/etc) 및 중요 업무 데이터(/data/backup)가 기본 백업 경로로 지정되어 있습니다.\n'
+    printf '  * /etc: 사용자 계정, 권한 설정 및 네트워크 구성을 보존하여 설정의 무결성을 입증합니다.\n'
+    printf '  * /data/backup: 정보 유출 방지 및 중요 업무 데이터 보존을 지원합니다.\n\n'
+  fi
+
+  local use_default=1
+  if ! safe_confirm "기본 경로(/data/backup, /etc)를 백업 대상에 포함하시겠습니까?" "y"; then
+    use_default=0
   fi
 
   local final_targets=""
