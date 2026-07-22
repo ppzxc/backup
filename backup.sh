@@ -4012,7 +4012,11 @@ cmd_status() {
     styled_env_perm="${C_RED}${env_perm}${C_RESET} ${C_YELLOW}(경고: 600 권장)${C_RESET}"
   fi
 
-  printf '%b%b⚙  백업 상태 (Backup Status)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+  if is_interactive; then
+    safe_style "⚙  백업 상태 (Backup Status)" --foreground "212" --bold
+  else
+    printf '%b%b⚙  백업 상태 (Backup Status)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+  fi
   printf '%b├──%b 저장소 위치:  %b\n' "$C_GRAY" "$C_RESET" "$styled_repo"
   printf '%b├──%b 백업 대상:    %b\n' "$C_GRAY" "$C_RESET" "$styled_targets"
   printf '%b├──%b 타이머 상태:  %b\n' "$C_GRAY" "$C_RESET" "$styled_timer"
@@ -4024,7 +4028,11 @@ cmd_status() {
   printf '%b├──%b %s 권한: %b\n' "$C_GRAY" "$C_RESET" "$RESTIC_ETC_DIR" "$styled_etc_perm"
   printf '%b└──%b %s 권한: %b\n' "$C_GRAY" "$C_RESET" "$BACKUP_ENV_FILE" "$styled_env_perm"
   printf '\n'
-  printf '%b%b⚙  최근 스냅샷 (Recent Snapshots)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+  if is_interactive; then
+    safe_style "⚙  최근 스냅샷 (Recent Snapshots)" --foreground "212" --bold
+  else
+    printf '%b%b⚙  최근 스냅샷 (Recent Snapshots)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+  fi
   if [[ -n "${BACKUP_DB_TYPE:-}" ]]; then
     printf '  [파일 백업 스냅샷]\n'
     restic snapshots --json 2>/dev/null | render_snapshots_pretty "exclude-db" || printf '  (조회 실패 또는 미초기화)\n'
@@ -7755,24 +7763,35 @@ cmd_wizard() {
   setting_args+=(--password "$password")
 
   # 1. Ask about targets
-  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-    setup_colors
-    printf '\n%b%b⚙  백업 대상 경로 설정 (Backup Target Paths)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
-    printf '%b보안 컴플라이언스(ISMS/ISO 27001) 기준에 부합하기 위해, 중요 설정 파일(/etc) 및 중요 업무 데이터(/data/backup)가 기본 백업 경로로 지정되어 있습니다.%b\n' "$C_DIM" "$C_RESET"
-    printf '  * %b/etc%b: 사용자 계정, 권한 설정 및 네트워크 구성을 보존하여 설정의 무결성을 입증합니다.\n' "$C_BOLD" "$C_RESET"
-    printf '  * %b/data/backup%b: 정보 유출 방지 및 중요 업무 데이터 보존을 지원합니다.\n\n' "$C_BOLD" "$C_RESET"
-    printf '%b기본 경로(/data/backup, /etc)를 백업 대상에 포함하시겠습니까? [%bY%b/n]: %b' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_RESET"
+  local use_default=1
+  if is_interactive && [[ -e /dev/tty ]]; then
+    if ! safe_confirm "기본 경로(/data/backup, /etc)를 백업 대상에 포함하시겠습니까?" "y"; then
+      use_default=0
+    fi
   else
-    printf '\n--- 백업 대상 경로 설정 ---\n'
-    printf '보안 컴플라이언스(ISMS/ISO 27001) 기준에 부합하기 위해, 중요 설정 파일(/etc) 및 중요 업무 데이터(/data/backup)가 기본 백업 경로로 지정되어 있습니다.\n'
-    printf '  * /etc: 사용자 계정, 권한 설정 및 네트워크 구성을 보존하여 설정의 무결성을 입증합니다.\n'
-    printf '  * /data/backup: 정보 유출 방지 및 중요 업무 데이터 보존을 지원합니다.\n\n'
-    printf '기본 경로(/data/backup, /etc)를 백업 대상에 포함하시겠습니까? [Y/n]: '
+    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+      setup_colors
+      printf '\n%b%b⚙  백업 대상 경로 설정 (Backup Target Paths)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
+      printf '%b보안 컴플라이언스(ISMS/ISO 27001) 기준에 부합하기 위해, 중요 설정 파일(/etc) 및 중요 업무 데이터(/data/backup)가 기본 백업 경로로 지정되어 있습니다.%b\n' "$C_DIM" "$C_RESET"
+      printf '  * %b/etc%b: 사용자 계정, 권한 설정 및 네트워크 구성을 보존하여 설정의 무결성을 입증합니다.\n' "$C_BOLD" "$C_RESET"
+      printf '  * %b/data/backup%b: 정보 유출 방지 및 중요 업무 데이터 보존을 지원합니다.\n\n' "$C_BOLD" "$C_RESET"
+      printf '%b기본 경로(/data/backup, /etc)를 백업 대상에 포함하시겠습니까? [%bY%b/n]: %b' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_RESET"
+    else
+      printf '\n--- 백업 대상 경로 설정 ---\n'
+      printf '보안 컴플라이언스(ISMS/ISO 27001) 기준에 부합하기 위해, 중요 설정 파일(/etc) 및 중요 업무 데이터(/data/backup)가 기본 백업 경로로 지정되어 있습니다.\n'
+      printf '  * /etc: 사용자 계정, 권한 설정 및 네트워크 구성을 보존하여 설정의 무결성을 입증합니다.\n'
+      printf '  * /data/backup: 정보 유출 방지 및 중요 업무 데이터 보존을 지원합니다.\n\n'
+      printf '기본 경로(/data/backup, /etc)를 백업 대상에 포함하시겠습니까? [Y/n]: '
+    fi
+    local use_default_targets
+    read -r use_default_targets
+    if [[ -n "$use_default_targets" && ! "$use_default_targets" =~ ^[Yy]$ ]]; then
+      use_default=0
+    fi
   fi
-  local use_default_targets; read -r use_default_targets
 
   local final_targets=""
-  if [[ -z "$use_default_targets" || "$use_default_targets" =~ ^[Yy]$ ]]; then
+  if (( use_default )); then
     final_targets="/data/backup,/etc"
   fi
 
