@@ -485,7 +485,7 @@ safe_spin() {
       shift
       # shellcheck disable=SC2163
       export -f "$func_name" 2>/dev/null || true
-      export RESTIC_PASSWORD RESTIC_REPOSITORY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY 2>/dev/null || true
+      export RESTIC_PASSWORD RESTIC_REPOSITORY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY RCLONE_CONFIG_SYNO_BACKUP_TYPE RCLONE_CONFIG_SYNO_BACKUP_HOST RCLONE_CONFIG_SYNO_BACKUP_PORT RCLONE_CONFIG_SYNO_BACKUP_USER RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE 2>/dev/null || true
       gum spin --spinner dot --title "$title" -- bash -c '"$@"' _ "$func_name" "$@"
     else
       gum spin --spinner dot --title "$title" -- "$@"
@@ -3064,7 +3064,7 @@ cmd_init() {
     if [[ "${BACKUP_VERBOSE:-0}" == "1" ]]; then
       restic_init_args+=(--verbose)
     fi
-    restic "${restic_init_args[@]}"
+    safe_spin "1차 저장소 초기화(init) 진행 중..." -- restic "${restic_init_args[@]}"
     log_info "1차 저장소 restic init 완료"
   else
     log_info "1차 저장소는 이미 초기화되어 있습니다."
