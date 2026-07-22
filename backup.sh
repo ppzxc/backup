@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.43"
+BACKUP_SCRIPT_VERSION="0.0.44"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -4026,7 +4026,7 @@ render_restore_drill_html() {
     .meta-table td.label {
       background-color: #f1f5f9;
       font-weight: 600;
-      width: 20%;
+      width: 15%;
     }
     h2 {
       font-size: 12pt;
@@ -4547,7 +4547,7 @@ render_daily_html() {
     .meta-table td.label {
       background-color: #f1f5f9;
       font-weight: 600;
-      width: 25%;
+      width: 15%;
     }
     h2 {
       font-size: 12pt;
@@ -5090,7 +5090,7 @@ render_general_html() {
     .meta-table td.label {
       background-color: #f1f5f9;
       font-weight: 600;
-      width: 25%;
+      width: 15%;
     }
     h2 {
       font-size: 12pt;
@@ -5418,7 +5418,7 @@ render_chrony_html() {
     h2 { font-size:11pt; font-weight:600; border-left:4px solid #6366f1; padding-left:10px; margin:22px 0 10px 0; color:#1e293b; }
     .meta-table { width:100%; border-collapse:collapse; margin-bottom:24px; }
     .meta-table td { padding:7px 12px; font-size:9.5pt; border:1px solid #cbd5e1; }
-    .meta-table td.label { background:#f1f5f9; font-weight:600; width:25%; }
+    .meta-table td.label { background:#f1f5f9; font-weight:600; width:15%; }
     .data-table { width:100%; border-collapse:collapse; margin-bottom:18px; }
     .data-table th,.data-table td { border:1px solid #cbd5e1; padding:7px 12px; font-size:9pt; text-align:left; }
     .data-table th { background:#f8fafc; font-weight:600; color:#475569; }
