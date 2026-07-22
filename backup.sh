@@ -4328,11 +4328,6 @@ render_daily_txt() {
     chrony_sync_status="만족"
   fi
 
-  local retention_status="미흡"
-  if [[ "$actual_daily_status" == "만족" && "$actual_weekly_status" == "만족" && "$actual_monthly_status" == "만족" ]]; then
-    retention_status="만족"
-  fi
-
   local offsite_status="만족 (1차 원격 완료)"
   if [[ -n "${BACKUP_SECONDARY_BACKEND:-}" || -n "${RESTIC_SECONDARY_REPOSITORY:-}" ]]; then
     offsite_status="만족 (1차+2차 소산 완료)"
@@ -4360,11 +4355,6 @@ render_daily_txt() {
     fi
   fi
 
-  local security_status="미흡"
-  if [[ "$etc_perm" == "700" && "$env_perm" == "600" ]]; then
-    security_status="만족"
-  fi
-
   cat <<EOF
 ======================================================================
 [보안 감사 증적] 일일 백업 수행 결과 및 보안 설정 검토 보고서
@@ -4372,35 +4362,30 @@ render_daily_txt() {
 - 보고서 생성일시: $cur_time
 - 대상 서버 호스트: $hostname_val
 - 백업 담당부서: $tester
+- 백엔드 유형: $backend_desc [Sourced from backup.env]
+- 저장소 주소: $repo
+- 데이터 암호화 방식: AES-256 (보안 비밀번호 키 적용 완료)
+- 1차 백업 대상 경로: $targets
 
-1. 백업 정책 및 백엔드 정보 [참고: PL-MIX-A / PL-MIX-F]
-  - 백엔드 유형: $backend_desc [Sourced from backup.env]
-  - 저장소 주소: $repo
-  - 데이터 암호화 방식: AES-256 (보안 비밀번호 키 적용 완료)
-  - 1차 백업 대상 경로: $targets
-
-2. 보존 정책 (Retention Rule) 검증 [법적 기준 만족 여부]
+1. 보존 정책 (Retention Rule) 검증 [법적 기준 만족 여부]
   - 일간 보관(Keep-Daily): ${config_daily}개 (설정: ${config_daily}개 -> ${config_daily_status}, 실제: ${actual_daily}개 -> ${actual_daily_status})
   - 주간 보관(Keep-Weekly): ${config_weekly}개 (설정: ${config_weekly}개 -> ${config_weekly_status}, 실제: ${actual_weekly}개 -> ${actual_weekly_status})
   - 월간 보관(Keep-Monthly): ${config_monthly}개 (설정: ${config_monthly}개 -> ${config_monthly_status}, 실제: ${actual_monthly}개 -> ${actual_monthly_status})
 
-3. 접근 통제 및 무결성 검사
+2. 접근 통제 및 무결성 검사
   - 설정 디렉터리 ($etc_dir) 권한: $etc_perm ($etc_safe_str)
   - 자격증명 파일 ($env_file) 권한: $env_perm ($env_safe_str)
   - 백업본 무결성 검증 (restic check) 결과: $check_status
 
-4. 최근 백업 성공 스냅샷 이력 (최근 3회 요약)
+3. 최근 백업 성공 스냅샷 이력 (최근 3회 요약)
 $snapshot_table
 
-5. ISMS-P 규정 준수 검증 체크리스트 (매일 검토 항목)
+4. ISMS-P 규정 준수 검증 체크리스트 (매일 검토 항목)
   [1] [시간 동기화 - 제1조] 외부/내부 NTP 동기화 동작 상태: $chrony_sync_status
-  [2] [보존 기간 - 제2조/제3조 1항] 보존 연한 만족 여부: $retention_status
-  [3] [소산 백업 - 제3조 1항/3항] 백업본 별도 매체/장소 소산 상태: $offsite_status
-  [4] [위변조방지 - 제3조 2항] 해시 무결성 검사 결과: $([[ "$check_status" == *"SUCCESS"* ]] && echo "만족" || echo "미흡")
-  [5] [중요로그백업 - 제3조 4항] /etc 및 /var/log 포함 상태: $targets_status
-  [6] [복구테스트 - 제3조 5항] 복구 모의훈련 수행 상태: $drill_status (최근 완료일시: $last_drill_date)
-  [7] [오남용감시 - 제4조] 대량 다운로드 검토 여부: 수동확인 필요 (애플리케이션 로그 분석 대상)
-  [8] [계정권한 - 제5조/제3조 1의2항] 접근 통제(700/600) 권한 진단: $security_status
+  [2] [소산 백업 - 제3조 1항/3항] 백업본 별도 매체/장소 소산 상태: $offsite_status
+  [3] [중요로그백업 - 제3조 4항] /etc 및 /var/log 포함 상태: $targets_status
+  [4] [복구테스트 - 제3조 5항] 복구 모의훈련 수행 상태: $drill_status (최근 완료일시: $last_drill_date)
+  [5] [오남용감시 - 제4조] 대량 다운로드 검토 여부: 수동확인 필요 (애플리케이션 로그 분석 대상)
 
 본 보고서는 시스템 스케줄러에 의해 자동으로 검증 및 생성되었으며, 위·변조 방지를 위해 
 원격 백업 저장소로 동시 암호화 이관되었습니다. (시스템 자동 보증 서명 필)
@@ -4517,11 +4502,6 @@ render_daily_html() {
     chrony_sync_status="만족"
   fi
 
-  local retention_status="미흡"
-  if [[ "$actual_daily_status" == "만족" && "$actual_weekly_status" == "만족" && "$actual_monthly_status" == "만족" ]]; then
-    retention_status="만족"
-  fi
-
   local offsite_status="만족 (1차 원격 완료)"
   if [[ -n "${BACKUP_SECONDARY_BACKEND:-}" || -n "${RESTIC_SECONDARY_REPOSITORY:-}" ]]; then
     offsite_status="만족 (1차+2차 소산 완료)"
@@ -4547,11 +4527,6 @@ render_daily_html() {
       last_drill_date="${fdate:0:4}-${fdate:4:2}-${fdate:6:2}"
       drill_status="만족"
     fi
-  fi
-
-  local security_status="미흡"
-  if [[ "$etc_perm" == "700" && "$env_perm" == "600" ]]; then
-    security_status="만족"
   fi
 
   cat <<EOF
@@ -4719,27 +4694,21 @@ render_daily_html() {
       <td class="label">백업 담당부서</td>
       <td>$tester</td>
       <td class="label">데이터 암호화 방식</td>
-      <td>AES-256 (보안 비밀번호 키 적용)</td>
+      <td>AES-256 (보안 비밀번호 키 적용 완료)</td>
     </tr>
-  </table>
-
-  <h2>1. 백업 정책 및 백엔드 정보</h2>
-  <table class="meta-table">
     <tr>
       <td class="label">백엔드 유형</td>
       <td>$backend_desc</td>
-    </tr>
-    <tr>
       <td class="label">저장소 주소</td>
       <td>$repo</td>
     </tr>
     <tr>
       <td class="label">1차 백업 대상</td>
-      <td>$targets</td>
+      <td colspan="3">$targets</td>
     </tr>
   </table>
 
-  <h2>2. 보존 정책 (Retention Rule) 검증</h2>
+  <h2>1. 보존 정책 (Retention Rule) 검증</h2>
   <table class="data-table">
     <thead>
       <tr>
@@ -4775,7 +4744,7 @@ render_daily_html() {
     </tbody>
   </table>
 
-  <h2>3. 접근 통제 및 백업 무결성</h2>
+  <h2>2. 접근 통제 및 백업 무결성</h2>
   <table class="data-table">
     <thead>
       <tr>
@@ -4807,7 +4776,7 @@ render_daily_html() {
     </tbody>
   </table>
 
-  <h2>4. 백업 이력 (Snapshots)</h2>
+  <h2>3. 백업 이력 (Snapshots)</h2>
   <table class="data-table">
     <thead>
       <tr>
@@ -4822,7 +4791,7 @@ render_daily_html() {
     </tbody>
   </table>
 
-  <h2>5. ISMS-P 규정 준수 검증 체크리스트</h2>
+  <h2>4. ISMS-P 규정 준수 검증 체크리스트</h2>
   <table class="data-table">
     <thead>
       <tr>
@@ -4840,22 +4809,10 @@ render_daily_html() {
         <td><span class="badge $([[ "$chrony_sync_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$chrony_sync_status</span></td>
       </tr>
       <tr>
-        <td><b>[제2조/제3조 1항] 보존 정책</b></td>
-        <td>로그 최소 6개월, 중요기록 1~3년 이상 보존 연한 만족</td>
-        <td>일간/주간/월간 보존 만족</td>
-        <td><span class="badge $([[ "$retention_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$retention_status</span></td>
-      </tr>
-      <tr>
         <td><b>[제3조 1항/3항] 백업 소산</b></td>
         <td>파일/DB 백업 및 원격 소산 보관 (물리적 이격 저장)</td>
         <td>$offsite_status</td>
         <td><span class="badge $([[ "$offsite_status" == *"만족"* ]] && echo "badge-success" || echo "badge-warning")">만족</span></td>
-      </tr>
-      <tr>
-        <td><b>[제3조 2항] 위변조 방지</b></td>
-        <td>해시값 대조 및 암호화를 적용한 위변조 감지 구조</td>
-        <td>AES-256 / restic check</td>
-        <td><span class="badge $([[ "$check_status" == *"SUCCESS"* ]] && echo "badge-success" || echo "badge-warning")">$([[ "$check_status" == *"SUCCESS"* ]] && echo "만족" || echo "미흡")</span></td>
       </tr>
       <tr>
         <td><b>[제3조 4항] 중요 접근권한 백업</b></td>
@@ -4874,12 +4831,6 @@ render_daily_html() {
         <td>접속로그 모니터링 및 개인정보 과조회/대량다운로드 감시</td>
         <td>[수동 점검 필요]</td>
         <td><span class="badge badge-warning">수동확인</span></td>
-      </tr>
-      <tr>
-        <td><b>[제5조/제3조 1의2항] 계정/권한</b></td>
-        <td>자격증명 파일 접근권한 통제 (700/600) 및 계정 관리</td>
-        <td>etc: $etc_perm / env: $env_perm</td>
-        <td><span class="badge $([[ "$security_status" == "만족" ]] && echo "badge-success" || echo "badge-warning")">$security_status</span></td>
       </tr>
     </tbody>
   </table>
