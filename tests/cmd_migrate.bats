@@ -55,7 +55,7 @@ ENV
     echo "restic $*" >> "'"${STUB_BIN}"'/restic.calls"
     exit 1
   '
-  run cmd_migrate --backend s3 --endpoint http://new-s3 --bucket new-bucket --access-key key --secret-key sec
+  run cmd_migrate --yes --backend s3 --endpoint http://new-s3 --bucket new-bucket --access-key key --secret-key sec
   [ "$status" -eq 1 ]
   [[ "$output" == *"기존 저장소"* ]]
 }
@@ -84,7 +84,7 @@ ENV
     esac
   '
 
-  run cmd_migrate --backend s3 --endpoint http://new-s3 --bucket new-bucket --access-key key --secret-key sec --new-password newsecret
+  run cmd_migrate --yes --backend s3 --endpoint http://new-s3 --bucket new-bucket --access-key key --secret-key sec --new-password newsecret
   echo "--- cmd_migrate OUTPUT: ---" >&2
   echo "$output" >&2
   echo "---------------------------" >&2
@@ -178,7 +178,7 @@ ENV
     exit 0
   '
 
-  run cmd_migrate --backend s3 --endpoint http://new-s3 --bucket new-bucket --access-key key --secret-key sec --new-password newsecret --skip-check
+  run cmd_migrate --yes --backend s3 --endpoint http://new-s3 --bucket new-bucket --access-key key --secret-key sec --new-password newsecret --skip-check
   [ "$status" -eq 0 ]
 
   # Verify primary config was updated

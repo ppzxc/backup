@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.56"
+BACKUP_SCRIPT_VERSION="0.0.57"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -3022,13 +3022,13 @@ restic_is_initialized() {
   restic snapshots >/dev/null 2>&1
 }
 
-cmd_init() {
-  if has_help_flag "$@"; then
-    help_init
-    return 0
+restic_repo_init() {
+  local profile_name="${1:-}"
+  if [[ -z "$profile_name" ]]; then
+    profile_name=$(resolve_profile_name)
   fi
-  require_root
-  require_backup_env
+
+  write_resticprofile_assets "$profile_name" "$DEFAULT_ON_CALENDAR"
 
   local backend="s3"
   if [[ -n "${RCLONE_CONFIG_SYNO_BACKUP_TYPE:-}" ]]; then
@@ -3137,6 +3137,18 @@ cmd_init() {
       log_info "2차 원격 저장소는 이미 초기화되어 있습니다."
     fi
   fi
+}
+
+cmd_init() {
+  if has_help_flag "$@"; then
+    help_init
+    return 0
+  fi
+  require_root
+  require_backup_env
+
+  local profile_name; profile_name=$(resolve_profile_name)
+  restic_repo_init "$profile_name"
 }
 
 
@@ -3754,31 +3766,15 @@ cmd_schedule() {
   esac
 }
 
-cmd_run() {
-  if has_help_flag "$@"; then
-    help_run
-    return 0
-  fi
-  require_backup_env
-  local profile_name; profile_name=$(resolve_profile_name)
+run_pipeline_execute() {
+  local profile_name="${1:-}"
+  local on_calendar="${2:-$DEFAULT_ON_CALENDAR}"
 
-  # 수동 백업 기동 전 백업 대상/제외 경로의 절대 경로 무결성 직접 검증
-  if [[ -n "${BACKUP_TARGETS:-}" ]]; then
-    local path_err
-    if ! path_err=$(validate_absolute_path "$BACKUP_TARGETS" "백업 대상 경로" 2>&1); then
-      log_error "$path_err"
-      die "백업 실행을 위한 설정 정합성 검증에 실패했습니다. 설정 파일(${BACKUP_ENV_FILE})을 점검하거나 'backup.sh config'를 통해 설정을 재조정하세요." 1
-    fi
-  fi
-  if [[ -n "${BACKUP_EXCLUDES:-}" ]]; then
-    local path_err
-    if ! path_err=$(validate_absolute_path "$BACKUP_EXCLUDES" "백업 제외 경로" 2>&1); then
-      log_error "$path_err"
-      die "백업 실행을 위한 설정 정합성 검증에 실패했습니다. 설정 파일(${BACKUP_ENV_FILE})을 점검하거나 'backup.sh config'를 통해 설정을 재조정하세요." 1
-    fi
+  if [[ -z "$profile_name" ]]; then
+    profile_name=$(resolve_profile_name)
   fi
 
-  write_resticprofile_assets "$profile_name" "$DEFAULT_ON_CALENDAR"
+  write_resticprofile_assets "$profile_name" "$on_calendar"
 
   local -a resticprofile_args=(--config "$RESTICPROFILE_CONFIG_FILE" --name "$profile_name" backup)
   if [[ "${BACKUP_VERBOSE:-0}" == "1" ]]; then
@@ -3880,6 +3876,33 @@ cmd_run() {
     send_unified_notification "failure" "$pipeline_err" "$executed_cmd"
     die "$pipeline_err"
   fi
+}
+
+cmd_run() {
+  if has_help_flag "$@"; then
+    help_run
+    return 0
+  fi
+  require_backup_env
+  local profile_name; profile_name=$(resolve_profile_name)
+
+  # 수동 백업 기동 전 백업 대상/제외 경로의 절대 경로 무결성 직접 검증
+  if [[ -n "${BACKUP_TARGETS:-}" ]]; then
+    local path_err
+    if ! path_err=$(validate_absolute_path "$BACKUP_TARGETS" "백업 대상 경로" 2>&1); then
+      log_error "$path_err"
+      die "백업 실행을 위한 설정 정합성 검증에 실패했습니다. 설정 파일(${BACKUP_ENV_FILE})을 점검하거나 'backup.sh config'를 통해 설정을 재조정하세요." 1
+    fi
+  fi
+  if [[ -n "${BACKUP_EXCLUDES:-}" ]]; then
+    local path_err
+    if ! path_err=$(validate_absolute_path "$BACKUP_EXCLUDES" "백업 제외 경로" 2>&1); then
+      log_error "$path_err"
+      die "백업 실행을 위한 설정 정합성 검증에 실패했습니다. 설정 파일(${BACKUP_ENV_FILE})을 점검하거나 'backup.sh config'를 통해 설정을 재조정하세요." 1
+    fi
+  fi
+
+  run_pipeline_execute "$profile_name"
 }
 
 render_snapshots_pretty() {

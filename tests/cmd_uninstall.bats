@@ -29,7 +29,7 @@ ENV
   mkdir -p "$(dirname "$RESTIC_INSTALL_PATH")" "$(dirname "$BACKUP_SCRIPT_INSTALL_PATH")"
   touch "$RESTIC_INSTALL_PATH" "$RCLONE_INSTALL_PATH" "$RESTICPROFILE_INSTALL_PATH" "$BACKUP_SCRIPT_INSTALL_PATH"
 
-  run cmd_uninstall --purge
+  run cmd_uninstall --purge --yes
   [ "$status" -eq 0 ]
   [ ! -d "$RESTIC_ETC_DIR" ]
   [ ! -d "${HOME}/.cache/restic" ]

@@ -285,3 +285,18 @@ EOF
   [[ "$output" == *"restic -r s3:https://sec-s3.com/sec-bucket/host init"* ]]
 }
 
+@test "restic_repo_init initializes repository directly and renders assets" {
+  echo 'export RESTIC_REPOSITORY="local:/tmp/fake-repo"' > "$BACKUP_ENV_FILE"
+  echo 'export RESTIC_PASSWORD="secret"' >> "$BACKUP_ENV_FILE"
+  stub_command "restic" '
+    case "$1" in
+      snapshots) exit 1 ;;
+      init) echo "restic init $*" >> "'"${STUB_BIN}"'/restic.calls"; exit 0 ;;
+    esac
+  '
+  run restic_repo_init "web01"
+  [ "$status" -eq 0 ]
+  [ -f "$RESTICPROFILE_CONFIG_FILE" ]
+  run cat "${STUB_BIN}/restic.calls"
+  [[ "$output" == *"init"* ]]
+}
