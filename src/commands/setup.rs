@@ -24,6 +24,11 @@ pub fn create_default_config_file(path: &Path, profile: &str, target: &str, repo
     let yaml = serde_yaml::to_string(&config)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        }
     }
     fs::write(path, yaml)?;
 
@@ -51,7 +56,13 @@ pub fn prompt_interactive_setup() -> Result<(String, String, String, String)> {
 }
 
 pub fn run_setup(config_path: &Path) -> Result<()> {
-    let (profile, target, repo, password) = prompt_interactive_setup()?;
-    create_default_config_file(config_path, &profile, &target, &repo, &password)?;
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        let (profile, target, repo, password) = prompt_interactive_setup()?;
+        create_default_config_file(config_path, &profile, &target, &repo, &password)?;
+    } else {
+        create_default_config_file(config_path, "default", "/data", "rclone:syno_backup:/backup", "default_secret")?;
+    }
     Ok(())
 }
+

@@ -11,8 +11,9 @@ fn test_create_default_config_file() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let metadata = std::fs::metadata(&config_path).unwrap();
-        let permissions = metadata.permissions();
-        assert_eq!(permissions.mode() & 0o777, 0o600);
+        let parent_perms = std::fs::metadata(dir.path()).unwrap().permissions();
+        assert_eq!(parent_perms.mode() & 0o777, 0o700);
+        let file_perms = std::fs::metadata(&config_path).unwrap().permissions();
+        assert_eq!(file_perms.mode() & 0o777, 0o600);
     }
 }
