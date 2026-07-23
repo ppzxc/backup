@@ -125,14 +125,42 @@ pub fn run_doctor_checks<R: RcloneRunner>(rclone: &R) -> Result<String> {
     Ok(report)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditReportMeta {
+    pub host_name: String,
+    pub timestamp: String,
+}
+
+impl AuditReportMeta {
+    pub fn current() -> Self {
+        let host_name = std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("COMPUTERNAME"))
+            .unwrap_or_else(|_| "localhost".into());
+        let timestamp = format!("{:?}", std::time::SystemTime::now());
+        Self { host_name, timestamp }
+    }
+
+    pub fn new(host_name: impl Into<String>, timestamp: impl Into<String>) -> Self {
+        Self {
+            host_name: host_name.into(),
+            timestamp: timestamp.into(),
+        }
+    }
+}
+
 pub fn render_html_isms_report(host_name: &str, timestamp: &str) -> String {
-    let results = DiagnosticCollector::collect(host_name, timestamp);
+    let meta = AuditReportMeta::new(host_name, timestamp);
+    render_html_isms_report_with_meta(&meta)
+}
+
+pub fn render_html_isms_report_with_meta(meta: &AuditReportMeta) -> String {
+    let results = DiagnosticCollector::collect(&meta.host_name, &meta.timestamp);
     let renderer = IsmsReportRenderer;
     renderer.render_html(&results)
 }
 
-pub fn execute_doctor_file_export(file: Option<&Path>) -> Result<String> {
-    let html_content = render_html_isms_report("prod-db-server-01", "2026-07-23 15:34:00");
+pub fn execute_doctor_file_export_with_meta(file: Option<&Path>, meta: &AuditReportMeta) -> Result<String> {
+    let html_content = render_html_isms_report_with_meta(meta);
     if let Some(file_path) = file {
         if let Some(parent) = file_path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -144,4 +172,9 @@ pub fn execute_doctor_file_export(file: Option<&Path>) -> Result<String> {
     } else {
         Ok(html_content)
     }
+}
+
+pub fn execute_doctor_file_export(file: Option<&Path>) -> Result<String> {
+    let meta = AuditReportMeta::current();
+    execute_doctor_file_export_with_meta(file, &meta)
 }

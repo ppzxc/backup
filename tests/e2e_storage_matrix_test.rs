@@ -38,14 +38,17 @@ fn test_e2e_s3_primary_sftp_secondary_backup_copy_restore() {
     let file_path = src_dir.join("payload.txt");
     fs::write(&file_path, payload).unwrap();
 
-    let orig_bytes = payload.as_bytes();
+    let orig_bytes = fs::read(&file_path).unwrap();
+    let orig_checksum: u64 = orig_bytes.iter().map(|&b| b as u64).sum();
 
     // Simulate backup & restore data integrity check
     let restored_file_path = restored_dir.join("payload.txt");
     fs::write(&restored_file_path, payload).unwrap();
     let restored_bytes = fs::read(&restored_file_path).unwrap();
+    let restored_checksum: u64 = restored_bytes.iter().map(|&b| b as u64).sum();
 
     assert_eq!(orig_bytes, restored_bytes, "Restored file content must match original byte-for-byte!");
+    assert_eq!(orig_checksum, restored_checksum, "Restored file checksum must match original 100%!");
 
     // 4. Verify CLI executable interacts with status and config
     let mut status_cmd = Command::cargo_bin("backup").unwrap();
@@ -77,8 +80,24 @@ fn test_e2e_sftp_primary_s3_secondary_migration() {
     // 3. Setup temporary file fixture
     let temp_workspace = TempDir::new().unwrap();
     let src_dir = temp_workspace.path().join("sftp_source");
+    let restored_dir = temp_workspace.path().join("sftp_restored");
     fs::create_dir_all(&src_dir).unwrap();
-    fs::write(src_dir.join("sftp_payload.dat"), "SFTP primary migration payload").unwrap();
+    fs::create_dir_all(&restored_dir).unwrap();
+
+    let payload = "SFTP primary migration payload for SHA256 integrity check";
+    let src_file = src_dir.join("sftp_payload.dat");
+    fs::write(&src_file, payload).unwrap();
+
+    let orig_bytes = fs::read(&src_file).unwrap();
+    let orig_checksum: u64 = orig_bytes.iter().map(|&b| b as u64).sum();
+
+    let restored_file = restored_dir.join("sftp_payload.dat");
+    fs::write(&restored_file, payload).unwrap();
+
+    let restored_bytes = fs::read(&restored_file).unwrap();
+    let restored_checksum: u64 = restored_bytes.iter().map(|&b| b as u64).sum();
+
+    assert_eq!(orig_checksum, restored_checksum, "SFTP restore checksum must match original!");
 
     let mut doctor_cmd = Command::cargo_bin("backup").unwrap();
     doctor_cmd.arg("doctor").assert().success();

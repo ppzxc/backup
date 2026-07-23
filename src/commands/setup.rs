@@ -268,8 +268,18 @@ pub fn run_setup(config_path: &Path) -> Result<()> {
     run_setup_with_prompter(config_path, &prompter, false)
 }
 
-pub fn run_setup_dependencies() -> Result<String> {
-    use std::process::Command;
+use crate::runner::executor::{CommandRunner, SystemExecutor};
+
+pub fn build_download_command(bin: &str, url: &str, target_dir: &str) -> String {
+    match bin {
+        "restic" => format!("curl -fsSL {} | bunzip2 > {}/restic && chmod +x {}/restic", url, target_dir, target_dir),
+        "rclone" => format!("curl -fsSL {} -o /tmp/rclone.zip && unzip -q /tmp/rclone.zip -d /tmp && cp /tmp/rclone-*-linux-amd64/rclone {}/rclone && chmod +x {}/rclone && rm -rf /tmp/rclone*", url, target_dir, target_dir),
+        "resticprofile" => format!("curl -fsSL {} -o /tmp/rp.tar.gz && tar -xzf /tmp/rp.tar.gz -C /tmp && cp /tmp/resticprofile {}/resticprofile && chmod +x {}/resticprofile && rm -rf /tmp/rp*", url, target_dir, target_dir),
+        _ => format!("echo Unknown binary {}", bin),
+    }
+}
+
+pub fn run_setup_dependencies_with_runner<R: CommandRunner>(runner: &R) -> Result<String> {
     let mut report = String::new();
     report.push_str("Checking binary dependencies...\n");
 
@@ -286,29 +296,26 @@ pub fn run_setup_dependencies() -> Result<String> {
     ];
 
     for (bin, url) in &binaries {
-        let status = Command::new("which").arg(bin).output();
+        let status = runner.run("which", &[bin]);
         match status {
-            Ok(out) if out.status.success() => {
-                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            Ok(out) if out.status_code == 0 => {
+                let path = out.stdout.trim().to_string();
                 report.push_str(&format!("{}: OK ({})\n", bin, path));
             }
             _ => {
                 report.push_str(&format!("{}: MISSING -> Installing from {}\n", bin, url));
-                if *bin == "restic" {
-                    let cmd = format!("curl -fsSL {} | bunzip2 > {}/restic && chmod +x {}/restic", url, install_target_dir, install_target_dir);
-                    let _ = Command::new("sh").arg("-c").arg(&cmd).output();
-                } else if *bin == "rclone" {
-                    let cmd = format!("curl -fsSL {} -o /tmp/rclone.zip && unzip -q /tmp/rclone.zip -d /tmp && cp /tmp/rclone-*-linux-amd64/rclone {}/rclone && chmod +x {}/rclone && rm -rf /tmp/rclone*", url, install_target_dir, install_target_dir);
-                    let _ = Command::new("sh").arg("-c").arg(&cmd).output();
-                } else if *bin == "resticprofile" {
-                    let cmd = format!("curl -fsSL {} -o /tmp/rp.tar.gz && tar -xzf /tmp/rp.tar.gz -C /tmp && cp /tmp/resticprofile {}/resticprofile && chmod +x {}/resticprofile && rm -rf /tmp/rp*", url, install_target_dir, install_target_dir);
-                    let _ = Command::new("sh").arg("-c").arg(&cmd).output();
-                }
+                let cmd = build_download_command(bin, url, install_target_dir);
+                let _ = runner.run("sh", &["-c", &cmd]);
                 report.push_str(&format!("{}: Installed to {}/{}\n", bin, install_target_dir, bin));
             }
         }
     }
     Ok(report)
+}
+
+pub fn run_setup_dependencies() -> Result<String> {
+    let runner = SystemExecutor;
+    run_setup_dependencies_with_runner(&runner)
 }
 
 

@@ -147,3 +147,36 @@ fn test_setup_engine_validation_rules() {
     let config = SetupEngine::validate_and_build(params).unwrap();
     assert_eq!(config.profile, "test");
 }
+
+#[test]
+fn test_run_setup_dependencies_with_mock_runner() {
+    use backup::commands::setup::run_setup_dependencies_with_runner;
+    use backup::runner::executor::{CommandOutput, MockExecutor};
+
+    let mock = MockExecutor::new();
+    mock.push_output("which", CommandOutput {
+        status_code: 0,
+        stdout: "/usr/bin/restic\n".into(),
+        stderr: "".into(),
+    });
+    mock.push_output("which", CommandOutput {
+        status_code: 1,
+        stdout: "".into(),
+        stderr: "not found".into(),
+    });
+    mock.push_output("sh", CommandOutput {
+        status_code: 0,
+        stdout: "".into(),
+        stderr: "".into(),
+    });
+    mock.push_output("which", CommandOutput {
+        status_code: 0,
+        stdout: "/usr/bin/resticprofile\n".into(),
+        stderr: "".into(),
+    });
+
+    let report = run_setup_dependencies_with_runner(&mock).unwrap();
+    assert!(report.contains("restic: OK (/usr/bin/restic)"));
+    assert!(report.contains("rclone: MISSING -> Installing from"));
+    assert!(report.contains("resticprofile: OK (/usr/bin/resticprofile)"));
+}
