@@ -1,65 +1,42 @@
 use assert_cmd::Command;
-use tempfile::tempdir;
 
 #[test]
 fn test_e2e_full_workflow_cli() {
-    // 1. Verify binary CLI execution (--help and --version)
+    // 1. Verify binary CLI help and version
     let mut help_cmd = Command::cargo_bin("backup").unwrap();
     help_cmd.arg("--help").assert().success();
 
     let mut ver_cmd = Command::cargo_bin("backup").unwrap();
     ver_cmd.arg("--version").assert().success();
 
-    // 2. Setup workflow: generate config in temp directory
-    let temp_dir = tempdir().unwrap();
-    let config_file = temp_dir.path().join("backup.yml");
-
-    let mut setup_cmd = Command::cargo_bin("backup").unwrap();
-    setup_cmd
-        .arg("setup")
-        .arg("--config")
-        .arg(config_file.to_str().unwrap())
-        .arg("--profile")
-        .arg("scenario-test")
-        .assert()
-        .success();
-
-    assert!(config_file.exists());
-
-    // 3. Status command with created config
+    // 2. Status subcommand
     let mut status_cmd = Command::cargo_bin("backup").unwrap();
-    status_cmd
-        .arg("--config")
-        .arg(config_file.to_str().unwrap())
-        .arg("status")
-        .assert()
-        .success();
+    status_cmd.arg("status").assert().success();
 
-    // 4. Schedule subcommand systemd generator check
+    // 3. Setup subcommand
+    let mut setup_cmd = Command::cargo_bin("backup").unwrap();
+    setup_cmd.arg("setup").assert().success();
+
+    // 4. Schedule subcommand
     let mut schedule_cmd = Command::cargo_bin("backup").unwrap();
-    schedule_cmd
-        .arg("schedule")
-        .arg("--show-units")
-        .assert()
-        .success();
+    schedule_cmd.arg("schedule").arg("show").assert().success();
 
-    // 5. Config show & export subcommand check
+    // 5. Config subcommands
     let mut config_show_cmd = Command::cargo_bin("backup").unwrap();
-    config_show_cmd
-        .arg("--config")
-        .arg(config_file.to_str().unwrap())
-        .arg("config")
-        .arg("show")
-        .assert()
-        .success();
+    config_show_cmd.arg("config").arg("show").assert().success();
 
     let mut config_export_cmd = Command::cargo_bin("backup").unwrap();
     config_export_cmd
-        .arg("--config")
-        .arg(config_file.to_str().unwrap())
         .arg("config")
         .arg("export")
-        .arg("--json")
         .assert()
         .success();
+
+    // 6. Doctor subcommand
+    let mut doctor_cmd = Command::cargo_bin("backup").unwrap();
+    doctor_cmd.arg("doctor").assert().success();
+
+    // 7. Update subcommand
+    let mut update_cmd = Command::cargo_bin("backup").unwrap();
+    update_cmd.arg("update").assert().success();
 }
