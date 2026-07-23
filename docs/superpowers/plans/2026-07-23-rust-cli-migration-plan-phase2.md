@@ -4,19 +4,20 @@
 
 **Goal:** Implement full business logic for all `backup` subcommands in Rust (`run`, `status`, `doctor`, `schedule`, `setup`, `config`, `restore`, `snapshots`).
 
-**Architecture:** Imperative process execution wrapper traits (`ResticRunner`, `RcloneRunner`, `SystemdRunner`) for isolated testing, backed by pure domain logic.
+**Architecture:** Imperative process execution wrapper traits (`ResticRunner`, `RcloneRunner`, `SystemdRunner`) for isolated testing, backed by pure domain logic using `--password-file` and tempfiles for credential safety.
 
-**Tech Stack:** Rust 2024 edition, `clap`, `inquire`, `indicatif`, `config`, `serde`, `secrecy`, `tracing`, `anyhow`, `tempfile`, `assert_cmd`, `predicates`.
+**Tech Stack:** Rust 2024 edition, `clap`, `inquire`, `indicatif`, `config`, `serde`, `secrecy`, `tempfile`, `tracing`, `anyhow`, `assert_cmd`, `predicates`.
 
 ## Global Constraints
 
 - Configuration file: `/etc/backup/config.yml` (Permissions: dir `700`, file `600`).
 - Process runner abstraction: Use `std::process::Command` wrapped behind traits for test stubbing.
+- Credential safety: MUST use `--password-file` with `tempfile::NamedTempFile` (mode 600) instead of passing passwords via `RESTIC_PASSWORD` environment variables to prevent `/proc/<pid>/environ` leakage.
 - Masked logging: Never expose plain passwords in logs or terminal outputs.
 
 ---
 
-### Task 6: External Process Runner Abstraction (`ResticRunner` & `RcloneRunner`)
+### Task 6: External Process Runner Abstraction (`ResticRunner` & `RcloneRunner` with NamedTempFile)
 
 **Files:**
 - Create: `src/runner/mod.rs`
@@ -47,12 +48,14 @@ fn test_mock_restic_runner() {
 Run: `cargo test --test runner_test`
 Expected: FAIL due to missing `MockResticRunner`
 
-- [ ] **Step 3: Implement Process Runner Traits**
+- [ ] **Step 3: Implement Process Runner Traits with TempFile Password Delivery**
 
 ```rust
 // src/runner/restic.rs
 use anyhow::Result;
+use std::io::Write;
 use std::process::Command;
+use tempfile::NamedTempFile;
 
 pub trait ResticRunner {
     fn init_repo(&self, repo: &str, password: &str) -> Result<String>;
@@ -62,20 +65,29 @@ pub trait ResticRunner {
 
 pub struct SystemResticRunner;
 
+fn create_temp_password_file(password: &str) -> Result<NamedTempFile> {
+    let mut file = NamedTempFile::new()?;
+    file.write_all(password.as_bytes())?;
+    file.flush()?;
+    Ok(file)
+}
+
 impl ResticRunner for SystemResticRunner {
     fn init_repo(&self, repo: &str, password: &str) -> Result<String> {
+        let pass_file = create_temp_password_file(password)?;
         let output = Command::new("restic")
-            .env("RESTIC_REPOSITORY", repo)
-            .env("RESTIC_PASSWORD", password)
+            .arg("-r").arg(repo)
+            .arg("--password-file").arg(pass_file.path())
             .arg("init")
             .output()?;
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
     fn backup_paths(&self, repo: &str, password: &str, targets: &[String], excludes: &[String]) -> Result<String> {
+        let pass_file = create_temp_password_file(password)?;
         let mut cmd = Command::new("restic");
-        cmd.env("RESTIC_REPOSITORY", repo)
-           .env("RESTIC_PASSWORD", password)
+        cmd.arg("-r").arg(repo)
+           .arg("--password-file").arg(pass_file.path())
            .arg("backup");
         for t in targets { cmd.arg(t); }
         for e in excludes { cmd.arg("--exclude").arg(e); }
@@ -84,9 +96,10 @@ impl ResticRunner for SystemResticRunner {
     }
 
     fn list_snapshots(&self, repo: &str, password: &str) -> Result<String> {
+        let pass_file = create_temp_password_file(password)?;
         let output = Command::new("restic")
-            .env("RESTIC_REPOSITORY", repo)
-            .env("RESTIC_PASSWORD", password)
+            .arg("-r").arg(repo)
+            .arg("--password-file").arg(pass_file.path())
             .arg("snapshots")
             .output()?;
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -138,7 +151,7 @@ Expected: PASS
 
 ```bash
 git add src/runner/ src/lib.rs tests/runner_test.rs
-git commit -m "feat: add restic and rclone process runner abstractions"
+git commit -m "feat: add restic and rclone process runner abstractions with NamedTempFile password security"
 ```
 
 ---
