@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::path::Path;
-use crate::runner::executor::CommandRunner;
+use crate::runner::executor::{CommandOutput, CommandRunner};
 
 pub trait ResticProfileRunner {
     fn backup(&self, config_path: &Path, profile: &str, dry_run: bool) -> Result<String>;
@@ -20,6 +20,17 @@ impl<'a, E: CommandRunner> ResticProfileTool<'a, E> {
     pub fn new(executor: &'a E) -> Self {
         Self { executor }
     }
+
+    fn check_output(&self, output: CommandOutput) -> Result<String> {
+        if output.status_code != 0 {
+            anyhow::bail!(
+                "resticprofile failed with exit code {}: {}",
+                output.status_code,
+                output.stderr
+            );
+        }
+        Ok(output.stdout)
+    }
 }
 
 impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {
@@ -30,43 +41,43 @@ impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {
             args.push("--dry-run");
         }
         let output = self.executor.run("resticprofile", &args)?;
-        Ok(output.stdout)
+        self.check_output(output)
     }
 
     fn schedule_enable(&self, config_path: &Path) -> Result<String> {
         let config_str = config_path.to_string_lossy();
         let output = self.executor.run("resticprofile", &["--config", &config_str, "schedule", "--all"])?;
-        Ok(output.stdout)
+        self.check_output(output)
     }
 
     fn schedule_disable(&self, config_path: &Path) -> Result<String> {
         let config_str = config_path.to_string_lossy();
         let output = self.executor.run("resticprofile", &["--config", &config_str, "unschedule", "--all"])?;
-        Ok(output.stdout)
+        self.check_output(output)
     }
 
     fn schedule_status(&self, config_path: &Path) -> Result<String> {
         let config_str = config_path.to_string_lossy();
         let output = self.executor.run("resticprofile", &["--config", &config_str, "status"])?;
-        Ok(output.stdout)
+        self.check_output(output)
     }
 
     fn list_snapshots(&self, config_path: &Path, profile: &str) -> Result<String> {
         let config_str = config_path.to_string_lossy();
         let output = self.executor.run("resticprofile", &["--config", &config_str, "--name", profile, "snapshots"])?;
-        Ok(output.stdout)
+        self.check_output(output)
     }
 
     fn prune(&self, config_path: &Path, profile: &str) -> Result<String> {
         let config_str = config_path.to_string_lossy();
         let output = self.executor.run("resticprofile", &["--config", &config_str, "--name", profile, "prune"])?;
-        Ok(output.stdout)
+        self.check_output(output)
     }
 
     fn check(&self, config_path: &Path, profile: &str) -> Result<String> {
         let config_str = config_path.to_string_lossy();
         let output = self.executor.run("resticprofile", &["--config", &config_str, "--name", profile, "check"])?;
-        Ok(output.stdout)
+        self.check_output(output)
     }
 }
 
@@ -86,24 +97,45 @@ impl MockResticProfileRunner {
 
 impl ResticProfileRunner for MockResticProfileRunner {
     fn backup(&self, _config_path: &Path, _profile: &str, _dry_run: bool) -> Result<String> {
+        if self.exit_code != 0 {
+            anyhow::bail!("mock error: {}", self.response);
+        }
         Ok(self.response.clone())
     }
     fn schedule_enable(&self, _config_path: &Path) -> Result<String> {
+        if self.exit_code != 0 {
+            anyhow::bail!("mock error: {}", self.response);
+        }
         Ok(self.response.clone())
     }
     fn schedule_disable(&self, _config_path: &Path) -> Result<String> {
+        if self.exit_code != 0 {
+            anyhow::bail!("mock error: {}", self.response);
+        }
         Ok(self.response.clone())
     }
     fn schedule_status(&self, _config_path: &Path) -> Result<String> {
+        if self.exit_code != 0 {
+            anyhow::bail!("mock error: {}", self.response);
+        }
         Ok(self.response.clone())
     }
     fn list_snapshots(&self, _config_path: &Path, _profile: &str) -> Result<String> {
+        if self.exit_code != 0 {
+            anyhow::bail!("mock error: {}", self.response);
+        }
         Ok(self.response.clone())
     }
     fn prune(&self, _config_path: &Path, _profile: &str) -> Result<String> {
+        if self.exit_code != 0 {
+            anyhow::bail!("mock error: {}", self.response);
+        }
         Ok(self.response.clone())
     }
     fn check(&self, _config_path: &Path, _profile: &str) -> Result<String> {
+        if self.exit_code != 0 {
+            anyhow::bail!("mock error: {}", self.response);
+        }
         Ok(self.response.clone())
     }
 }
