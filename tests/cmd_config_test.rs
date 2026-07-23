@@ -8,6 +8,7 @@ fn test_config_show_masked() {
         version: "1.0".into(),
         profile: "test".into(),
         backup: BackupTargets {
+            backup_type: BackupType::Directory,
             targets: vec!["/tmp".into()],
             excludes: vec![],
         },
@@ -26,6 +27,7 @@ fn test_config_show_masked() {
             },
             secondary: None,
         },
+        reports: ReportsConfig::default(),
     };
     let output = execute_config_show(&config).unwrap();
     assert!(!output.contains("secret123"));
@@ -38,6 +40,7 @@ fn test_config_export_yaml_and_json() {
         version: "1.0".into(),
         profile: "test".into(),
         backup: BackupTargets {
+            backup_type: BackupType::Directory,
             targets: vec!["/tmp".into()],
             excludes: vec![],
         },
@@ -56,6 +59,7 @@ fn test_config_export_yaml_and_json() {
             },
             secondary: None,
         },
+        reports: ReportsConfig::default(),
     };
     let yaml_output = execute_config_export(&config, "yaml").unwrap();
     assert!(yaml_output.contains("secret123"));

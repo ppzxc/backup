@@ -24,6 +24,7 @@ pub fn parse_legacy_env(content: &str) -> Result<BackupConfig> {
         version: "1.0".to_string(),
         profile,
         backup: BackupTargets {
+            backup_type: BackupType::Directory,
             targets,
             excludes: vec![],
         },
@@ -47,5 +48,6 @@ pub fn parse_legacy_env(content: &str) -> Result<BackupConfig> {
             },
             secondary: None,
         },
+        reports: ReportsConfig::default(),
     })
 }

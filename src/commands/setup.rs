@@ -5,9 +5,13 @@ use crate::config::model::*;
 
 pub struct SetupParams {
     pub profile: String,
-    pub target: String,
-    pub repository: String,
-    pub password: SecretString,
+    pub backup_type: BackupType,
+    pub targets: Vec<String>,
+    pub excludes: Vec<String>,
+    pub retention: RetentionPolicy,
+    pub primary_storage: StorageTarget,
+    pub secondary_storage: Option<SecondaryStorageTarget>,
+    pub reports: ReportsConfig,
 }
 
 pub trait SetupPrompter {
@@ -21,19 +25,150 @@ impl SetupPrompter for InquirePrompter {
         let profile = inquire::Text::new("Enter Profile Name:")
             .with_default("default")
             .prompt()?;
-        let target = inquire::Text::new("Enter Target Directory:")
-            .with_default("/data")
+
+        let backup_type_choice = inquire::Select::new(
+            "Select Backup Type:",
+            vec!["[1] Directory Batch Backup", "[2] DB Streaming Backup"],
+        ).prompt()?;
+
+        let (backup_type, targets) = if backup_type_choice.starts_with("[1]") {
+            let t = inquire::Text::new("Enter Target Directory(ies), comma-separated:")
+                .with_default("/data")
+                .prompt()?;
+            let target_list: Vec<String> = t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            (BackupType::Directory, target_list)
+        } else {
+            let db_kind = inquire::Select::new("Select DB Type:", vec!["mysql", "postgres"]).prompt()?;
+            let conn = inquire::Text::new("Enter Connection URL (optional):").prompt_skippable()?;
+            (
+                BackupType::DbStream {
+                    db_type: db_kind.to_string(),
+                    connection_url: conn.filter(|s| !s.is_empty()),
+                    dump_command: None,
+                },
+                vec![format!("db-stream:{}", db_kind)],
+            )
+        };
+
+        let excludes_str = inquire::Text::new("Enter Exclude Patterns, comma-separated (optional):")
+            .with_default("")
             .prompt()?;
-        let repo = inquire::Text::new("Enter Repository URI:")
+        let excludes: Vec<String> = excludes_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+
+        // Retention defaults depending on type
+        let (default_daily, default_weekly, default_monthly) = match backup_type {
+            BackupType::Directory => (30, 4, 12),
+            BackupType::DbStream { .. } => (180, 12, 24),
+        };
+
+        let keep_daily = inquire::CustomType::<u32>::new("Retention: Keep Daily Snapshots:")
+            .with_default(default_daily)
             .prompt()?;
-        let password = inquire::Password::new("Enter Encryption Password:")
+        let keep_weekly = inquire::CustomType::<u32>::new("Retention: Keep Weekly Snapshots:")
+            .with_default(default_weekly)
+            .prompt()?;
+        let keep_monthly = inquire::CustomType::<u32>::new("Retention: Keep Monthly Snapshots:")
+            .with_default(default_monthly)
+            .prompt()?;
+
+        // Primary Storage Setup
+        let backend = inquire::Select::new("Primary Storage Backend:", vec!["sftp", "s3", "local"])
+            .prompt()?;
+
+        let repository = inquire::Text::new("Primary Repository URI:")
+            .with_default("sftp:user@backup-server:/var/backups")
+            .prompt()?;
+
+        let password = inquire::Password::new("Enter Encryption Password (min 12 chars for ISMS):")
             .without_confirmation()
             .prompt()?;
+        
+        if password.len() < 12 {
+            anyhow::bail!("ISMS Compliance Error: Password must be at least 12 characters long.");
+        }
+
+        let sftp_config = if backend == "sftp" {
+            let host = inquire::Text::new("SFTP Host:").with_default("backup-server").prompt()?;
+            let port = inquire::CustomType::<u16>::new("SFTP Port:").with_default(22).prompt()?;
+            let user = inquire::Text::new("SFTP User:").with_default("backup").prompt()?;
+            let key_file = inquire::Text::new("SFTP SSH Key File Path (Required for ISMS):")
+                .with_default("/etc/backup/id_rsa")
+                .prompt()?;
+            if key_file.trim().is_empty() {
+                anyhow::bail!("ISMS Compliance Error: SFTP requires SSH key_file path for passwordless key-based authentication.");
+            }
+            Some(SftpConfig {
+                host,
+                port,
+                user,
+                key_file: Some(key_file),
+            })
+        } else {
+            None
+        };
+
+        let primary_storage = StorageTarget {
+            backend: backend.to_string(),
+            repository,
+            password: SecretString::new(password),
+            sftp: sftp_config,
+            s3: None,
+        };
+
+        // Secondary Storage Setup (Optional)
+        let enable_sec = inquire::Confirm::new("Configure Secondary (Offsite/Redundant) Storage?")
+            .with_default(false)
+            .prompt()?;
+
+        let secondary_storage = if enable_sec {
+            let sec_backend = inquire::Select::new("Secondary Backend:", vec!["sftp", "s3", "local"]).prompt()?;
+            let sec_repo = inquire::Text::new("Secondary Repository URI:").prompt()?;
+            let sec_pass = inquire::Password::new("Secondary Password:").without_confirmation().prompt()?;
+            Some(SecondaryStorageTarget {
+                enabled: true,
+                backend: sec_backend.to_string(),
+                repository: sec_repo,
+                password: SecretString::new(sec_pass),
+            })
+        } else {
+            None
+        };
+
+        // ISMS Report Options Setup
+        let enable_reports = inquire::Confirm::new("Enable ISMS Audit & Daily/Annual Report Generation?")
+            .with_default(true)
+            .prompt()?;
+
+        let reports = if enable_reports {
+            let output_dir = inquire::Text::new("Report Export Directory:")
+                .with_default("/var/log/backup/reports")
+                .prompt()?;
+            ReportsConfig {
+                output_dir,
+                enable_daily_reports: true,
+                enable_annual_dr_drill_report: true,
+            }
+        } else {
+            ReportsConfig {
+                output_dir: "/var/log/backup/reports".into(),
+                enable_daily_reports: false,
+                enable_annual_dr_drill_report: false,
+            }
+        };
+
         Ok(SetupParams {
             profile,
-            target,
-            repository: repo,
-            password: SecretString::new(password),
+            backup_type,
+            targets,
+            excludes,
+            retention: RetentionPolicy {
+                keep_daily,
+                keep_weekly,
+                keep_monthly,
+            },
+            primary_storage,
+            secondary_storage,
+            reports,
         })
     }
 }
@@ -42,18 +177,28 @@ pub fn create_default_config_file(path: &Path, profile: &str, target: &str, repo
     let config = BackupConfig {
         version: "1.0".into(),
         profile: profile.into(),
-        backup: BackupTargets { targets: vec![target.into()], excludes: vec![] },
-        retention: RetentionPolicy { keep_daily: 7, keep_weekly: 4, keep_monthly: 12 },
+        backup: BackupTargets {
+            backup_type: BackupType::Directory,
+            targets: vec![target.into()],
+            excludes: vec![],
+        },
+        retention: RetentionPolicy { keep_daily: 30, keep_weekly: 4, keep_monthly: 12 },
         storage: StorageConfig {
             primary: StorageTarget {
                 backend: "sftp".into(),
                 repository: repo.into(),
                 password: SecretString::new(pwd.into()),
-                sftp: None,
+                sftp: Some(SftpConfig {
+                    host: "backup-server".into(),
+                    port: 22,
+                    user: "backup".into(),
+                    key_file: Some("/etc/backup/id_rsa".into()),
+                }),
                 s3: None,
             },
             secondary: None,
         },
+        reports: ReportsConfig::default(),
     };
     config.save_to_path(path)
 }
@@ -62,9 +207,24 @@ pub fn run_setup_with_prompter<P: SetupPrompter>(config_path: &Path, prompter: &
     use std::io::IsTerminal;
     if !non_interactive && cfg!(not(test)) && std::io::stdin().is_terminal() {
         let params = prompter.prompt_setup_params()?;
-        create_default_config_file(config_path, &params.profile, &params.target, &params.repository, secrecy::ExposeSecret::expose_secret(&params.password))?;
+        let config = BackupConfig {
+            version: "1.0".into(),
+            profile: params.profile,
+            backup: BackupTargets {
+                backup_type: params.backup_type,
+                targets: params.targets,
+                excludes: params.excludes,
+            },
+            retention: params.retention,
+            storage: StorageConfig {
+                primary: params.primary_storage,
+                secondary: params.secondary_storage,
+            },
+            reports: params.reports,
+        };
+        config.save_to_path(config_path)?;
     } else {
-        create_default_config_file(config_path, "default", "/data", "rclone:syno_backup:/backup", "default_secret")?;
+        create_default_config_file(config_path, "default", "/data", "rclone:syno_backup:/backup", "default_secret_pass123")?;
     }
     Ok(())
 }
@@ -85,8 +245,11 @@ pub fn run_setup_dependencies() -> Result<String> {
         "/tmp"
     };
 
-    let binaries = [("restic", "https://github.com/restic/restic/releases/download/v0.16.4/restic_0.16.4_linux_amd64.bz2"),
-                    ("rclone", "https://downloads.rclone.org/rclone-current-linux-amd64.zip")];
+    let binaries = [
+        ("restic", "https://github.com/restic/restic/releases/download/v0.16.4/restic_0.16.4_linux_amd64.bz2"),
+        ("rclone", "https://downloads.rclone.org/rclone-current-linux-amd64.zip"),
+        ("resticprofile", "https://github.com/creativeprojects/resticprofile/releases/download/v0.28.0/resticprofile_0.28.0_linux_amd64.tar.gz"),
+    ];
 
     for (bin, url) in &binaries {
         let status = Command::new("which").arg(bin).output();
@@ -102,6 +265,9 @@ pub fn run_setup_dependencies() -> Result<String> {
                     let _ = Command::new("sh").arg("-c").arg(&cmd).output();
                 } else if *bin == "rclone" {
                     let cmd = format!("curl -fsSL {} -o /tmp/rclone.zip && unzip -q /tmp/rclone.zip -d /tmp && cp /tmp/rclone-*-linux-amd64/rclone {}/rclone && chmod +x {}/rclone && rm -rf /tmp/rclone*", url, install_target_dir, install_target_dir);
+                    let _ = Command::new("sh").arg("-c").arg(&cmd).output();
+                } else if *bin == "resticprofile" {
+                    let cmd = format!("curl -fsSL {} -o /tmp/rp.tar.gz && tar -xzf /tmp/rp.tar.gz -C /tmp && cp /tmp/resticprofile {}/resticprofile && chmod +x {}/resticprofile && rm -rf /tmp/rp*", url, install_target_dir, install_target_dir);
                     let _ = Command::new("sh").arg("-c").arg(&cmd).output();
                 }
                 report.push_str(&format!("{}: Installed to {}/{}\n", bin, install_target_dir, bin));

@@ -13,6 +13,7 @@ fn test_execute_run() {
         version: "1.0".into(),
         profile: "test".into(),
         backup: BackupTargets {
+            backup_type: BackupType::Directory,
             targets: vec!["/tmp".into()],
             excludes: vec![],
         },
@@ -31,6 +32,7 @@ fn test_execute_run() {
             },
             secondary: None,
         },
+        reports: ReportsConfig::default(),
     };
     let result = execute_run(&config, &mock_runner).unwrap();
     assert!(result.contains("backup complete"));
@@ -50,6 +52,7 @@ fn test_execute_status() {
         version: "1.0".into(),
         profile: "test".into(),
         backup: BackupTargets {
+            backup_type: BackupType::Directory,
             targets: vec!["/tmp".into()],
             excludes: vec![],
         },
@@ -68,6 +71,7 @@ fn test_execute_status() {
             },
             secondary: None,
         },
+        reports: ReportsConfig::default(),
     };
     let result = execute_status(&config).unwrap();
     assert!(result.contains("Profile: test"));

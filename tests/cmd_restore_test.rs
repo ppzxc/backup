@@ -10,7 +10,11 @@ fn test_execute_snapshots() {
     let config = BackupConfig {
         version: "1.0".into(),
         profile: "test".into(),
-        backup: BackupTargets { targets: vec!["/tmp".into()], excludes: vec![] },
+        backup: BackupTargets {
+            backup_type: BackupType::Directory,
+            targets: vec!["/tmp".into()],
+            excludes: vec![],
+        },
         retention: RetentionPolicy { keep_daily: 7, keep_weekly: 4, keep_monthly: 12 },
         storage: StorageConfig {
             primary: StorageTarget {
@@ -22,6 +26,7 @@ fn test_execute_snapshots() {
             },
             secondary: None,
         },
+        reports: ReportsConfig::default(),
     };
     let result = execute_snapshots(&config, &mock_runner).unwrap();
     assert!(result.contains("12345678"));

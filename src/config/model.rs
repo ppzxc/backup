@@ -11,6 +11,24 @@ where
     serializer.serialize_str(secret.expose_secret())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportsConfig {
+    pub output_dir: String,
+    pub enable_daily_reports: bool,
+    pub enable_annual_dr_drill_report: bool,
+}
+
+impl Default for ReportsConfig {
+    fn default() -> Self {
+        Self {
+            output_dir: "/var/log/backup/reports".into(),
+            enable_daily_reports: true,
+            enable_annual_dr_drill_report: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupConfig {
@@ -19,6 +37,8 @@ pub struct BackupConfig {
     pub backup: BackupTargets,
     pub retention: RetentionPolicy,
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub reports: ReportsConfig,
 }
 
 impl BackupConfig {
@@ -53,6 +73,12 @@ impl BackupConfig {
         Ok(())
     }
 
+    pub fn load_from_path(path: &Path) -> Result<Self> {
+        let content = fs::read_to_string(path)?;
+        let config: Self = serde_yaml::from_str(&content)?;
+        Ok(config)
+    }
+
     pub fn render(&self, format: &str, redacted: bool) -> Result<String> {
         let target = if redacted { self.redacted() } else { self.clone() };
         if format == "json" {
@@ -63,9 +89,59 @@ impl BackupConfig {
     }
 }
 
+impl Default for BackupConfig {
+    fn default() -> Self {
+        Self {
+            version: "1.0".into(),
+            profile: "default".into(),
+            backup: BackupTargets {
+                backup_type: BackupType::Directory,
+                targets: vec!["/data".into()],
+                excludes: vec![],
+            },
+            retention: RetentionPolicy {
+                keep_daily: 7,
+                keep_weekly: 4,
+                keep_monthly: 12,
+            },
+            storage: StorageConfig {
+                primary: StorageTarget {
+                    backend: "sftp".into(),
+                    repository: "rclone:syno_backup:/backup".into(),
+                    password: SecretString::new("default_secret".into()),
+                    sftp: None,
+                    s3: None,
+                },
+                secondary: None,
+            },
+            reports: ReportsConfig::default(),
+        }
+    }
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum BackupType {
+    Directory,
+    DbStream {
+        db_type: String, // "mysql" or "postgres"
+        connection_url: Option<String>,
+        dump_command: Option<String>,
+    },
+}
+
+impl Default for BackupType {
+    fn default() -> Self {
+        BackupType::Directory
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupTargets {
+    #[serde(default)]
+    pub backup_type: BackupType,
     pub targets: Vec<String>,
     pub excludes: Vec<String>,
 }
