@@ -4,4 +4,6 @@ pub mod schedule;
 pub mod doctor;
 pub mod snapshots;
 pub mod restore;
+pub mod setup;
+
 
