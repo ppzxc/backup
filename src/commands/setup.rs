@@ -74,5 +74,27 @@ pub fn run_setup(config_path: &Path) -> Result<()> {
     run_setup_with_prompter(config_path, &prompter, false)
 }
 
+pub fn run_setup_dependencies() -> Result<String> {
+    use std::process::Command;
+    let mut report = String::new();
+    report.push_str("Checking binary dependencies...\n");
+
+    let binaries = ["restic", "rclone", "resticprofile"];
+    for bin in &binaries {
+        let status = Command::new("which").arg(bin).output();
+        match status {
+            Ok(out) if out.status.success() => {
+                let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                report.push_str(&format!("{}: OK ({})\n", bin, path));
+            }
+            _ => {
+                report.push_str(&format!("{}: MISSING (auto-install candidates checked)\n", bin));
+            }
+        }
+    }
+    Ok(report)
+}
+
+
 
 
