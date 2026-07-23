@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.61"
+BACKUP_SCRIPT_VERSION="0.0.62"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -533,7 +533,7 @@ safe_input() {
   local default_val="${2:-}"
   local is_password="${3:-0}"
   if is_interactive; then
-    local -a gum_opts=(--placeholder "$prompt")
+    local -a gum_opts=(--header "$prompt" --placeholder "$prompt")
     if [[ -n "$default_val" ]]; then
       gum_opts+=(--value "$default_val")
     fi

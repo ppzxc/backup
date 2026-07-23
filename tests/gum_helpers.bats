@@ -45,3 +45,12 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" =~ "default_val" ]]
 }
+
+@test "safe_input under interactive gum passes --header for prompt visibility" {
+  stub_command "gum" 'echo "gum $*" >> "'"${STUB_BIN}"'/gum.calls"; echo "res"'
+  run bash -c "source ./tests/test_helper.bash; setup_backup_sh_env; source ./backup.sh; export PATH=\"${STUB_BIN}:\$PATH\"; export TERM=xterm; is_interactive() { return 0; }; safe_input 'Prompt Header' 'def_val' < /dev/null"
+  [ "$status" -eq 0 ]
+  run cat "${STUB_BIN}/gum.calls"
+  [[ "$output" == *"input --header Prompt Header"* ]]
+}
+
