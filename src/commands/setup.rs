@@ -225,7 +225,7 @@ pub fn run_setup_with_prompter<P: SetupPrompter>(config_path: &Path, prompter: &
 
         config.save_to_path(config_path)?;
         if let Some(parent) = config_path.parent() {
-            config.save_and_sync(parent)?;
+            crate::config::registry::ConfigurationRegistry::save_profile_config(&config, parent)?;
         }
     } else {
         create_default_config_file(config_path, "default", "/data", "rclone:syno_backup:/backup", "default_secret_pass123")?;
