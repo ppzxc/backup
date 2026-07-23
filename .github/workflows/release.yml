@@ -1,31 +1,23 @@
-name: Release on Tag Push
+name: Release Rust CLI
 
 on:
   push:
     tags:
-      - '*'
-
-permissions:
-  contents: write
+      - 'v*'
 
 jobs:
-  release:
+  build-release:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Create GitHub Release
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release binary
+        run: cargo build --release
+      - name: Package binary
+        run: tar -czvf backup-linux-amd64.tar.gz -C target/release backup
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: backup-linux-amd64.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG_NAME="${{ github.ref_name }}"
-          echo "Creating release for tag $TAG_NAME"
-          
-          # Zip backup.sh and README.md together with the version postfix
-          zip "backup-${TAG_NAME}.zip" backup.sh README.md
-          
-          # Create the release and upload both backup.sh and the zip archive
-          gh release create "$TAG_NAME" backup.sh "backup-${TAG_NAME}.zip" \
-            --title "$TAG_NAME" \
-            --notes "Automated release of version $TAG_NAME. You can download the script and docs as a zip file from the assets below."
