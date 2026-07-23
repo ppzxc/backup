@@ -2,9 +2,13 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.62"
+BACKUP_SCRIPT_VERSION="0.0.65"
 
 restic() {
+  local -a t_cmd=()
+  if [[ -n "${RESTIC_COMMAND_TIMEOUT:-}" ]] && command -v timeout >/dev/null 2>&1; then
+    t_cmd=(timeout "$RESTIC_COMMAND_TIMEOUT")
+  fi
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
   RESTIC_REPOSITORY="${RESTIC_REPOSITORY:-}" \
   AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}" \
@@ -19,7 +23,7 @@ restic() {
   RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT="${RCLONE_CONFIG_SYNO_BACKUP_SEC_PORT:-}" \
   RCLONE_CONFIG_SYNO_BACKUP_SEC_USER="${RCLONE_CONFIG_SYNO_BACKUP_SEC_USER:-}" \
   RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE="${RCLONE_CONFIG_SYNO_BACKUP_SEC_KEY_FILE:-}" \
-  command restic "$@"
+  "${t_cmd[@]}" command restic "$@"
 }
 
 rclone() {
@@ -89,7 +93,7 @@ RESTICPROFILE_UNIT_TEMPLATE="${RESTICPROFILE_UNIT_TEMPLATE:-${BACKUP_ETC_DIR}/re
 RESTICPROFILE_TIMER_TEMPLATE="${RESTICPROFILE_TIMER_TEMPLATE:-${BACKUP_ETC_DIR}/resticprofile-timer.tmpl}"
 SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 
-DEFAULT_TARGETS="/data/backup,/etc"
+DEFAULT_TARGETS="/data/backup,/etc,/var/log"
 DEFAULT_EXCLUDES="/tmp/*,/var/tmp/*"
 DEFAULT_KEEP_DAILY=7
 DEFAULT_KEEP_WEEKLY=4
@@ -156,7 +160,7 @@ init_config_schema() {
   # 글로벌/공통 속성
   register_config_field "profile_name" "BACKUP_PROFILE_NAME" "" "validate_profile_name"
   register_config_field "password" "RESTIC_PASSWORD" "" "validate_not_empty"
-  register_config_field "targets" "BACKUP_TARGETS" "/data/backup,/etc" "validate_not_empty"
+  register_config_field "targets" "BACKUP_TARGETS" "/data/backup,/etc,/var/log" "validate_not_empty"
   register_config_field "excludes_csv" "BACKUP_EXCLUDES" "" ""
   register_config_field "keep_daily" "KEEP_DAILY" "7" "validate_positive_int"
   register_config_field "keep_weekly" "KEEP_WEEKLY" "4" "validate_positive_int"
@@ -517,6 +521,9 @@ safe_confirm() {
         case "$user_input" in
           [Yy]* ) return 0 ;;
           [Nn]* ) return 1 ;;
+          "" )
+            if [[ "$default_ans" == "y" ]]; then return 0; else return 1; fi
+            ;;
         esac
       fi
     fi
@@ -553,6 +560,7 @@ safe_input() {
     fi
     val="${val:-$default_val}"
     printf '%s\n' "$val"
+    return 0
   fi
 }
 
@@ -859,9 +867,9 @@ validate_port() {
 }
 
 validate_positive_int() {
-  local value="$1" label="$2"
+  local value="${1:-}" label="${2:-값}"
   if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-    printf '%s must be numeric, got: %s\n' "$label" "$value"
+    printf '%s은(는) 숫자여야 합니다: %s\n' "$label" "$value"
     return 1
   fi
   if (( 10#$value < 1 )); then
@@ -890,6 +898,10 @@ validate_not_empty() {
     printf '값을 입력해야 합니다\n'
     return 1
   fi
+  return 0
+}
+
+validate_anything() {
   return 0
 }
 
@@ -1225,7 +1237,7 @@ resolve_and_validate_config() {
   ref_set "${_resolved_name}" password "$(resolve_value "$cli_password" "$env_password" "$file_password" "")"
 
   local cli_profile_name; eval "cli_profile_name=\"\${${_opts_name}[profile-name]:-}\""
-  ref_set "${_resolved_name}" profile_name "$(resolve_value "$cli_profile_name" "$env_profile_name" "$file_profile_name" "$(hostname)")"
+  ref_set "${_resolved_name}" profile_name "$(resolve_value "$cli_profile_name" "$env_profile_name" "$file_profile_name" "backup")"
 
   local cli_db_type; eval "cli_db_type=\"\${${_opts_name}[db-type]:-}\""
   ref_set "${_resolved_name}" db_type "$(resolve_value "$cli_db_type" "$env_db_type" "$file_db_type" "" || true)"
@@ -1443,7 +1455,9 @@ resolve_and_validate_config() {
     local field_key var_name
     while IFS=$'\t' read -r field_key var_name; do
       [[ -z "$field_key" ]] && continue
-      backend_env["$field_key"]="${!var_name:-}"
+      local env_val=""
+      if [[ -n "$var_name" && -v "$var_name" ]]; then env_val="${!var_name}"; fi
+      backend_env["$field_key"]="$env_val"
     done <<< "$env_vars_mapping"
 
     if [[ -f "${BACKUP_ENV_FILE:-}" ]]; then
@@ -3019,7 +3033,7 @@ database_custom_validate_dump() {
 }
 
 restic_is_initialized() {
-  restic snapshots >/dev/null 2>&1
+  RESTIC_COMMAND_TIMEOUT=60 restic snapshots >/dev/null 2>&1
 }
 
 restic_repo_init() {
@@ -4122,21 +4136,30 @@ format_bytes() {
 }
 
 query_snapshot_info() {
+  local tag_filter="${1:-}" tag_val="${2:-}"
   local snap_json
-  if [[ "${1:-}" == "--tag" ]]; then
-    snap_json=$(restic snapshots --tag "$2" --latest 1 --json 2>/dev/null)
+  if [[ "$tag_filter" == "--tag" ]]; then
+    snap_json=$(RESTIC_COMMAND_TIMEOUT=60 restic snapshots --tag "$tag_val" --latest 1 --json 2>/dev/null)
   else
-    snap_json=$(restic snapshots --latest 1 --json 2>/dev/null)
+    snap_json=$(RESTIC_COMMAND_TIMEOUT=60 restic snapshots --json 2>/dev/null)
   fi
   
   python3 -c '
 import sys, json
 try:
     data = json.loads(sys.stdin.read())
-    if data and isinstance(data, list) and len(data) > 0:
-        snap = data[0]
-        t = snap.get("time", "")[:19].replace("T", " ")
-        print(snap.get("id", "") + " " + t)
+    if data and isinstance(data, list):
+        filter_db = ("'"$tag_filter"'" == "--tag")
+        filtered = []
+        for s in data:
+            tags = s.get("tags") or []
+            is_db = "db" in tags
+            if (filter_db and is_db) or (not filter_db and not is_db):
+                filtered.append(s)
+        if filtered:
+            snap = filtered[-1]
+            t = snap.get("time", "")[:19].replace("T", " ")
+            print(snap.get("id", "") + " " + t)
 except Exception:
     pass
 ' <<< "$snap_json"
@@ -4164,6 +4187,9 @@ run_restore_drill() {
   local target_dir="$target_dir_val"
   ref_set "${_res_name}" "target_dir" "$target_dir"
 
+  # rto_seconds를 함수 스코프에서 미리 선언 (primary 블록 밖에서도 secondary 블록에서 사용)
+  local rto_seconds=$(( rto_val * 60 ))
+
   local os_name="Rocky Linux 9"
   if [[ -f /etc/os-release ]]; then
     # shellcheck disable=SC1091
@@ -4181,59 +4207,54 @@ run_restore_drill() {
   ref_set "${_res_name}" "primary_snap" "$primary_snap"
   ref_set "${_res_name}" "primary_snap_time" "$primary_snap_time"
 
-  if [[ -z "$primary_snap" ]]; then
-    ref_set "${_res_name}" "primary_rto_satisfied" "false"
-    ref_set "${_res_name}" "primary_rto_status" "초과 (미흡)"
-    ref_set "${_res_name}" "error_message" "복구 테스트 실패: 저장소에 백업 스냅샷이 존재하지 않습니다."
-    return 0
-  fi
+  if [[ -n "$primary_snap" ]]; then
+    if [[ -d "$target_dir" ]]; then
+      if [[ "$target_dir" == /tmp/* || "$target_dir" == /var/tmp/* ]]; then
+        rm -rf "$target_dir"
+      else
+        ref_set "${_res_name}" "primary_rto_satisfied" "false"
+        ref_set "${_res_name}" "primary_rto_status" "초과 (미흡)"
+        ref_set "${_res_name}" "error_message" "복구 경로가 안전하지 않습니다 (/tmp 또는 /var/tmp 하위 경로만 지원): $target_dir"
+        return 0
+      fi
+    fi
+    mkdir -p "$target_dir"
 
-  if [[ -d "$target_dir" ]]; then
-    if [[ "$target_dir" == /tmp/* || "$target_dir" == /var/tmp/* ]]; then
-      rm -rf "$target_dir"
+    local start_time; start_time=$(date +%s)
+    local restore_ok=1
+    local restore_timeout=$(( rto_val * 60 > 120 ? rto_val * 60 : 120 ))
+    RESTIC_COMMAND_TIMEOUT="$restore_timeout" restic restore "$primary_snap" --target "$target_dir" >/dev/null 2>&1 || restore_ok=0
+    local end_time; end_time=$(date +%s)
+    local elapsed=$((end_time - start_time))
+
+    local elapsed_str
+    if (( elapsed < 60 )); then
+      elapsed_str="${elapsed}초"
+    else
+      elapsed_str="$((elapsed / 60))분 $((elapsed % 60))초"
+    fi
+    ref_set "${_res_name}" "primary_elapsed_seconds" "$elapsed"
+    ref_set "${_res_name}" "primary_elapsed_str" "$elapsed_str"
+
+    local rto_sec_check=$((rto_val * 60))
+    if (( restore_ok && elapsed <= rto_sec_check )); then
+      ref_set "${_res_name}" "primary_rto_satisfied" "true"
+      ref_set "${_res_name}" "primary_rto_status" "만족"
     else
       ref_set "${_res_name}" "primary_rto_satisfied" "false"
       ref_set "${_res_name}" "primary_rto_status" "초과 (미흡)"
-      ref_set "${_res_name}" "error_message" "복구 경로가 안전하지 않습니다 (/tmp 또는 /var/tmp 하위 경로만 지원): $target_dir"
-      return 0
     fi
-  fi
-  mkdir -p "$target_dir"
 
-  local start_time; start_time=$(date +%s)
-  local restore_ok=1
-  restic restore "$primary_snap" --target "$target_dir" >/dev/null 2>&1 || restore_ok=0
-  local end_time; end_time=$(date +%s)
-  local elapsed=$((end_time - start_time))
-
-  local elapsed_str
-  if (( elapsed < 60 )); then
-    elapsed_str="${elapsed}초"
-  else
-    elapsed_str="$((elapsed / 60))분 $((elapsed % 60))초"
-  fi
-  ref_set "${_res_name}" "primary_elapsed_seconds" "$elapsed"
-  ref_set "${_res_name}" "primary_elapsed_str" "$elapsed_str"
-
-  local rto_seconds=$((rto * 60))
-  if (( restore_ok && elapsed <= rto_seconds )); then
-    ref_set "${_res_name}" "primary_rto_satisfied" "true"
-    ref_set "${_res_name}" "primary_rto_status" "만족"
+    if (( restore_ok )); then
+      local total_bytes=0
+      total_bytes=$(du -sb "$target_dir" 2>/dev/null | awk '{print $1}') || total_bytes=0
+      ref_set "${_res_name}" "primary_size" "$(format_bytes "$total_bytes")"
+    fi
+    rm -rf "$target_dir"
   else
     ref_set "${_res_name}" "primary_rto_satisfied" "false"
     ref_set "${_res_name}" "primary_rto_status" "초과 (미흡)"
   fi
-
-  if (( ! restore_ok )); then
-    ref_set "${_res_name}" "error_message" "restic restore 복구 실패"
-    rm -rf "$target_dir"
-    return 0
-  fi
-
-  local total_bytes=0
-  total_bytes=$(du -sb "$target_dir" 2>/dev/null | awk '{print $1}') || total_bytes=0
-  ref_set "${_res_name}" "primary_size" "$(format_bytes "$total_bytes")"
-  rm -rf "$target_dir"
 
   # 2. DB snapshot
   if [[ -n "${BACKUP_DB_TYPE:-}" ]]; then
@@ -4260,7 +4281,8 @@ run_restore_drill() {
     mkdir -p "$db_target_dir"
 
     local db_restore_ok=1
-    restic restore "$db_snap" --target "$db_target_dir" >/dev/null 2>&1 || db_restore_ok=0
+    local db_restore_timeout=$(( rto_val * 60 > 120 ? rto_val * 60 : 120 ))
+    RESTIC_COMMAND_TIMEOUT="$db_restore_timeout" restic restore "$db_snap" --target "$db_target_dir" >/dev/null 2>&1 || db_restore_ok=0
 
     local db_valid=0
     if (( db_restore_ok )); then
@@ -4324,7 +4346,8 @@ run_restore_drill() {
 
       local sec_start; sec_start=$(date +%s)
       local sec_restore_ok=1
-      restic restore "$sec_snap" --target "$sec_target_dir" >/dev/null 2>&1 || sec_restore_ok=0
+      local sec_restore_timeout=$(( rto_val * 60 > 120 ? rto_val * 60 : 120 ))
+      RESTIC_COMMAND_TIMEOUT="$sec_restore_timeout" restic restore "$sec_snap" --target "$sec_target_dir" >/dev/null 2>&1 || sec_restore_ok=0
       local sec_end; sec_end=$(date +%s)
       local sec_elapsed=$((sec_end - sec_start))
 
@@ -6830,7 +6853,7 @@ cmd_audit() {
     local -A drill_res=()
     run_restore_drill drill_opts drill_res
 
-    if [[ -n "${drill_res[error_message]:-}" ]]; then
+    if [[ -z "${drill_res[primary_snap]:-}" && -z "${drill_res[secondary_snap]:-}" && -n "${drill_res[error_message]:-}" ]]; then
       die "${drill_res[error_message]}"
     fi
 
@@ -7037,10 +7060,10 @@ except Exception as e:
       if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
         setup_colors
         printf '\n%b⚙  백업 이력(restic snapshots)%b\n' "${C_CYAN}${C_BOLD}" "${C_RESET}"
-        restic snapshots 2>/dev/null | sed 's/^/  /' || printf '  (조회 실패 또는 미초기화)\n'
+        RESTIC_COMMAND_TIMEOUT=60 restic snapshots 2>/dev/null | sed 's/^/  /' || printf '  (조회 실패 또는 미초기화)\n'
       else
         printf '\n=== 백업 이력(restic snapshots) ===\n'
-        restic snapshots 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
+        RESTIC_COMMAND_TIMEOUT=60 restic snapshots 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
       fi
     fi
 
@@ -7055,7 +7078,7 @@ except Exception as e:
           "${timer_active:-unknown}" "${next_run:-알 수 없음}" \
           "$etc_perm" "$env_perm"
         printf '\n=== 백업 이력(restic snapshots) ===\n'
-        restic snapshots 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
+        RESTIC_COMMAND_TIMEOUT=60 restic snapshots 2>/dev/null || printf '(조회 실패 또는 미초기화)\n'
       ) > "$general_file"
       chmod 600 "$general_file"
 
@@ -7068,7 +7091,7 @@ except Exception as e:
 
       # Generate HTML snapshot table
       local snapshots_json
-      snapshots_json=$(restic snapshots --json 2>/dev/null || echo "[]")
+      snapshots_json=$(RESTIC_COMMAND_TIMEOUT=60 restic snapshots --json 2>/dev/null || echo "[]")
       local snapshot_table_html; snapshot_table_html=$(generate_snapshot_table_html "$snapshots_json")
 
       # Save HTML report
@@ -7466,38 +7489,25 @@ cmd_migrate() {
 # validate_fn이 통과할 때까지 같은 질문을 다시 묻는다. default가 주어지면
 # "[default]"로 보여주고 빈 입력 시 그 값을 사용한다.
 prompt_validated() {
-  local message="$1" default="$2" validate_fn="$3"
+  local message="$1" default="$2" validate_fn="${3:-}"
   local value err
+  local retry_count=0
   while true; do
-    if is_interactive; then
-      value=$(safe_input "$message" "$default" 0)
-    else
-      if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-        setup_colors
-        if [[ -n "$default" ]]; then
-          printf '%b%s%b [%b%s%b]: ' "$C_CYAN" "$message" "$C_RESET" "$C_BOLD" "$default" "$C_RESET" >&2
-        else
-          printf '%b%s%b: ' "$C_CYAN" "$message" "$C_RESET" >&2
-        fi
-      else
-        if [[ -n "$default" ]]; then
-          printf '%s [%s]: ' "$message" "$default" >&2
-        else
-          printf '%s: ' "$message" >&2
-        fi
-      fi
-      read -r value
-      value="${value:-$default}"
+    value=$(safe_input "$message" "$default" 0)
+
+    if [[ -z "$validate_fn" ]]; then
+      printf '%s' "$value"
+      return 0
     fi
 
     if err=$("$validate_fn" "$value"); then
       printf '%s' "$value"
       return 0
     fi
-    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-      printf '%b%s 다시 입력하세요.%b\n' "$C_RED" "$err" "$C_RESET" >&2
-    else
-      printf '%s 다시 입력하세요.\n' "$err" >&2
+    log_warn "$err 다시 입력하세요."
+    (( retry_count++ ))
+    if (( retry_count >= 10 )); then
+      die "입력 검증에 연속으로 실패했습니다 (10회 초과). 필수 입력값(\"$message\")을 확인하세요." 1
     fi
   done
 }
@@ -7817,7 +7827,7 @@ cmd_wizard() {
   fi
 
   local profile_name
-  profile_name=$(prompt_validated "저장소 폴더 이름을 입력하세요 (원격에 생성될 디렉터리명)" "$(hostname)" validate_profile_name)
+  profile_name=$(prompt_validated "저장소 폴더 이름을 입력하세요 (원격에 생성될 디렉터리명)" "backup" validate_profile_name)
   setting_args+=(--profile-name "$profile_name")
 
   local password
@@ -7840,23 +7850,18 @@ cmd_wizard() {
   fi
 
   local use_default=1
-  if ! safe_confirm "기본 경로(/data/backup, /etc)를 백업 대상에 포함하시겠습니까?" "y"; then
+  if ! safe_confirm "기본 경로(/data/backup, /etc, /var/log)를 백업 대상에 포함하시겠습니까?" "y"; then
     use_default=0
   fi
 
   local final_targets=""
   if (( use_default )); then
-    final_targets="/data/backup,/etc"
+    final_targets="/data/backup,/etc,/var/log"
   fi
 
   local additional_targets=""
   while true; do
-    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-      printf '%b추가로 백업할 디렉터리 절대 경로가 있습니까? (쉼표로 구분하여 절대 경로 입력, 없으면 Enter): %b' "$C_CYAN" "$C_RESET"
-    else
-      printf '추가로 백업할 디렉터리 절대 경로가 있습니까? (쉼표로 구분하여 절대 경로 입력, 없으면 Enter): '
-    fi
-    read -r additional_targets
+    additional_targets=$(safe_input "추가로 백업할 디렉터리 절대 경로가 있습니까? (쉼표로 구분하여 절대 경로 입력, 없으면 Enter)" "")
     
     additional_targets="${additional_targets#"${additional_targets%%[![:space:]]*}"}"
     additional_targets="${additional_targets%"${additional_targets##*[![:space:]]}"}"
@@ -7866,11 +7871,7 @@ cmd_wizard() {
     fi
 
     if [[ "$additional_targets" =~ ^[Yy][Ee]?[Ss]?$ || "$additional_targets" =~ ^[Nn][Oo]?$ ]]; then
-      if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-        printf '%b경고: 예/아니오 대답("%s")은 유효한 경로가 아닙니다. 절대 경로(예: /data)를 직접 입력하세요.%b\n' "$C_RED" "$additional_targets" "$C_RESET"
-      else
-        printf '경고: 예/아니오 대답("%s")은 유효한 경로가 아닙니다. 절대 경로(예: /data)를 직접 입력하세요.\n' "$additional_targets"
-      fi
+      log_warn "예/아니오 대답(\"$additional_targets\")은 유효한 경로가 아닙니다. 절대 경로(예: /data)를 직접 입력하세요."
       continue
     fi
 
@@ -7881,11 +7882,7 @@ cmd_wizard() {
       p="${p%"${p##*[![:space:]]}"}"
       if [[ ! "$p" =~ ^/ ]]; then
         path_err=1
-        if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-          printf '%b경고: 경로 "%s"은(는) 절대 경로가 아닙니다. /로 시작하는 전체 경로를 입력해야 합니다.%b\n' "$C_RED" "$p" "$C_RESET"
-        else
-          printf '경고: 경로 "%s"은(는) 절대 경로가 아닙니다. /로 시작하는 전체 경로를 입력해야 합니다.\n' "$p"
-        fi
+        log_warn "경로 \"$p\"은(는) 절대 경로가 아닙니다. /로 시작하는 전체 경로를 입력해야 합니다."
         break
       fi
     done
@@ -7904,123 +7901,37 @@ cmd_wizard() {
   fi
 
   while [[ -z "$final_targets" ]]; do
-    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-      printf '%b경고: 백업 대상 경로가 비어 있습니다. 최소 한 개 이상의 경로를 지정해야 합니다.%b\n' "$C_RED" "$C_RESET"
-      printf '%b백업할 디렉터리 경로를 입력하세요 (예: /data/backup): %b' "$C_CYAN" "$C_RESET"
-    else
-      printf '경고: 백업 대상 경로가 비어 있습니다. 최소 한 개 이상의 경로를 지정해야 합니다.\n'
-      printf '백업할 디렉터리 경로를 입력하세요 (예: /data/backup): '
-    fi
-    read -r final_targets
+    log_warn "백업 대상 경로가 비어 있습니다. 최소 한 개 이상의 경로를 지정해야 합니다."
+    final_targets=$(safe_input "백업할 디렉터리 경로를 입력하세요 (예: /data/backup)" "")
   done
 
   setting_args+=(--targets "$final_targets")
 
   # Ask about ISMS Audit Report settings
-  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-    printf '\n%b%b⚙  보안 감사 보고서 설정 (ISMS Compliance Reports)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
-    printf '%bISMS/ISMS-P 인증 규정 만족을 위해 일일 백업 검토 보고서 및 복구 모의훈련 보고서를 자동 생성하도록 설정할 수 있습니다.%b\n' "$C_DIM" "$C_RESET"
-    printf '보안 감사 보고서의 시스템 담당자 및 복구 시간(RTO) 설정을 구성하시겠습니까? [y/%bN%b]: %b' "$C_BOLD" "$C_RESET" "$C_RESET"
-  else
-    printf '\n--- 보안 감사 보고서 설정 ---\n'
-    printf 'ISMS/ISMS-P 인증 규정 만족을 위해 일일 백업 검토 보고서 및 복구 모의훈련 보고서를 자동 생성하도록 설정할 수 있습니다.\n'
-    printf '보안 감사 보고서의 시스템 담당자 및 복구 시간(RTO) 설정을 구성하시겠습니까? [y/N]: '
-  fi
-  local config_audit; read -r config_audit
-  
-  if [[ "$config_audit" =~ ^[Yy]$ ]]; then
+  if safe_confirm "보안 감사 보고서의 시스템 담당자 및 복구 시간(RTO) 설정을 구성하시겠습니까?" "n"; then
     local audit_tester
-    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-      printf '%b일일 검토 및 복구 테스트를 수행할 시스템 담당자(테스터)의 이름을 입력하세요 (기본값: 인프라보안팀): %b' "$C_CYAN" "$C_RESET"
-    else
-      printf '일일 검토 및 복구 테스트를 수행할 시스템 담당자(테스터)의 이름을 입력하세요 (기본값: 인프라보안팀): '
-    fi
-    read -r audit_tester
-    [[ -z "$audit_tester" ]] && audit_tester="인프라보안팀"
-    
+    audit_tester=$(prompt_validated "일일 검토 및 복구 테스트를 수행할 시스템 담당자(테스터)의 이름을 입력하세요" "인프라보안팀" validate_not_empty)
     local audit_ciso
-    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-      printf '%b보고서를 최종 승인할 정보보안책임자(CISO)의 이름을 입력하세요 (기본값: 정보보안책임자 CISO): %b' "$C_CYAN" "$C_RESET"
-    else
-      printf '보고서를 최종 승인할 정보보안책임자(CISO)의 이름을 입력하세요 (기본값: 정보보안책임자 CISO): '
-    fi
-    read -r audit_ciso
-    [[ -z "$audit_ciso" ]] && audit_ciso="정보보안책임자 CISO"
-    
+    audit_ciso=$(prompt_validated "보고서를 최종 승인할 정보보안책임자(CISO)의 이름을 입력하세요" "정보보안책임자 CISO" validate_not_empty)
     local audit_rto
-    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-      printf '%b복구 목표 시간(RTO, 분 단위)을 입력하세요 (기본값: 120): %b' "$C_CYAN" "$C_RESET"
-    else
-      printf '복구 목표 시간(RTO, 분 단위)을 입력하세요 (기본값: 120): '
-    fi
-    read -r audit_rto
-    [[ -z "$audit_rto" ]] && audit_rto="120"
-    
+    audit_rto=$(prompt_validated "복구 목표 시간(RTO, 분 단위)을 입력하세요" "120" validate_positive_int)
     setting_args+=(--audit-tester "$audit_tester" --audit-ciso "$audit_ciso" --audit-rto "$audit_rto")
   fi
 
   # 데이터베이스 백업 설정 질문
-  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-    printf '\n%b%b⚙  데이터베이스 백업 설정 (Database Backup Settings)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
-    printf '%b파일 백업과 함께 데이터베이스 백업(mysql, mariadb, postgres 등)을 통합 구성하시겠습니까? [y/%bN%b]: %b' "$C_DIM" "$C_BOLD" "$C_RESET" "$C_RESET"
-  else
-    printf '\n--- 데이터베이스 백업 설정 ---\n'
-    printf '파일 백업과 함께 데이터베이스 백업(mysql, mariadb, postgres 등)을 통합 구성하시겠습니까? [y/N]: '
-  fi
-  local config_db; read -r config_db
-  
-  if [[ "$config_db" =~ ^[Yy]$ ]]; then
-    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-      printf '%b데이터베이스 엔진 유형을 입력하세요 (mysql, mariadb, postgres, custom) [mysql]: %b' "$C_CYAN" "$C_RESET"
-    else
-      printf '데이터베이스 엔진 유형을 입력하세요 (mysql, mariadb, postgres, custom) [mysql]: '
-    fi
-    read -r db_type
-    [[ -z "$db_type" ]] && db_type="mysql"
-    
+  if safe_confirm "파일 백업과 함께 데이터베이스 백업(mysql, mariadb, postgres 등)을 통합 구성하시겠습니까?" "n"; then
+    local db_type
+    db_type=$(prompt_validated "데이터베이스 엔진 유형을 입력하세요 (mysql, mariadb, postgres, custom)" "mysql" validate_not_empty)
     local db_command
-    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-      printf '%bDB 백업을 위한 덤프 명령어를 입력하세요 (엔터 입력 시 기본 명령어 자동 생성): %b' "$C_CYAN" "$C_RESET"
-    else
-      printf 'DB 백업을 위한 덤프 명령어를 입력하세요 (엔터 입력 시 기본 명령어 자동 생성): '
-    fi
-    read -r db_command
-    
+    db_command=$(prompt_validated "DB 백업을 위한 덤프 명령어를 입력하세요 (엔터 입력 시 기본 명령어 자동 생성)" "" validate_anything)
     local db_keep_daily
-    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-      printf '%bDB 스냅샷 일별 보관 개수 입력 (기본값: 7): %b' "$C_CYAN" "$C_RESET"
-    else
-      printf 'DB 스냅샷 일별 보관 개수 입력 (기본값: 7): '
-    fi
-    read -r db_keep_daily
-    [[ -z "$db_keep_daily" ]] && db_keep_daily="7"
-    
+    db_keep_daily=$(prompt_validated "DB 스냅샷 일별 보관 개수 입력" "7" validate_positive_int)
     local db_keep_weekly
-    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-      printf '%bDB 스냅샷 주별 보관 개수 입력 (기본값: 4): %b' "$C_CYAN" "$C_RESET"
-    else
-      printf 'DB 스냅샷 주별 보관 개수 입력 (기본값: 4): '
-    fi
-    read -r db_keep_weekly
-    [[ -z "$db_keep_weekly" ]] && db_keep_weekly="4"
-    
+    db_keep_weekly=$(prompt_validated "DB 스냅샷 주별 보관 개수 입력" "4" validate_positive_int)
     local db_keep_monthly
-    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-      printf '%bDB 스냅샷 월별 보관 개수 입력 (기본값: 12): %b' "$C_CYAN" "$C_RESET"
-    else
-      printf 'DB 스냅샷 월별 보관 개수 입력 (기본값: 12): '
-    fi
-    read -r db_keep_monthly
-    [[ -z "$db_keep_monthly" ]] && db_keep_monthly="12"
-    
-    if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-      printf '%bDB 백업 반복 스케줄 주기를 입력하세요 (기본값: *-*-* 03:00:00): %b' "$C_CYAN" "$C_RESET"
-    else
-      printf 'DB 백업 반복 스케줄 주기를 입력하세요 (기본값: *-*-* 03:00:00): '
-    fi
-    read -r db_schedule
-    [[ -z "$db_schedule" ]] && db_schedule="*-*-* 03:00:00"
-    
+    db_keep_monthly=$(prompt_validated "DB 스냅샷 월별 보관 개수 입력" "12" validate_positive_int)
+    local db_schedule
+    db_schedule=$(prompt_validated "DB 백업 반복 스케줄 주기를 입력하세요" "*-*-* 03:00:00" validate_not_empty)
     setting_args+=(--db-type "$db_type" --db-keep-daily "$db_keep_daily" --db-keep-weekly "$db_keep_weekly" --db-keep-monthly "$db_keep_monthly" --db-schedule "$db_schedule")
     if [[ -n "$db_command" ]]; then
       setting_args+=(--db-command "$db_command")
@@ -8042,7 +7953,6 @@ cmd_wizard() {
       printf '%b├──%b DB 백업 유형: %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$db_type" "$C_RESET"
       printf '%b├──%b DB 백업 주기: %b%s%b\n' "$C_GRAY" "$C_RESET" "$C_BOLD" "$db_schedule" "$C_RESET"
     fi
-    printf '%b└──%b 이대로 진행할까요? [%bY%b/n]: %b' "$C_GRAY" "$C_RESET" "${C_CYAN}${C_BOLD}" "$C_RESET" "$C_RESET"
   else
     printf '\n다음 설정으로 진행합니다:\n'
     printf '  백엔드: %s\n' "$backend"
@@ -8058,41 +7968,21 @@ cmd_wizard() {
       printf '  DB 백업 유형: %s\n' "$db_type"
       printf '  DB 백업 주기: %s\n' "$db_schedule"
     fi
-    printf '이대로 진행할까요? [Y/n]: '
   fi
-  local confirm
-  read -r confirm
-  if [[ -n "$confirm" && ! "$confirm" =~ ^[Yy]$ ]]; then
+  if ! safe_confirm "이대로 진행할까요?" "y"; then
     log_info "설정을 취소했습니다."
     return 0
   fi
 
   cmd_setting "${setting_args[@]}"
 
-  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-    printf '%b위 안내(공개키 등록 또는 버킷 정책 적용)를 완료하셨으면 %bEnter%b를 누르세요: %b' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_RESET"
-  else
-    printf '위 안내(공개키 등록 또는 버킷 정책 적용)를 완료하셨으면 Enter를 누르세요: '
-  fi
-  local _ack; read -r _ack || true
+  safe_input "위 안내(공개키 등록 또는 버킷 정책 적용)를 완료하셨으면 Enter를 누르세요" "" >/dev/null || true
 
   cmd_init
 
   # ── NTP 시각 동기화 설정 ──────────────────────────────────────────
   local ntp_setup_done=0
-  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-    setup_colors
-    printf '\n%b%b⚙  시각 동기화 설정 (NTP / Chrony)%b\n' "$C_CYAN" "$C_BOLD" "$C_RESET"
-    printf '%bISMS-P 2.9.3 시각 동기화 항목 대응을 위해 NTP 설정을 적용할 수 있습니다.%b\n' "$C_DIM" "$C_RESET"
-    printf '%b시각 동기화 설정을 적용할까요? [y/%bN%b]: %b' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_RESET"
-  else
-    printf '\n--- 시각 동기화 설정 (NTP / Chrony) ---\n'
-    printf 'ISMS-P 2.9.3 시각 동기화 항목 대응을 위해 NTP 설정을 적용할 수 있습니다.\n'
-    printf '시각 동기화 설정을 적용할까요? [y/N]: '
-  fi
-  local ntp_choice; read -r ntp_choice || true
-
-  if [[ "$ntp_choice" =~ ^[Yy]$ ]]; then
+  if safe_confirm "ISMS-P 2.9.3 시각 동기화(NTP/chrony) 설정을 적용할까요?" "n"; then
     local chrony_ready=0
     if type -P chronyc > /dev/null 2>&1 && systemctl is-active chronyd > /dev/null 2>&1; then
       chrony_ready=1
@@ -8102,25 +7992,13 @@ cmd_wizard() {
       cmd_ntp setup
       ntp_setup_done=1
     else
-      if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-        printf '%b안내: chrony(chronyd)가 설치되어 있지 않거나 실행 중이지 않습니다. 먼저 chrony를 설치하고 실행한 뒤\n        backup.sh ntp setup 을 단독으로 실행하세요.%b\n' "$C_YELLOW" "$C_RESET"
-      else
-        printf '안내: chrony(chronyd)가 설치되어 있지 않거나 실행 중이지 않습니다.\n'
-        printf '      먼저 chrony를 설치한 뒤 backup.sh ntp setup 을 실행하세요.\n'
-      fi
+      log_warn "chrony(chronyd)가 설치되어 있지 않거나 실행 중이지 않습니다. 먼저 chrony를 설치하고 실행한 뒤 backup.sh ntp setup 을 단독으로 실행하세요."
     fi
   fi
 
   # ── 정기 백업 스케줄 등록 ─────────────────────────────────────────────────
-  if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
-    printf '%b지금 정기 백업 스케줄을 등록할까요? 기본값은 매일 새벽 2시입니다. [%bY%b/n]: %b' "$C_CYAN" "$C_BOLD" "$C_RESET" "$C_RESET"
-  else
-    printf '지금 정기 백업 스케줄을 등록할까요? 기본값은 매일 새벽 2시입니다. [Y/n]: '
-  fi
-  local schedule_choice; read -r schedule_choice || true
-
   local schedule_enabled=0
-  if [[ -z "$schedule_choice" || "$schedule_choice" =~ ^[Yy]$ ]]; then
+  if safe_confirm "지금 정기 백업 스케줄을 등록할까요? (기본값: 매일 새벽 2시)" "y"; then
     cmd_schedule enable
     schedule_enabled=1
   fi
@@ -8139,8 +8017,10 @@ cmd_wizard() {
   local chrony_var="BACKUP_CHRONY_REPORT"
   local file_ntp_val="${file_config[$ntp_var]:-}"
   local file_chrony_val="${file_config[$chrony_var]:-}"
-  local env_ntp_val="${!ntp_var:-}"
-  local env_chrony_val="${!chrony_var:-}"
+  local env_ntp_val=""
+  if [[ -v "$ntp_var" ]]; then env_ntp_val="${!ntp_var}"; fi
+  local env_chrony_val=""
+  if [[ -v "$chrony_var" ]]; then env_chrony_val="${!chrony_var}"; fi
   if (( ntp_setup_done )) || [[ "$file_ntp_val" == "1" || "$file_chrony_val" == "1" || "$env_ntp_val" == "1" || "$env_chrony_val" == "1" ]]; then
     ntp_report_active=1
   fi
@@ -8365,7 +8245,7 @@ help_setting() {
       --keep-daily <N>                일별 보관할 스냅샷 개수
       --keep-weekly <N>               주별 보관할 스냅샷 개수
       --keep-monthly <N>              월별 보관할 스냅샷 개수
-      --profile-name <이름>           resticprofile 프로파일 이름 (기본값: 호스트명)
+      --profile-name <이름>           resticprofile 프로파일 이름 (기본값: backup)
       --audit-tester <이름>           일일 백업 감사 및 복구 테스트를 수행할 담당자 이름
       --audit-ciso <이름>             보고서를 최종 승인할 정보보안책임자(CISO) 이름
       --audit-rto <분>                복구 목표 시간(RTO, 분 단위)
@@ -8625,7 +8505,7 @@ help_config() {
       --keep-daily <N>          일별 보관할 스냅샷 개수
       --keep-weekly <N>         주별 보관할 스냅샷 개수
       --keep-monthly <N>        월별 보관할 스냅샷 개수
-      --profile-name <이름>     resticprofile 프로파일 이름 (기본값: 호스트명)
+      --profile-name <이름>     resticprofile 프로파일 이름 (기본값: backup)
       --on-calendar <식>        정기 백업을 위한 systemd OnCalendar 포맷 주기 (예: "daily", "*-*-* 03:00:00")
       --audit-tester <이름>     일일 백업 감사 및 복구 테스트를 수행할 담당자 이름
       --audit-ciso <이름>       보고서를 최종 승인할 정보보안책임자(CISO) 이름
