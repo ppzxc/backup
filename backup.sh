@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.65"
+BACKUP_SCRIPT_VERSION="0.0.66"
 
 restic() {
   local -a t_cmd=()
@@ -5274,7 +5274,7 @@ render_daily_txt() {
   local newest_drill
   # 시스템이 일정한 영숫자 날짜 패턴으로 생성하므로 안전한 정렬을 위해 ls를 사용함
   # shellcheck disable=SC2012
-  newest_drill=$(ls -t "${BACKUP_REPORTS_DIR:-/data/backup/reports}"/restic_audit_restore_drill_*.html 2>/dev/null | head -n1)
+  newest_drill=$(ls -t "${BACKUP_REPORTS_DIR:-/data/backup/reports}"/restore_drill_report_*.html 2>/dev/null | head -n1 || true)
   if [[ -n "$newest_drill" ]]; then
     local filename; filename=$(basename "$newest_drill")
     local fdate; fdate=$(echo "$filename" | grep -oE '[0-9]{8}')
@@ -5447,7 +5447,7 @@ render_daily_html() {
   local newest_drill
   # 시스템이 일정한 영숫자 날짜 패턴으로 생성하므로 안전한 정렬을 위해 ls를 사용함
   # shellcheck disable=SC2012
-  newest_drill=$(ls -t "${BACKUP_REPORTS_DIR:-/data/backup/reports}"/restic_audit_restore_drill_*.html 2>/dev/null | head -n1)
+  newest_drill=$(ls -t "${BACKUP_REPORTS_DIR:-/data/backup/reports}"/restore_drill_report_*.html 2>/dev/null | head -n1 || true)
   if [[ -n "$newest_drill" ]]; then
     local filename; filename=$(basename "$newest_drill")
     local fdate; fdate=$(echo "$filename" | grep -oE '[0-9]{8}')
