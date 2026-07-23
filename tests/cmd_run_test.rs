@@ -1,0 +1,66 @@
+use backup::commands::run::execute_run;
+use backup::commands::status::execute_status;
+use backup::config::model::*;
+use backup::runner::restic::MockResticRunner;
+use secrecy::SecretString;
+
+#[test]
+fn test_execute_run() {
+    let mock_runner = MockResticRunner::new(0, "backup complete");
+    let config = BackupConfig {
+        version: "1.0".into(),
+        profile: "test".into(),
+        backup: BackupTargets {
+            targets: vec!["/tmp".into()],
+            excludes: vec![],
+        },
+        retention: RetentionPolicy {
+            keep_daily: 7,
+            keep_weekly: 4,
+            keep_monthly: 12,
+        },
+        storage: StorageConfig {
+            primary: StorageTarget {
+                backend: "sftp".into(),
+                repository: "rclone:syno:/backup".into(),
+                password: SecretString::new("secret".into()),
+                sftp: None,
+                s3: None,
+            },
+            secondary: None,
+        },
+    };
+    let result = execute_run(&config, &mock_runner).unwrap();
+    assert!(result.contains("backup complete"));
+}
+
+#[test]
+fn test_execute_status() {
+    let config = BackupConfig {
+        version: "1.0".into(),
+        profile: "test".into(),
+        backup: BackupTargets {
+            targets: vec!["/tmp".into()],
+            excludes: vec![],
+        },
+        retention: RetentionPolicy {
+            keep_daily: 7,
+            keep_weekly: 4,
+            keep_monthly: 12,
+        },
+        storage: StorageConfig {
+            primary: StorageTarget {
+                backend: "sftp".into(),
+                repository: "rclone:syno:/backup".into(),
+                password: SecretString::new("secret".into()),
+                sftp: None,
+                s3: None,
+            },
+            secondary: None,
+        },
+    };
+    let result = execute_status(&config).unwrap();
+    assert!(result.contains("Profile: test"));
+    assert!(result.contains("Backend: sftp"));
+    assert!(result.contains("Repository: rclone:syno:/backup"));
+}
