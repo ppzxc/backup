@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.57"
+BACKUP_SCRIPT_VERSION="0.0.59"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
@@ -677,7 +677,7 @@ require_root() {
 }
 
 resolve_value() {
-  local cli="$1" env="$2" file="$3" default="$4"
+  local cli="${1:-}" env="${2:-}" file="${3:-}" default="${4:-}"
   if [[ -n "$cli" ]]; then printf '%s' "$cli"; return 0; fi
   if [[ -n "$env" ]]; then printf '%s' "$env"; return 0; fi
   if [[ -n "$file" ]]; then printf '%s' "$file"; return 0; fi
@@ -3760,8 +3760,48 @@ cmd_schedule() {
 
       scheduler_unregister "$profile_name" "$target_type"
       ;;
+    status)
+      setup_colors
+      local -A s_stat=()
+      scheduler_status "$profile_name" s_stat
+
+      local timer_state="${s_stat[backup]:-unknown}"
+      local styled_timer
+      if [[ "$timer_state" == "active" ]]; then
+        styled_timer="${C_GREEN}active${C_RESET}"
+      elif [[ "$timer_state" == "inactive" ]]; then
+        styled_timer="${C_GRAY}inactive${C_RESET}"
+      else
+        styled_timer="${C_RED}${timer_state}${C_RESET}"
+      fi
+
+      local daily_timer_state="${s_stat[daily]:-unknown}"
+      local styled_daily_timer
+      if [[ "$daily_timer_state" == "active" ]]; then
+        styled_daily_timer="${C_GREEN}active${C_RESET}"
+      elif [[ "$daily_timer_state" == "inactive" ]]; then
+        styled_daily_timer="${C_GRAY}inactive${C_RESET}"
+      else
+        styled_daily_timer="${C_RED}${daily_timer_state}${C_RESET}"
+      fi
+
+      local drill_timer_state="${s_stat[drill]:-unknown}"
+      local styled_drill_timer
+      if [[ "$drill_timer_state" == "active" ]]; then
+        styled_drill_timer="${C_GREEN}active${C_RESET}"
+      elif [[ "$drill_timer_state" == "inactive" ]]; then
+        styled_drill_timer="${C_GRAY}inactive${C_RESET}"
+      else
+        styled_drill_timer="${C_RED}${drill_timer_state}${C_RESET}"
+      fi
+
+      log_info "스케줄러 상태 정보 (프로필: ${profile_name})"
+      log_info "  - 파일/DB 백업 타이머 (backup): ${styled_timer}"
+      log_info "  - 일일 감사 보고 타이머 (daily): ${styled_daily_timer}"
+      log_info "  - 복원 점검 타이머 (drill): ${styled_drill_timer}"
+      ;;
     *)
-      die "schedule은 'enable' 또는 'disable'만 지원합니다 (입력값: '${action}')"
+      die "schedule은 'enable', 'disable' 또는 'status'만 지원합니다 (입력값: '${action}')"
       ;;
   esac
 }
@@ -8399,7 +8439,7 @@ help_schedule() {
 주기적 정기 백업 수행 및 보안 감사 결과 보고 작성을 위한 systemd timer를 활성화(schedule)하거나 비활성화(unschedule)합니다.
 
 사용법:
-  backup.sh schedule <enable|disable> [옵션...]
+  backup.sh schedule <enable|disable|status> [옵션...]
 
 사용법 예시:
   # 기본 일정으로 정기 백업 및 보안 감사 타이머 전체 활성화
@@ -8407,6 +8447,9 @@ help_schedule() {
 
   # 특정 시간 일정으로 정기 백업 활성화
   backup.sh schedule enable --on-calendar "*-*-* 03:30:00"
+
+  # 등록된 타이머 스케줄러 상태 조회
+  backup.sh schedule status
 
   # 등록된 모든 정기 백업 및 보안 감사 타이머 비활성화
   backup.sh schedule disable
