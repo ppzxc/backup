@@ -3,14 +3,21 @@ use std::path::Path;
 use secrecy::SecretString;
 use crate::config::model::*;
 
+pub struct SetupParams {
+    pub profile: String,
+    pub target: String,
+    pub repository: String,
+    pub password: SecretString,
+}
+
 pub trait SetupPrompter {
-    fn prompt_setup_params(&self) -> Result<(String, String, String, String)>;
+    fn prompt_setup_params(&self) -> Result<SetupParams>;
 }
 
 pub struct InquirePrompter;
 
 impl SetupPrompter for InquirePrompter {
-    fn prompt_setup_params(&self) -> Result<(String, String, String, String)> {
+    fn prompt_setup_params(&self) -> Result<SetupParams> {
         let profile = inquire::Text::new("Enter Profile Name:")
             .with_default("default")
             .prompt()?;
@@ -22,7 +29,12 @@ impl SetupPrompter for InquirePrompter {
         let password = inquire::Password::new("Enter Encryption Password:")
             .without_confirmation()
             .prompt()?;
-        Ok((profile, target, repo, password))
+        Ok(SetupParams {
+            profile,
+            target,
+            repository: repo,
+            password: SecretString::new(password),
+        })
     }
 }
 
@@ -49,8 +61,8 @@ pub fn create_default_config_file(path: &Path, profile: &str, target: &str, repo
 pub fn run_setup_with_prompter<P: SetupPrompter>(config_path: &Path, prompter: &P, non_interactive: bool) -> Result<()> {
     use std::io::IsTerminal;
     if !non_interactive && cfg!(not(test)) && std::io::stdin().is_terminal() {
-        let (profile, target, repo, password) = prompter.prompt_setup_params()?;
-        create_default_config_file(config_path, &profile, &target, &repo, &password)?;
+        let params = prompter.prompt_setup_params()?;
+        create_default_config_file(config_path, &params.profile, &params.target, &params.repository, secrecy::ExposeSecret::expose_secret(&params.password))?;
     } else {
         create_default_config_file(config_path, "default", "/data", "rclone:syno_backup:/backup", "default_secret")?;
     }
@@ -61,5 +73,6 @@ pub fn run_setup(config_path: &Path) -> Result<()> {
     let prompter = InquirePrompter;
     run_setup_with_prompter(config_path, &prompter, false)
 }
+
 
 
