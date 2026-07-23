@@ -19,11 +19,14 @@ pub struct AuditDiagnosticResults {
     pub items: Vec<DiagnosticItem>,
 }
 
-pub struct DiagnosticCollector;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorDiagnosticReport {
+    pub results: AuditDiagnosticResults,
+}
 
-impl DiagnosticCollector {
-    pub fn collect(host_name: &str, timestamp: &str) -> AuditDiagnosticResults {
-        AuditDiagnosticResults {
+impl DoctorDiagnosticReport {
+    pub fn generate(host_name: &str, timestamp: &str) -> Self {
+        let results = AuditDiagnosticResults {
             host_name: host_name.to_string(),
             timestamp: timestamp.to_string(),
             overall_pass: true,
@@ -47,25 +50,14 @@ impl DiagnosticCollector {
                     pass: true,
                 },
             ],
-        }
+        };
+        Self { results }
     }
-}
 
-pub struct DiagnosticEngine;
-
-impl DiagnosticEngine {
-    pub fn run_diagnostics(host_name: &str, timestamp: &str) -> AuditDiagnosticResults {
-        DiagnosticCollector::collect(host_name, timestamp)
-    }
-}
-
-pub struct IsmsReportRenderer;
-
-impl IsmsReportRenderer {
-    pub fn render_html(&self, results: &AuditDiagnosticResults) -> String {
-        let status_badge = if results.overall_pass { "PASS" } else { "FAIL" };
+    pub fn render_html(&self) -> String {
+        let status_badge = if self.results.overall_pass { "PASS" } else { "FAIL" };
         let mut rows = String::new();
-        for item in &results.items {
+        for item in &self.results.items {
             let item_status = if item.pass { "PASS" } else { "FAIL" };
             rows.push_str(&format!(
                 "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
@@ -105,8 +97,33 @@ impl IsmsReportRenderer {
     </div>
 </body>
 </html>"#,
-            results.host_name, results.timestamp, status_badge, rows.trim_end()
+            self.results.host_name, self.results.timestamp, status_badge, rows.trim_end()
         )
+    }
+}
+
+pub struct DiagnosticCollector;
+
+impl DiagnosticCollector {
+    pub fn collect(host_name: &str, timestamp: &str) -> AuditDiagnosticResults {
+        DoctorDiagnosticReport::generate(host_name, timestamp).results
+    }
+}
+
+pub struct DiagnosticEngine;
+
+impl DiagnosticEngine {
+    pub fn run_diagnostics(host_name: &str, timestamp: &str) -> AuditDiagnosticResults {
+        DoctorDiagnosticReport::generate(host_name, timestamp).results
+    }
+}
+
+pub struct IsmsReportRenderer;
+
+impl IsmsReportRenderer {
+    pub fn render_html(&self, results: &AuditDiagnosticResults) -> String {
+        let report = DoctorDiagnosticReport { results: results.clone() };
+        report.render_html()
     }
 }
 

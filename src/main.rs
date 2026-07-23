@@ -200,29 +200,13 @@ fn main() -> anyhow::Result<()> {
                 skip_retention,
                 dry_run,
             };
-            match backup::commands::run::execute_run_profile(
+            let out = backup::commands::run::execute_run_profile(
                 default_config_path,
                 "default",
                 &opts,
                 &resticprofile,
-            ) {
-                Ok(out) => println!("{}", out),
-                Err(err) => {
-                    if dry_run {
-                        let mut engine_out = String::new();
-                        if !skip_database {
-                            engine_out.push_str("[Pipeline] [Dry-Run] Executed Database streaming backup check\n");
-                        }
-                        engine_out.push_str(&format!("[Pipeline] [Dry-Run] resticprofile backup simulated ({})\n", err));
-                        if !skip_secondary_sync {
-                            engine_out.push_str("[Pipeline] [Dry-Run] Secondary storage sync simulated");
-                        }
-                        println!("{}", engine_out.trim_end());
-                    } else {
-                        return Err(err);
-                    }
-                }
-            }
+            )?;
+            println!("{}", out.trim_end());
         }
 
         Commands::Doctor { action } => match action {

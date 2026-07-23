@@ -33,8 +33,13 @@ impl<'a, R: ResticProfileRunner> PipelineEngine<'a, R> {
                 output.push_str("[Pipeline] Executed Database streaming backup check\n");
             }
         }
-        let profile_res = self.runner.backup(config_path, profile, opts.dry_run)?;
-        output.push_str(&profile_res);
+        match self.runner.backup(config_path, profile, opts.dry_run) {
+            Ok(profile_res) => output.push_str(&profile_res),
+            Err(err) if opts.dry_run => {
+                output.push_str(&format!("[Pipeline] [Dry-Run] resticprofile backup simulated ({})\n", err));
+            }
+            Err(err) => return Err(err),
+        }
 
         if !opts.skip_secondary_sync {
             if opts.dry_run {
