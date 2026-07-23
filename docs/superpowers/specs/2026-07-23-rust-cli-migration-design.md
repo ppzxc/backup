@@ -19,7 +19,7 @@ Existing `backup.sh` (shell script) is being migrated to a modern, type-safe, hi
 - `inquire`: Interactive CLI wizard dialogs.
 - `indicatif`: Dynamic terminal spinners and progress meters.
 - `config`: Multi-source configuration resolution (YAML + Environment Variables + CLI overrides).
-- `serde` / `serde_yaml`: Config file parsing/serialization.
+- `serde` / `serde_yaml`: Config file parsing/serialization with camelCase convention.
 - `anyhow` / `thiserror`: Robust error handling and reporting.
 
 ---
@@ -35,6 +35,44 @@ Existing `backup.sh` (shell script) is being migrated to a modern, type-safe, hi
   2. Environment Variables (`BACKUP_*`)
   3. Settings in `/etc/backup/config.yml`
   4. Built-in defaults
+
+### YAML Configuration Schema (camelCase)
+
+```yaml
+version: "1.0"
+profile: "host1"
+
+backup:
+  targets:
+    - "/home/user/data"
+  excludes:
+    - "/home/user/data/temp"
+
+retention:
+  keepDaily: 7
+  keepWeekly: 4
+  keepMonthly: 12
+
+storage:
+  primary:
+    backend: "sftp" # "sftp" | "s3"
+    repository: "rclone:syno_backup:/backup/host1"
+    password: "testpassword"
+    sftp:
+      host: "192.168.1.100"
+      port: 2222
+      user: "backupUser"
+      keyFile: "/root/.ssh/id_rsa"
+    s3:
+      endpoint: "https://s3.amazonaws.com"
+      accessKeyId: "xxx"
+      secretAccessKey: "yyy"
+  secondary:
+    enabled: false
+    backend: "s3"
+    repository: "s3:https://s3.us-east-1.amazonaws.com/mybucket"
+    password: "secpassword"
+```
 
 ---
 
