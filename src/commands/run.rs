@@ -25,13 +25,21 @@ impl<'a, R: ResticProfileRunner> PipelineEngine<'a, R> {
     pub fn execute(&self, config_path: &Path, profile: &str, opts: &PipelineOptions) -> Result<String> {
         let mut output = String::new();
         if !opts.skip_database {
-            output.push_str("[Pipeline] Executed Database streaming backup check\n");
+            if opts.dry_run {
+                output.push_str("[Pipeline] [Dry-Run] Executed Database streaming backup check\n");
+            } else {
+                output.push_str("[Pipeline] Executed Database streaming backup check\n");
+            }
         }
         let profile_res = self.runner.backup(config_path, profile, opts.dry_run)?;
         output.push_str(&profile_res);
 
         if !opts.skip_secondary_sync {
-            output.push_str("\n[Pipeline] Secondary storage sync completed");
+            if opts.dry_run {
+                output.push_str("\n[Pipeline] [Dry-Run] Secondary storage sync simulated");
+            } else {
+                output.push_str("\n[Pipeline] Secondary storage sync completed");
+            }
         }
         if !opts.skip_retention && !opts.dry_run {
             let prune_res = self.runner.prune(config_path, profile)?;
