@@ -1,27 +1,30 @@
 use anyhow::Result;
-use std::process::Command;
+use crate::runner::executor::CommandRunner;
 
 pub trait RcloneRunner {
     fn check_connectivity(&self, remote: &str) -> Result<String>;
     fn list_remotes(&self) -> Result<String>;
 }
 
-pub struct SystemRcloneRunner;
+pub struct RcloneTool<'a, E: CommandRunner> {
+    executor: &'a E,
+}
 
-impl RcloneRunner for SystemRcloneRunner {
+impl<'a, E: CommandRunner> RcloneTool<'a, E> {
+    pub fn new(executor: &'a E) -> Self {
+        Self { executor }
+    }
+}
+
+impl<'a, E: CommandRunner> RcloneRunner for RcloneTool<'a, E> {
     fn check_connectivity(&self, remote: &str) -> Result<String> {
-        let output = Command::new("rclone")
-            .arg("lsd")
-            .arg(remote)
-            .output()?;
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        let output = self.executor.run("rclone", &["lsd", remote])?;
+        Ok(output.stdout)
     }
 
     fn list_remotes(&self) -> Result<String> {
-        let output = Command::new("rclone")
-            .arg("listremotes")
-            .output()?;
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        let output = self.executor.run("rclone", &["listremotes"])?;
+        Ok(output.stdout)
     }
 }
 
@@ -47,3 +50,4 @@ impl RcloneRunner for MockRcloneRunner {
         Ok(self.response.clone())
     }
 }
+

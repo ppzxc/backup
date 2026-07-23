@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::io::Write;
-use std::process::Command;
 use tempfile::NamedTempFile;
+use crate::runner::executor::CommandRunner;
 
 pub trait ResticRunner {
     fn init_repo(&self, repo: &str, password: &str) -> Result<String>;
@@ -15,7 +15,15 @@ pub trait ResticRunner {
     fn list_snapshots(&self, repo: &str, password: &str) -> Result<String>;
 }
 
-pub struct SystemResticRunner;
+pub struct ResticTool<'a, E: CommandRunner> {
+    executor: &'a E,
+}
+
+impl<'a, E: CommandRunner> ResticTool<'a, E> {
+    pub fn new(executor: &'a E) -> Self {
+        Self { executor }
+    }
+}
 
 fn create_temp_password_file(password: &str) -> Result<NamedTempFile> {
     let mut file = NamedTempFile::new()?;
@@ -24,17 +32,12 @@ fn create_temp_password_file(password: &str) -> Result<NamedTempFile> {
     Ok(file)
 }
 
-impl ResticRunner for SystemResticRunner {
+impl<'a, E: CommandRunner> ResticRunner for ResticTool<'a, E> {
     fn init_repo(&self, repo: &str, password: &str) -> Result<String> {
         let pass_file = create_temp_password_file(password)?;
-        let output = Command::new("restic")
-            .arg("-r")
-            .arg(repo)
-            .arg("--password-file")
-            .arg(pass_file.path())
-            .arg("init")
-            .output()?;
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        let pass_path = pass_file.path().to_string_lossy();
+        let output = self.executor.run("restic", &["-r", repo, "--password-file", &pass_path, "init"])?;
+        Ok(output.stdout)
     }
 
     fn backup_paths(
@@ -45,32 +48,24 @@ impl ResticRunner for SystemResticRunner {
         excludes: &[String],
     ) -> Result<String> {
         let pass_file = create_temp_password_file(password)?;
-        let mut cmd = Command::new("restic");
-        cmd.arg("-r")
-            .arg(repo)
-            .arg("--password-file")
-            .arg(pass_file.path())
-            .arg("backup");
+        let pass_path = pass_file.path().to_string_lossy();
+        let mut args = vec!["-r", repo, "--password-file", &pass_path, "backup"];
         for t in targets {
-            cmd.arg(t);
+            args.push(t);
         }
         for e in excludes {
-            cmd.arg("--exclude").arg(e);
+            args.push("--exclude");
+            args.push(e);
         }
-        let output = cmd.output()?;
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        let output = self.executor.run("restic", &args)?;
+        Ok(output.stdout)
     }
 
     fn list_snapshots(&self, repo: &str, password: &str) -> Result<String> {
         let pass_file = create_temp_password_file(password)?;
-        let output = Command::new("restic")
-            .arg("-r")
-            .arg(repo)
-            .arg("--password-file")
-            .arg(pass_file.path())
-            .arg("snapshots")
-            .output()?;
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        let pass_path = pass_file.path().to_string_lossy();
+        let output = self.executor.run("restic", &["-r", repo, "--password-file", &pass_path, "snapshots"])?;
+        Ok(output.stdout)
     }
 }
 
@@ -105,3 +100,4 @@ impl ResticRunner for MockResticRunner {
         Ok(self.response.clone())
     }
 }
+
