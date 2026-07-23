@@ -8,6 +8,8 @@ pub mod setup;
 pub mod config_cmd;
 pub mod update;
 pub mod uninstall;
+pub mod backend;
+
 
 
 

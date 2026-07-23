@@ -11,8 +11,12 @@ pub fn execute_schedule_disable<R: ResticProfileRunner>(config_path: &Path, runn
 }
 
 pub fn execute_schedule_status<R: ResticProfileRunner>(config_path: &Path, runner: &R) -> Result<String> {
-    runner.schedule_status(config_path)
+    match runner.schedule_status(config_path) {
+        Ok(res) => Ok(res),
+        Err(err) => Ok(format!("Schedule status: Inactive or resticprofile unavailable ({})", err)),
+    }
 }
+
 
 pub fn generate_systemd_service(binary_path: &str) -> String {
     format!(

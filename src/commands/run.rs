@@ -59,16 +59,11 @@ pub fn execute_run<R: ResticRunner>(config: &BackupConfig, runner: &R) -> Result
 pub fn execute_run_profile<R: ResticProfileRunner>(
     config_path: &Path,
     profile: &str,
-    dry_run: bool,
+    opts: &PipelineOptions,
     runner: &R,
 ) -> Result<String> {
     let engine = PipelineEngine::new(runner);
-    let opts = PipelineOptions {
-        dry_run,
-        skip_database: false,
-        skip_secondary_sync: false,
-        skip_retention: false,
-    };
-    engine.execute(config_path, profile, &opts)
+    engine.execute(config_path, profile, opts)
 }
+
 

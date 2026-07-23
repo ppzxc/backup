@@ -4,6 +4,7 @@ use crate::runner::executor::CommandRunner;
 pub trait RcloneRunner {
     fn check_connectivity(&self, remote: &str) -> Result<String>;
     fn list_remotes(&self) -> Result<String>;
+    fn sync(&self, source: &str, target: &str) -> Result<String>;
 }
 
 pub struct RcloneTool<'a, E: CommandRunner> {
@@ -24,6 +25,11 @@ impl<'a, E: CommandRunner> RcloneRunner for RcloneTool<'a, E> {
 
     fn list_remotes(&self) -> Result<String> {
         let output = self.executor.run("rclone", &["listremotes"])?;
+        Ok(output.stdout)
+    }
+
+    fn sync(&self, source: &str, target: &str) -> Result<String> {
+        let output = self.executor.run("rclone", &["sync", source, target])?;
         Ok(output.stdout)
     }
 }
@@ -49,5 +55,9 @@ impl RcloneRunner for MockRcloneRunner {
     fn list_remotes(&self) -> Result<String> {
         Ok(self.response.clone())
     }
+    fn sync(&self, _source: &str, _target: &str) -> Result<String> {
+        Ok(self.response.clone())
+    }
 }
+
 

@@ -40,11 +40,19 @@ fn test_execute_run() {
 
 #[test]
 fn test_execute_run_profile() {
+    use backup::commands::run::PipelineOptions;
     let mock_runner = MockResticProfileRunner::new(0, "resticprofile backup complete");
     let config_path = Path::new("/etc/backup/profiles.yaml");
-    let result = execute_run_profile(config_path, "self", false, &mock_runner).unwrap();
+    let opts = PipelineOptions {
+        dry_run: false,
+        skip_database: false,
+        skip_secondary_sync: false,
+        skip_retention: false,
+    };
+    let result = execute_run_profile(config_path, "self", &opts, &mock_runner).unwrap();
     assert!(result.contains("resticprofile backup complete"));
 }
+
 
 #[test]
 fn test_pipeline_engine_flag_combinations() {
@@ -97,3 +105,13 @@ fn test_execute_status() {
     assert!(result.contains("Backend: sftp"));
     assert!(result.contains("Repository: rclone:syno:/backup"));
 }
+
+#[test]
+fn test_backend_migrate() {
+    use backup::commands::backend::execute_backend_migrate;
+    use backup::runner::rclone::MockRcloneRunner;
+    let mock = MockRcloneRunner::new(0, "sync ok");
+    let res = execute_backend_migrate(&mock, "primary:backup", "secondary:backup").unwrap();
+    assert!(res.contains("Backend snapshot migration completed"));
+}
+
