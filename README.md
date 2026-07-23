@@ -3,31 +3,58 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-blue.svg)](https://www.rust-lang.org)
 [![Coverage](https://img.shields.io/badge/coverage-80%25%2B-brightgreen.svg)](#)
+[![ISMS-P](https://img.shields.io/badge/compliance-ISMS--P-emerald.svg)](#)
 
 > **안전하고 규격화된 Linux 서버 백업 관리를 위한 Rust 기반 Restic 백업 자동화 CLI 도구**
 
-`backup`은 systemd 기반의 Linux 서버(RHEL/Rocky Linux/Ubuntu 등)에서 **Restic 백업 솔루션**을 손쉽게 설치, 설정, 운영 및 자동화할 수 있도록 지원하는 고성능 백업 관리 CLI 도구입니다.
+`backup`은 systemd 기반의 Linux 서버(RHEL, Rocky Linux, Ubuntu 등)에서 **Restic 백업 파이프라인**을 설치, 설정, 운영 및 자동화하고 ISMS-P 감사 증적 보고서를 생성하는 고성능 백업 관리 CLI 도구입니다.
 
-저장 백엔드로 **S3 호환 오브젝트 스토리지** 또는 **SFTP/NAS 스토리지**를 지원하며, 백업 정책 설정부터 systemd 스케줄러 등록, 헬스 체크, 마이그레이션까지 백업 파이프라인의 전 과정을 제어합니다.
+저장 백엔드로 **SFTP/NAS 스토리지** 및 **S3 호환 오브젝트 스토리지**(AWS S3, MinIO, Synology Rclone 등)를 지원하며, DB 스트리밍 백업, 1차/2차 저장소 마이그레이션, systemd 스케줄러 동기화, 모의복구 훈련(RTO 측정)까지 백업의 전 과정을 제어합니다.
 
 ---
 
 ## 🌟 주요 특징 (Key Features)
 
-* **고성능 & 안전한 Rust CLI**: Rust 프로그래밍 언어로 개발되어 빠른 실행 속도와 강력한 타입 안정성, 메모리 안전성을 보장합니다.
-* **Functional Core / Imperative Shell 아키텍처**: 순수 비즈니스 로직과 외부 I/O 레이어를 엄격히 분리하여 유닛 테스트 및 뮤테이션 테스트 가능성을 최상으로 유지합니다.
-* **다양한 백엔드 지원**: SFTP 및 S3(AWS S3, MinIO 등) 백엔드 지원, 1차/2차 저장소 구성 가능.
-* **systemd 스케줄러 연동**: systemd service 및 timer 유닛 자동 생성 및 스케줄링 관리.
-* **보안 및 컴플라이언스**: 민감 자격 증명(`SecretString`)의 마스킹 처리, `/etc/backup` 디렉터리(`700`) 및 설정 파일(`600`)의 엄격한 POSIX 권한 강제.
-* **테스트 및 검증 체계**: `cargo-llvm-cov` 기반 소스 코드 커버리지 측정 및 `cargo-mutants` 기반 결함 검수 능력(Mutation Testing) 측정 체계 구축.
+* **고성능 & 안전한 Rust CLI**: 빠른 실행 속도, 강력한 타입 안정성 및 메모리 안전성 보장.
+* **Functional Core / Imperative Shell 계층 구조**: 비즈니스 로직과 외부 I/O 레이어를 엄격히 분리하여 100% Mocking 및 단위 테스트 가능.
+* **심층 아키텍처 (Deep Module Seams)**:
+  * **Configuration Registry**: `/etc/backup` (`700`), `config.yml` / `backup.env` (`600`) POSIX 권한 자동 강제 및 `profiles.yaml` 파생 설정 동기화.
+  * **Doctor Diagnostic Engine**: ISMS-P 인증 감사 규정 검증(보안 권한, NTP 시각 동기화, DB 헤더 검증 및 RTO 측정 HTML 보고서 생성).
+  * **Pipeline Engine**: DB 덤프 스트리밍 -> 1차 백업 -> 2차 2차 백업 복제 -> 보관 주기(Retention) 정리 수동/자동 원스톱 파이프라인 수행.
+* **보안 및 자격 증명 보호**: 비밀번호 및 Access Key 등 민감 자격 증명(`SecretString`) 마스킹 처리.
 
 ---
 
-## 🛠️ 핵심 아키텍처 (Architecture)
+## 🏗️ 핵심 아키텍처 (Architecture)
 
-본 도구는 **Functional Core / Imperative Shell** 디자인 패턴에 근거해 작성되어 있습니다.
-* **Functional Core**: `BackupConfig` 검증, 설정 파일 파싱, 디폴트 생성, `systemd` 유닛 렌더링, CLI 명령어 변환 등 외부 I/O가 없는 순수 함수로 구성되어 있습니다.
-* **Imperative Shell**: 외부 명령 호출(`restic`, `rclone`, `systemctl`)은 `CommandRunner` / `Executor` Trait (`src/runner/executor.rs`)으로 추상화되어 테스트 시 `MockExecutor`로 원격 종속성을 완전히 차단하고 동작을 검증합니다.
+본 프로젝트는 **Functional Core / Imperative Shell** 및 **Deep Module** 아키텍처 원칙을 준수합니다.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    backup CLI (main)                    │
+└────────────────────────────┬────────────────────────────┘
+                             │
+     ┌───────────────────────┼───────────────────────┐
+     ▼                       ▼                       ▼
+┌──────────────┐    ┌─────────────────┐    ┌──────────────────┐
+│ SetupEngine  │    │ ConfigRegistry  │    │  Doctor Engine   │
+│ (Inquire/TUI)│    │ (0700/0600 Sync)│    │ (ISMS Reporting) │
+└──────────────┘    └─────────────────┘    └──────────────────┘
+                             │
+                             ▼
+                 ┌───────────────────────┐
+                 │    PipelineEngine     │
+                 └───────────┬───────────┘
+                             │
+                             ▼
+                ┌─────────────────────────┐
+                │ SystemExecutor (Runner) │
+                └────────────┬────────────┘
+                             │ (Command execution)
+        ┌────────────────────┼────────────────────┐
+        ▼                    ▼                    ▼
+   [ restic ]         [ resticprofile ]       [ rclone ]
+```
 
 ---
 
@@ -38,52 +65,48 @@
 # 빌드
 $ cargo build --release
 
-# 전체 단위 및 통합 테스트 실행
+# 전체 단위 및 통합 테스트 실행 (62개 테스트)
 $ cargo test
 
-# 특정 테스트 파일 실행
-$ cargo test --test cmd_config_test
+# 시나리오 E2E 통합 테스트 실행
+$ cargo test --test e2e_full_workflow
 ```
 
-### 2. 코드 커버리지 및 퀄리티 측정
+### 2. 코드 커버리지 및 뮤테이션 측정
 ```bash
-# 통합 커버리지 & 뮤테이션 측정 스크립트 실행
-$ ./scripts/test_coverage.sh
-
-# 개별 실행: 코드 커버리지 리포트 (cargo-llvm-cov)
+# 커버리지 측정 (cargo-llvm-cov)
 $ cargo llvm-cov
 
-# 개별 실행: 뮤테이션 테스트 (cargo-mutants)
-$ cargo mutants --file src/config/model.rs --file src/runner/executor.rs
+# 품질 측정 스크립트 실행 (커버리지 & cargo-mutants)
+$ ./scripts/test_coverage.sh
 ```
 
 ---
 
-## 📖 서브커맨드 레퍼런스 (Subcommands)
+## 📖 CLI 서브커맨드 명세 (Command Reference)
 
-`backup` CLI 도구는 다음과 같은 서브커맨드를 제공합니다:
+`backup` CLI 도구는 유비쿼터스 도메인 용어에 맞추어 설계된 서브커맨드를 제공합니다:
 
-| 명령어 | 설명 | 예시 |
+| 서브커맨드 | 주요 역할 및 설명 | 실행 예시 |
 | :--- | :--- | :--- |
-| **`setup`** | 대화형 마법사 또는 기본 백업 설정 파일 생성 | `backup setup` |
-| **`config`** | 현재 등록된 백업 설정 조회(마스킹 지원) 및 수정 | `backup config show` |
-| **`run`** | 등록된 백업 프로필 실행 및 백업 수행 | `backup run` |
-| **`restore`** | 스냅샷 조회 및 복원 수행 | `backup restore` |
-| **`schedule`** | systemd service 및 timer 유닛 생성 및 등록 | `backup schedule enable` |
-| **`doctor`** | 시스템 의존성 바이너리 및 저장소 연결 상태 점검 | `backup doctor` |
-| **`uninstall`**| 생성된 스케줄 해제 및 설치 환경 정리 | `backup uninstall --yes` |
+| **`setup`** | TUI 마법사로 환경/프로필 초기화, 바이너리 의존성 자동 설치, 저장소 초기화 | `backup setup`<br>`backup setup dependencies` |
+| **`config`** | 설정값 조회 (비밀값 마스킹), 설정 파일 편집 및 레거시 Bash `backup.env` 이관 | `backup config show`<br>`backup config edit` |
+| **`run`** | 전체 백업 파이프라인 수동/드라이런 실행 (DB -> Primary -> Secondary -> Retention) | `backup run`<br>`backup run --dry-run` |
+| **`doctor`** | 권한, 시각 동기화(NTP), 모의복구 훈련(RTO) 진단 및 ISMS-P HTML 보고서 생성 | `backup doctor`<br>`backup doctor environment --file report.html` |
+| **`backend`** | 저장소 간 2차 복사(`restic copy`) 및 신규 백엔드 마이그레이션 | `backup backend migrate` |
+| **`schedule`**| Systemd Timer 자동 백업 스케줄 등록, 해제 및 현재 상태 조회 | `backup schedule enable`<br>`backup schedule status` |
+| **`restore`** | 스냅샷 복원 및 DB 무결성 복구 실행 | `backup restore --snapshot latest` |
+| **`snapshots`**| 1차/2차 저장소에 보관된 전체 스냅샷 목록 조회 | `backup snapshots` |
+| **`status`** | 저장소 연결 상태 및 최근 백업 실행 결과 종합 조회 | `backup status` |
+| **`uninstall`**| 자동 백업 스케줄 해제 및 바이너리/환경 정리 | `backup uninstall --purge` |
 
 ---
 
-## 🧪 테스트 및 퀄리티 검증 (Testing & Quality Assurance)
+## 🧪 테스트 및 품질 검증 (Quality Assurance)
 
-프로젝트는 TDD(Test-Driven Development) 원칙을 준수하며 다음과 같은 검증 체계를 포함합니다:
-
-* **단위 테스트 (Unit Tests)**: `tests/config_test.rs`, `tests/legacy_import_test.rs`, `tests/runner_test.rs` 등
-* **서브커맨드 검증**: `tests/subcommand_test.rs`, `tests/cmd_*_test.rs`
-* **Docker 컨테이너 통합 테스트**: `tests/integration_s3.rs`, `tests/integration_sftp.rs`, `tests/integration_db.rs`
-* **시나리오 E2E 테스트**: `tests/integration_scenario.rs`
-* **커버리지 리포트**: `./scripts/test_coverage.sh` 구동 시 `target/coverage/html/index.html`에 HTML 리포트 자동 생성
+* **Unit & Command Tests**: `tests/cmd_*_test.rs`, `tests/config_test.rs`, `tests/runner_test.rs`
+* **Logical & Security Tests**: `tests/logical_validation_test.rs`, `tests/isms_audit_test.rs`
+* **Docker Testcontainers Matrix**: S3, SFTP, MySQL, PostgreSQL 백엔드에 대한 E2E 통합 테스트 (`tests/e2e_*_test.rs`)
 
 ---
 
