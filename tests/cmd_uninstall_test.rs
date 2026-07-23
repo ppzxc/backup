@@ -9,9 +9,15 @@ fn test_uninstall_plan() {
 }
 
 #[test]
-fn test_perform_uninstall() {
-    let result = perform_uninstall().unwrap();
-    assert!(result.contains("Uninstalled"));
+fn test_perform_uninstall_with_yes() {
+    let res = perform_uninstall(true).unwrap();
+    assert!(res.contains("Uninstalled"));
+}
+
+#[test]
+fn test_perform_uninstall_non_interactive_without_yes_fails() {
+    let res = perform_uninstall(false);
+    assert!(res.is_err());
 }
 
 #[test]
