@@ -73,6 +73,32 @@ impl BackupConfig {
         Ok(())
     }
 
+    pub fn save_and_sync(&self, config_dir: &Path) -> Result<()> {
+        let env_file = config_dir.join("backup.env");
+        self.save_to_path(&env_file)?;
+
+        // Render resticprofile YAML structure
+        let profiles_yaml_path = config_dir.join("profiles.yaml");
+        let profile_yaml = format!(
+            "version: \"2\"\ndefault:\n  repository: \"{}\"\n  password: \"{}\"\n{}:\n  inherit: \"default\"\n  backup:\n    source:\n{}\n    schedule: \"*-*-* 03:00:00\"\n  retention:\n    keep-daily: {}\n    keep-weekly: {}\n    keep-monthly: {}\n",
+            self.storage.primary.repository,
+            self.storage.primary.password.expose_secret(),
+            self.profile,
+            self.backup.targets.iter().map(|t| format!("      - \"{}\"", t)).collect::<Vec<_>>().join("\n"),
+            self.retention.keep_daily,
+            self.retention.keep_weekly,
+            self.retention.keep_monthly
+        );
+
+        fs::write(&profiles_yaml_path, profile_yaml)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&profiles_yaml_path, fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
+    }
+
     pub fn load_from_path(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)?;
         let config: Self = serde_yaml::from_str(&content)?;

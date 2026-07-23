@@ -43,7 +43,26 @@ fn test_execute_run_profile() {
     let mock_runner = MockResticProfileRunner::new(0, "resticprofile backup complete");
     let config_path = Path::new("/etc/backup/profiles.yaml");
     let result = execute_run_profile(config_path, "self", false, &mock_runner).unwrap();
-    assert_eq!(result, "resticprofile backup complete");
+    assert!(result.contains("resticprofile backup complete"));
+}
+
+#[test]
+fn test_pipeline_engine_flag_combinations() {
+    use backup::commands::run::{PipelineEngine, PipelineOptions};
+    let mock_runner = MockResticProfileRunner::new(0, "profile_run_ok");
+    let engine = PipelineEngine::new(&mock_runner);
+    let config_path = Path::new("/etc/backup/profiles.yaml");
+
+    let opts = PipelineOptions {
+        skip_database: true,
+        skip_secondary_sync: true,
+        skip_retention: true,
+        dry_run: false,
+    };
+    let result = engine.execute(config_path, "self", &opts).unwrap();
+    assert!(!result.contains("[Pipeline] Executed Database"));
+    assert!(!result.contains("Secondary storage sync"));
+    assert!(result.contains("profile_run_ok"));
 }
 
 #[test]

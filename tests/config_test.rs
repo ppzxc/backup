@@ -220,3 +220,48 @@ self:
     );
 }
 
+#[test]
+fn test_config_save_and_sync() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("etc_backup");
+
+    let yaml = r#"
+version: "1.0"
+profile: "sync-test"
+backup:
+  targets: ["/data/web"]
+  excludes: []
+retention:
+  keepDaily: 14
+  keepWeekly: 4
+  keepMonthly: 12
+storage:
+  primary:
+    backend: "sftp"
+    repository: "sftp:user@host:/backups"
+    password: "secret_pass_123"
+"#;
+    let config: BackupConfig = serde_yaml::from_str(yaml).unwrap();
+    config.save_and_sync(&config_dir).unwrap();
+
+    let env_file = config_dir.join("backup.env");
+    let profiles_file = config_dir.join("profiles.yaml");
+
+    assert!(env_file.exists());
+    assert!(profiles_file.exists());
+
+    let profiles_content = fs::read_to_string(&profiles_file).unwrap();
+    assert!(profiles_content.contains("sync-test"));
+    assert!(profiles_content.contains("sftp:user@host:/backups"));
+    assert!(profiles_content.contains("/data/web"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let env_mode = fs::metadata(&env_file).unwrap().permissions().mode() & 0o777;
+        let prof_mode = fs::metadata(&profiles_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(env_mode, 0o600);
+        assert_eq!(prof_mode, 0o600);
+    }
+}
+

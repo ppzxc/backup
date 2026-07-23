@@ -217,12 +217,16 @@ pub fn run_setup_with_prompter<P: SetupPrompter>(config_path: &Path, prompter: &
             },
             retention: params.retention,
             storage: StorageConfig {
-                primary: params.primary_storage,
-                secondary: params.secondary_storage,
+                primary: params.primary_storage.clone(),
+                secondary: params.secondary_storage.clone(),
             },
-            reports: params.reports,
+            reports: params.reports.clone(),
         };
+
         config.save_to_path(config_path)?;
+        if let Some(parent) = config_path.parent() {
+            config.save_and_sync(parent)?;
+        }
     } else {
         create_default_config_file(config_path, "default", "/data", "rclone:syno_backup:/backup", "default_secret_pass123")?;
     }
