@@ -35,3 +35,14 @@ setup() {
   [ "$status" -eq 1 ]
   [ -z "$output" ]
 }
+
+@test "resolve_value called with fewer than 4 arguments does not throw unbound variable error" {
+  run resolve_value "cli-val" "env-val"
+  [ "$status" -eq 0 ]
+  [ "$output" = "cli-val" ]
+
+  run resolve_value "" "env-val"
+  [ "$status" -eq 0 ]
+  [ "$output" = "env-val" ]
+}
+

@@ -79,3 +79,11 @@ ENV
   [[ "$output" == *"--config ${RESTICPROFILE_CONFIG_FILE} --name web01-db unschedule"* ]]
 }
 
+@test "cmd_schedule status outputs timer active/inactive status" {
+  run cmd_schedule status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"스케줄러 상태 정보"* ]]
+  [[ "$output" == *"backup"* ]]
+}
+
+
