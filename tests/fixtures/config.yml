@@ -1,0 +1,20 @@
+version: "1.0"
+profile: "e2e_rocky9_profile"
+backup:
+  targets:
+    - "/data/src"
+  excludes:
+    - "*.tmp"
+retention:
+  keep_daily: 7
+  keep_weekly: 4
+  keep_monthly: 12
+storage:
+  primary:
+    backend: "s3"
+    repository: "s3:http://minio:9000/backup-primary"
+    password: "rocky9_e2e_secret_password"
+  secondary:
+    backend: "sftp"
+    repository: "sftp:backupuser@sftp:/upload"
+    password: "rocky9_e2e_secret_password"
