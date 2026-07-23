@@ -20,6 +20,8 @@ Existing `backup.sh` (shell script) is being migrated to a modern, type-safe, hi
 - `indicatif`: Dynamic terminal spinners and progress meters.
 - `config`: Multi-source configuration resolution (YAML + Environment Variables + CLI overrides).
 - `serde` / `serde_yaml`: Config file parsing/serialization with camelCase convention.
+- `secrecy`: Type-safe credential masking in memory and logs.
+- `tracing` / `tracing-subscriber`: Structured logging and diagnostic tracing.
 - `anyhow` / `thiserror`: Robust error handling and reporting.
 
 ---
@@ -35,6 +37,13 @@ Existing `backup.sh` (shell script) is being migrated to a modern, type-safe, hi
   2. Environment Variables (`BACKUP_*`)
   3. Settings in `/etc/backup/config.yml`
   4. Built-in defaults
+
+### Legacy Migration (`backup.env` -> `config.yml`)
+- `backup config import --legacy-env` (or automatic migration during `setup` / `config import`) parses `/etc/restic/backup.env` and outputs a valid `/etc/backup/config.yml`.
+
+### Credential Safety & Connectivity Verification
+- All credential attributes (`password`, `accessKeyId`, `secretAccessKey`, etc.) MUST be wrapped in `SecretString` and masked (`******`) in any user-facing terminal logs, `status` command outputs, or generated `systemd` service environment blocks.
+- SFTP connectivity checks MUST use `rclone_check_connectivity` (via `rclone` binary) to avoid SSH banner noise and credential leakages.
 
 ### YAML Configuration Schema (camelCase)
 
@@ -83,8 +92,10 @@ The previous scattered commands in `backup.sh` are refactored into a clear, hier
 ```
 backup
 ├── run                 # Execute backup operation immediately
-├── status              # View current status & connectivity checks
-├── setup               # Interactive installation & wizard setup
+├── restore             # Restore files from restic snapshot
+├── snapshots           # List available backup snapshots
+├── status              # View current status & connectivity checks (with masked credentials)
+├── setup               # Interactive installation, init repository & wizard setup
 ├── schedule            # Manage backup timers/schedules
 │   ├── enable
 │   ├── disable
@@ -92,7 +103,7 @@ backup
 ├── config              # Manage backup configuration
 │   ├── show
 │   ├── edit
-│   ├── import
+│   ├── import (--legacy-env supported)
 │   └── export
 ├── doctor              # System diagnostic checks (combines legacy audit, ntp, dependency checks)
 ├── update              # Update backup Rust binary to the latest version
