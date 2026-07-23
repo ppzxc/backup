@@ -19,7 +19,7 @@ fn test_e2e_full_workflow_cli() {
 
     // 4. Schedule subcommand
     let mut schedule_cmd = Command::cargo_bin("backup").unwrap();
-    schedule_cmd.arg("schedule").arg("show").assert().success();
+    schedule_cmd.arg("schedule").arg("status").assert().success();
 
     // 5. Config subcommands
     let mut config_show_cmd = Command::cargo_bin("backup").unwrap();

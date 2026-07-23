@@ -28,3 +28,47 @@
 * **설명**: MySQL, MariaDB, PostgreSQL, Custom 등 각 데이터베이스 엔진에 알맞은 기본 백업(dump) 명령어 제공, 설정 검증, 복원 시 백업본의 무결성(헤더 검사 등)을 추상화한 다형성 모듈.
 * **비고**: `database_${db_type}_${action}` 형태로 함수가 명명되며, 백업 실행기 및 복원 훈련 단계의 핵심 세임(Seam) 역할을 수행합니다.
 
+## CLI 서브커맨드 구조 명세 (Command Architecture Spec)
+
+유비쿼터스 언어에 맞춰 설계된 Rust CLI 커맨드 구조 및 역할 정의입니다.
+
+### 1. `backup setup` (환경 및 프로필 초기화)
+* **`backup setup`**: `inquire` TUI 마법사로 **Backup Environment** 및 **Backup Profile** 대화형 생성
+* **`backup setup --non-interactive`**: 대화 없이 설정 파일 기반으로 환경 설정 및 초기화 일괄 수행
+* **`backup setup dependencies`**: 필수 바이너리 의존성(`restic`, `rclone`, `resticprofile`) 검증 및 자동 설치
+* **`backup setup backend-init`**: 1차/2차 **Backend Adapter** 저장소(`restic init`) 연결 점검 및 초기화
+
+### 2. `backup config` (백업 설정 관리)
+* **`backup config show`**: **Backup Environment** 및 **Backup Profile** 설정값 출력 (SecretString 마스킹)
+* **`backup config edit`**: 설정 파일 직접 편집 및 **Configuration Registry** 유효성 검증
+* **`backup config import-legacy [--file <path>]`**: 구버전 Bash `backup.env` 파일을 현재 규격으로 이관
+
+### 3. `backup backend` (저장소 백엔드 이관)
+* **`backup backend migrate`**: 스냅샷 데이터 2차 복사(`restic copy`), 정합성 검증 및 신규 **Backend Adapter** 저장소로 이관
+
+### 4. `backup run` (백업 파이프라인 실행)
+* **`backup run`**: 전체 백업 파이프라인 수동 즉시 실행 (Database Backup Adapter -> Primary Backend Adapter -> Secondary Backend Adapter -> Retention Rule -> Notification Adapter)
+* **`--skip-database`**: **Database Backup Adapter** 덤프 단계 건너뛰기
+* **`--skip-secondary-sync`**: 2차 **Backend Adapter** 복제 건너뛰기
+* **`--skip-retention`**: Retention/Prune 정리 단계 건너뛰기
+* **`--dry-run`**: 실제 실행 없는 명령어 및 대상 시뮬레이션
+
+### 5. `backup doctor` (진단, 검증 및 감사 증적 생성)
+* **`backup doctor`**: 전체 시스템, 바이너리, 저장소 종합 진단
+* **`backup doctor environment [--file <path>]`**: **Backup Environment** 권한(`700`/`600`) 및 보안 규정 검증 보고서 생성
+* **`backup doctor time-sync [--file <path>]`**: NTP/Chrony 시각 동기화 검증 및 ISMS 증적 보고서 생성
+* **`backup doctor restore-drill [--file <path>]`**: 스냅샷 복구 모의훈련 실행, RTO 측정 및 DB 무결성 검증 보고서 생성
+
+### 6. `backup schedule` (스케줄러 관리)
+* **`backup schedule enable`**: Systemd Timer (또는 Cron Fallback) 자동 백업 스케줄 등록
+* **`backup schedule disable`**: 자동 백업 스케줄 해제
+* **`backup schedule status`**: 타이머/스케줄러 현재 동작 상태 조회
+
+### 7. 기타 운영 커맨드
+* **`backup restore`**: 백업 데이터 및 DB 복원 실행
+* **`backup snapshots`**: 1차/2차 저장소 스냅샷 목록 조회
+* **`backup status`**: 저장소 위치 및 백업 상태 종합 조회
+* **`backup update`**: 자기 자신(Rust 바이너리) 및 설정 갱신
+* **`backup uninstall [--purge]`**: 스케줄 해제 및 바이너리 삭제 (`--purge` 시 설정/캐시 완전 제거)
+
+
