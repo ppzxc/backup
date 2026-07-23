@@ -57,7 +57,7 @@ pub fn prompt_interactive_setup() -> Result<(String, String, String, String)> {
 
 pub fn run_setup(config_path: &Path) -> Result<()> {
     use std::io::IsTerminal;
-    if std::io::stdin().is_terminal() {
+    if cfg!(not(test)) && std::io::stdin().is_terminal() {
         let (profile, target, repo, password) = prompt_interactive_setup()?;
         create_default_config_file(config_path, &profile, &target, &repo, &password)?;
     } else {
