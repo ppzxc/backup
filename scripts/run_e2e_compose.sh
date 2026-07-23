@@ -39,10 +39,21 @@ docker compose -f "$COMPOSE_FILE" exec -T mariadb-latest mariadb -uroot -prootpa
 docker compose -f "$COMPOSE_FILE" exec -T postgres-latest psql -U postgres -d pg_testdb -c "CREATE TABLE IF NOT EXISTS pg16_table (id INT, val VARCHAR(50)); INSERT INTO pg16_table VALUES (1600, 'Postgres16Payload');"
 
 echo "======================================================="
-echo " 4. Running Backup CLI Commands inside Isolated Runner Container"
+echo " 4. Running Backup CLI Pipeline (run, schedule, doctor, report)"
 echo "======================================================="
 docker compose -f "$COMPOSE_FILE" exec -T backup-runner backup status
+docker compose -f "$COMPOSE_FILE" exec -T backup-runner backup run
+docker compose -f "$COMPOSE_FILE" exec -T backup-runner backup schedule status
+docker compose -f "$COMPOSE_FILE" exec -T backup-runner backup schedule enable
+docker compose -f "$COMPOSE_FILE" exec -T backup-runner backup schedule disable
 docker compose -f "$COMPOSE_FILE" exec -T backup-runner backup doctor
+docker compose -f "$COMPOSE_FILE" exec -T backup-runner backup doctor environment --file /tmp/isms_audit_report.html
+
+# Verify ISMS report HTML file generation and contents inside container
+REPORT_CONTENT=$(docker compose -f "$COMPOSE_FILE" exec -T backup-runner cat /tmp/isms_audit_report.html)
+echo "$REPORT_CONTENT" | grep -q "ISMS-P"
+echo "$REPORT_CONTENT" | grep -q "PASS"
+echo "ISMS Audit Report Generation: PASSED"
 
 echo "======================================================="
 echo " 5. Verifying DB Dump Extraction & Restores"
