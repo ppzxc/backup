@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031
 set -euo pipefail
 
-BACKUP_SCRIPT_VERSION="0.0.60"
+BACKUP_SCRIPT_VERSION="0.0.61"
 
 restic() {
   RESTIC_PASSWORD="${RESTIC_PASSWORD:-}" \
