@@ -1,74 +1,56 @@
 use assert_cmd::Command;
 
+fn assert_cmd_args_success(args: &[&str]) {
+    let mut cmd = Command::cargo_bin("backup").unwrap();
+    cmd.args(args).assert().success();
+}
+
 #[test]
 fn test_subcommands_help() {
-    let mut cmd = Command::cargo_bin("backup").unwrap();
-    cmd.arg("--help").assert().success();
+    assert_cmd_args_success(&["--help"]);
 }
 
 #[test]
 fn test_setup_subcommands() {
-    let mut cmd = Command::cargo_bin("backup").unwrap();
-    cmd.args(["setup", "--help"]).assert().success();
-
-    let mut cmd_deps = Command::cargo_bin("backup").unwrap();
-    cmd_deps.args(["setup", "dependencies", "--help"]).assert().success();
-
-    let mut cmd_init = Command::cargo_bin("backup").unwrap();
-    cmd_init.args(["setup", "backend-init", "--help"]).assert().success();
+    assert_cmd_args_success(&["setup", "--help"]);
+    assert_cmd_args_success(&["setup", "dependencies", "--help"]);
+    assert_cmd_args_success(&["setup", "backend-init", "--help"]);
 }
 
 #[test]
 fn test_config_subcommands() {
-    let mut cmd = Command::cargo_bin("backup").unwrap();
-    cmd.args(["config", "show", "--help"]).assert().success();
-
-    let mut cmd_edit = Command::cargo_bin("backup").unwrap();
-    cmd_edit.args(["config", "edit", "--help"]).assert().success();
-
-    let mut cmd_import = Command::cargo_bin("backup").unwrap();
-    cmd_import.args(["config", "import-legacy", "--help"]).assert().success();
+    assert_cmd_args_success(&["config", "show", "--help"]);
+    assert_cmd_args_success(&["config", "edit", "--help"]);
+    assert_cmd_args_success(&["config", "import-legacy", "--help"]);
 }
 
 #[test]
 fn test_backend_subcommands() {
-    let mut cmd = Command::cargo_bin("backup").unwrap();
-    cmd.args(["backend", "migrate", "--help"]).assert().success();
+    assert_cmd_args_success(&["backend", "migrate", "--help"]);
 }
 
 #[test]
 fn test_run_flags() {
-    let mut cmd = Command::cargo_bin("backup").unwrap();
-    cmd.args(["run", "--help"]).assert().success();
+    assert_cmd_args_success(&["run", "--help"]);
 }
 
 #[test]
 fn test_doctor_subcommands() {
-    let mut cmd = Command::cargo_bin("backup").unwrap();
-    cmd.args(["doctor", "environment", "--help"]).assert().success();
-
-    let mut cmd_ts = Command::cargo_bin("backup").unwrap();
-    cmd_ts.args(["doctor", "time-sync", "--help"]).assert().success();
-
-    let mut cmd_rd = Command::cargo_bin("backup").unwrap();
-    cmd_rd.args(["doctor", "restore-drill", "--help"]).assert().success();
+    assert_cmd_args_success(&["doctor", "environment", "--help"]);
+    assert_cmd_args_success(&["doctor", "time-sync", "--help"]);
+    assert_cmd_args_success(&["doctor", "restore-drill", "--help"]);
 }
 
 #[test]
 fn test_schedule_subcommands() {
-    let mut cmd = Command::cargo_bin("backup").unwrap();
-    cmd.args(["schedule", "enable", "--help"]).assert().success();
-
-    let mut cmd_dis = Command::cargo_bin("backup").unwrap();
-    cmd_dis.args(["schedule", "disable", "--help"]).assert().success();
-
-    let mut cmd_st = Command::cargo_bin("backup").unwrap();
-    cmd_st.args(["schedule", "status", "--help"]).assert().success();
+    assert_cmd_args_success(&["schedule", "enable", "--help"]);
+    assert_cmd_args_success(&["schedule", "disable", "--help"]);
+    assert_cmd_args_success(&["schedule", "status", "--help"]);
 }
 
 #[test]
 fn test_uninstall_flags() {
-    let mut cmd = Command::cargo_bin("backup").unwrap();
-    cmd.args(["uninstall", "--help"]).assert().success();
+    assert_cmd_args_success(&["uninstall", "--help"]);
 }
+
 
