@@ -7,6 +7,8 @@
 * **전체 단위 및 통합 테스트**: `cargo test`
 * **단일 테스트 파일**: `cargo test --test <file_name>`
 * **시나리오 E2E 통합 테스트**: `cargo test --test integration_scenario`
+* **코드 커버리지 측정**: `cargo llvm-cov` 또는 `./scripts/test_coverage.sh`
+* **뮤테이션 테스트 (테스트 검증력 측정)**: `cargo mutants`
 
 ## 🏗️ 아키텍처 및 설계 규칙 (Architecture & Rules)
 

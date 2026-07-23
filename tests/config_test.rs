@@ -1,4 +1,7 @@
 use backup::config::model::BackupConfig;
+use secrecy::ExposeSecret;
+use tempfile::tempdir;
+use std::fs;
 
 #[test]
 fn test_parse_yaml_config() {
@@ -29,3 +32,144 @@ storage:
     assert_eq!(config.retention.keep_daily, 7);
     assert_eq!(config.backup.targets, vec!["/home/user/data"]);
 }
+
+#[test]
+fn test_config_redacted() {
+    let yaml = r#"
+version: "1.0"
+profile: "redact-test"
+backup:
+  targets: ["/data"]
+  excludes: []
+retention:
+  keepDaily: 1
+  keepWeekly: 1
+  keepMonthly: 1
+storage:
+  primary:
+    backend: "s3"
+    repository: "s3:mybucket"
+    password: "secret_password"
+    s3:
+      endpoint: "http://localhost:9000"
+      accessKeyId: "minioadmin"
+      secretAccessKey: "minioadmin_secret"
+  secondary:
+    enabled: true
+    backend: "sftp"
+    repository: "remote:backup"
+    password: "sec_password"
+"#;
+    let config: BackupConfig = serde_yaml::from_str(yaml).unwrap();
+    let redacted = config.redacted();
+
+    // Check masked values
+    assert_eq!(redacted.storage.primary.password.expose_secret(), "******");
+    assert_eq!(
+        redacted
+            .storage
+            .primary
+            .s3
+            .as_ref()
+            .unwrap()
+            .secret_access_key
+            .expose_secret(),
+        "******"
+    );
+    assert_eq!(
+        redacted
+            .storage
+            .secondary
+            .as_ref()
+            .unwrap()
+            .password
+            .expose_secret(),
+        "******"
+    );
+
+    // Original should remain unchanged
+    assert_eq!(config.storage.primary.password.expose_secret(), "secret_password");
+}
+
+#[test]
+fn test_config_render() {
+    let yaml = r#"
+version: "1.0"
+profile: "render-test"
+backup:
+  targets: ["/data"]
+  excludes: []
+retention:
+  keepDaily: 5
+  keepWeekly: 2
+  keepMonthly: 1
+storage:
+  primary:
+    backend: "sftp"
+    repository: "/repo"
+    password: "my_secret_pass"
+"#;
+    let config: BackupConfig = serde_yaml::from_str(yaml).unwrap();
+
+    let yaml_rendered = config.render("yaml", false).unwrap();
+    assert!(yaml_rendered.contains("render-test"));
+    assert!(yaml_rendered.contains("my_secret_pass"));
+
+    let yaml_redacted = config.render("yaml", true).unwrap();
+    assert!(yaml_redacted.contains("******"));
+    assert!(!yaml_redacted.contains("my_secret_pass"));
+
+    let json_rendered = config.render("json", false).unwrap();
+    assert!(json_rendered.contains("\"profile\": \"render-test\""));
+    assert!(json_rendered.contains("my_secret_pass"));
+
+    let json_redacted = config.render("json", true).unwrap();
+    assert!(json_redacted.contains("******"));
+}
+
+#[test]
+fn test_config_save_to_path() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("sub_dir").join("config.yaml");
+
+    let yaml = r#"
+version: "1.0"
+profile: "save-test"
+backup:
+  targets: ["/data"]
+  excludes: []
+retention:
+  keepDaily: 1
+  keepWeekly: 1
+  keepMonthly: 1
+storage:
+  primary:
+    backend: "sftp"
+    repository: "/repo"
+    password: "pass"
+"#;
+    let config: BackupConfig = serde_yaml::from_str(yaml).unwrap();
+    config.save_to_path(&file_path).unwrap();
+
+    assert!(file_path.exists());
+    let saved_content = fs::read_to_string(&file_path).unwrap();
+    assert!(saved_content.contains("save-test"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = file_path.parent().unwrap();
+        let parent_perms = fs::metadata(parent).unwrap().permissions();
+        let file_perms = fs::metadata(&file_path).unwrap().permissions();
+        assert_eq!(parent_perms.mode() & 0o777, 0o700);
+        assert_eq!(file_perms.mode() & 0o777, 0o600);
+    }
+}
+
+#[test]
+fn test_invalid_yaml_parse_error() {
+    let invalid_yaml = "invalid: yaml: [";
+    let res: Result<BackupConfig, _> = serde_yaml::from_str(invalid_yaml);
+    assert!(res.is_err());
+}
+
