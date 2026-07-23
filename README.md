@@ -3,6 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![ShellCheck](https://img.shields.io/badge/shellcheck-passing-brightgreen.svg)](https://github.com/koalaman/shellcheck)
 [![Tested with Bats](https://img.shields.io/badge/tests-Bats-blue.svg)](https://github.com/bats-core/bats-core)
+[![Version](https://img.shields.io/badge/version-0.0.66-blue.svg)](#)
 
 > **안전하고 규격화된 Linux 서버 백업 관리를 위한 단일 파일 셸 스크립트 기반 Restic 백업 파이프라인**
 
@@ -87,13 +88,23 @@ $ sudo ./backup.sh run
 | **`run`** | 백업 정책을 읽어 resticprofile에 실행을 위임하고 백업을 수행 | `backup.sh run` |
 | **`status`** | 최근 백업 스냅샷 이력 및 설정 권한 정보를 간결하게 검증 | `backup.sh status` |
 | **`audit`** | 컴플라이언스 규정에 부합하는 상세 리포트를 화면에 출력하고 보고서 파일 동시 저장 지원 | `backup.sh audit --report` |
+| **`ntp`** | NTP 시각 동기화 설정 및 ISMS-P 컴플라이언스 2.9.3 시각 동기화 증적 생성 | `backup.sh ntp --report` |
+| **`config`** | 기존 백업 설정(backup.env) 부분 수정 및 관련 자산 자동 동기화 | `backup.sh config --notification-url ...` |
 | **`uninstall`**| 생성된 스케줄을 취소하고, `--purge` 추가 시 관련 환경 설정 및 캐시 영구 삭제 | `backup.sh uninstall --purge` |
 | **`migrate`**  | 기존 백업 데이터를 신규 백엔드로 이전하고, 호스트 서버 설정 및 스케줄러를 완전 전환 | `backup.sh migrate` |
+| **`import`**   | 로컬 백업 등 기존 데이터를 새로운 1차 원격 저장소로 이관 및 환경 정리 | `backup.sh import` |
+| **`update`**   | 최신 스크립트 실행본 설치 및 스케줄러/설정 갱신 | `backup.sh update` |
 | **`wizard`** | 초보자를 위해 백업 전 과정을 단계별 대화형으로 세팅해 주는 마법사 | `backup.sh wizard` |
 
 ### 📑 `audit` 상세 옵션
-* `--report`: 기본 표준 디렉터리(`/var/log/restic-backup/`) 하위에 인간 가독용 텍스트 보고서(`audit_report.txt`)와 기계 가독용 JSON 보고서(`audit_report.json`)를 동시 저장합니다.
-* `--report-file <경로>`: 지정된 파일명으로 텍스트 보고서를 저장하며, 동등한 위치에 확장자만 `.json`으로 변환된 JSON 보고서를 함께 자동 생성합니다.
+* `--report`: 기본 표준 디렉터리(`/data/backup/reports/`) 하위에 인간 가독용 텍스트/HTML 보고서와 기계 가독용 JSON 보고서를 동시 저장합니다.
+* `--report-file <경로>`: 지정된 파일명으로 텍스트 보고서를 저장하며, 동등한 위치에 확장자만 `.json` 및 `.html`로 변환된 보고서를 함께 자동 생성합니다.
+* `--path <경로>`: 보고서가 저장될 기본 디렉터리를 변경합니다.
+* `--daily`: 일일 백업 검토 보고서 모드로 실행합니다.
+* `--restore-drill`: 복구 모의훈련 보고서 모드로 실행합니다. (복원 대상 디렉터리: `--drill-restore-dir`)
+* `--ntp`: NTP 시각 동기화 점검 보고서 모드로 실행합니다.
+* `--audit-tester <이름>`, `--audit-ciso <이름>`, `--audit-rto <분>`: 보고서에 출력될 담당자 및 RTO를 동적으로 지정합니다.
+
 
 ---
 
@@ -371,6 +382,26 @@ $ sudo BACKUP_ENV_FILE=/etc/restic/log.env \
 
 * `--new-password`: 새로운 저장소에 지정할 비밀번호를 입력합니다. (생략 시 기존 저장소의 비밀번호를 기본 사용)
 * `--skip-check`: 마이그레이션 완료 후 무결성 검사(`restic check`) 단계를 스킵합니다. (대량 데이터 전송 시 시간 단축용)
+
+---
+
+
+### 5. 2차 원격 소산 백업 (Secondary Backup) 및 예외 처리
+
+`backup.sh`는 단일 호스트에서 1차 백업(예: SFTP)과 2차 원격 소산 백업(예: S3)을 동시에 구성하여 교차 보관(Cross-site Backup)을 지원합니다. 또한 특정 캐시나 임시 파일을 제외(`--exclude`)할 수 있습니다.
+
+#### A. 1차 + 2차 동시 백업 구성 예시
+```bash
+$ sudo ./backup.sh setting \
+    --backend sftp --host 192.168.1.100 --user backupuser --password '1st-pass' \
+    --targets /etc,/var/log --exclude '/var/log/journal/*,/tmp/*' \
+    --secondary-backend s3 --secondary-endpoint https://s3.amazonaws.com \
+    --secondary-bucket my-sec-bucket --secondary-access-key AK --secondary-secret-key SK \
+    --secondary-password '2nd-pass'
+```
+* `--exclude`: 백업에서 제외할 파일이나 디렉터리 패턴을 지정합니다 (쉼표로 여러 개 지정).
+* `--secondary-*`: 2차 소산지를 위한 백엔드 타입 및 인증 정보를 입력합니다. (비밀번호 생략 시 1차 암호를 상속합니다.)
+* `keep-*` 정책 역시 `--secondary-keep-daily` 등 2차 전용으로 별도 지정이 가능합니다.
 
 ---
 
