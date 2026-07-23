@@ -5,5 +5,7 @@ pub mod doctor;
 pub mod snapshots;
 pub mod restore;
 pub mod setup;
+pub mod config_cmd;
+
 
 
