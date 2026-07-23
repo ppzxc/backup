@@ -1,5 +1,5 @@
 use testcontainers::runners::SyncRunner;
-use testcontainers::GenericImage;
+use testcontainers::{GenericImage, ImageExt};
 
 #[test]
 fn test_sftp_container_lifecycle() {
