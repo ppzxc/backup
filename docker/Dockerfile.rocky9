@@ -1,0 +1,35 @@
+FROM rockylinux:9 as builder
+
+RUN dnf install -y --setopt=install_weak_deps=False --nodocs gcc gcc-c++ make openssl-devel && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo build --bin backup
+
+FROM rockylinux:9
+
+# Install lightweight database clients (mysqldump, pg_dump) without heavy server daemons
+RUN dnf install -y epel-release && \
+    dnf install -y --allowerasing --setopt=install_weak_deps=False --nodocs \
+    ca-certificates \
+    curl \
+    bash \
+    mariadb \
+    postgresql \
+    openssh-clients \
+    chrony \
+    unzip \
+    bzip2 && \
+    dnf clean all
+
+COPY --from=builder /app/target/debug/backup /usr/local/bin/backup
+RUN chmod +x /usr/local/bin/backup
+
+# Auto-install binary dependencies using backup setup dependencies command!
+RUN backup setup dependencies
+
+CMD ["backup", "--version"]

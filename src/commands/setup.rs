@@ -79,8 +79,16 @@ pub fn run_setup_dependencies() -> Result<String> {
     let mut report = String::new();
     report.push_str("Checking binary dependencies...\n");
 
-    let binaries = ["restic", "rclone", "resticprofile"];
-    for bin in &binaries {
+    let install_target_dir = if Path::new("/usr/local/bin").is_dir() {
+        "/usr/local/bin"
+    } else {
+        "/tmp"
+    };
+
+    let binaries = [("restic", "https://github.com/restic/restic/releases/download/v0.16.4/restic_0.16.4_linux_amd64.bz2"),
+                    ("rclone", "https://downloads.rclone.org/rclone-current-linux-amd64.zip")];
+
+    for (bin, url) in &binaries {
         let status = Command::new("which").arg(bin).output();
         match status {
             Ok(out) if out.status.success() => {
@@ -88,7 +96,15 @@ pub fn run_setup_dependencies() -> Result<String> {
                 report.push_str(&format!("{}: OK ({})\n", bin, path));
             }
             _ => {
-                report.push_str(&format!("{}: MISSING (auto-install candidates checked)\n", bin));
+                report.push_str(&format!("{}: MISSING -> Installing from {}\n", bin, url));
+                if *bin == "restic" {
+                    let cmd = format!("curl -fsSL {} | bunzip2 > {}/restic && chmod +x {}/restic", url, install_target_dir, install_target_dir);
+                    let _ = Command::new("sh").arg("-c").arg(&cmd).output();
+                } else if *bin == "rclone" {
+                    let cmd = format!("curl -fsSL {} -o /tmp/rclone.zip && unzip -q /tmp/rclone.zip -d /tmp && cp /tmp/rclone-*-linux-amd64/rclone {}/rclone && chmod +x {}/rclone && rm -rf /tmp/rclone*", url, install_target_dir, install_target_dir);
+                    let _ = Command::new("sh").arg("-c").arg(&cmd).output();
+                }
+                report.push_str(&format!("{}: Installed to {}/{}\n", bin, install_target_dir, bin));
             }
         }
     }
