@@ -8,6 +8,12 @@
 !/.gitattributes
 !/LICENSE
 !/Dockerfile.centos6
+!/Cargo.toml
+!/Cargo.lock
+!/src/
+!/src/**
+!/.superpowers/
+!/.superpowers/**
 !/tests/
 !/tests/**
 !/docs/
@@ -23,3 +29,8 @@
 !/docs/superpowers/**
 !/.github/
 !/.github/**
+
+
+# Added by cargo
+
+/target
