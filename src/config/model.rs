@@ -124,3 +124,96 @@ pub struct S3Config {
     pub secret_access_key: SecretString,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResticProfileConfig {
+    pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<ProfileSection>,
+    #[serde(flatten)]
+    pub profiles: std::collections::BTreeMap<String, ProfileSection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct ProfileSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inherit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup: Option<BackupCommandSection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prune: Option<PruneCommandSection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check: Option<CheckCommandSection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct BackupCommandSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule_permission: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule_priority: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule_ignore_on_battery_less_than: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_before: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_finally: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_before: Option<Vec<HttpHook>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_after: Option<Vec<HttpHook>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_after_fail: Option<HttpHook>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct PruneCommandSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_daily: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_weekly: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_monthly: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct CheckCommandSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct HttpHook {
+    pub method: String,
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<Vec<HeaderEntry>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct HeaderEntry {
+    pub name: String,
+    pub value: String,
+}
+

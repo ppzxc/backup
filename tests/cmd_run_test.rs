@@ -1,8 +1,10 @@
-use backup::commands::run::execute_run;
+use backup::commands::run::{execute_run, execute_run_profile};
 use backup::commands::status::execute_status;
 use backup::config::model::*;
 use backup::runner::restic::MockResticRunner;
+use backup::runner::resticprofile::MockResticProfileRunner;
 use secrecy::SecretString;
+use std::path::Path;
 
 #[test]
 fn test_execute_run() {
@@ -32,6 +34,14 @@ fn test_execute_run() {
     };
     let result = execute_run(&config, &mock_runner).unwrap();
     assert!(result.contains("backup complete"));
+}
+
+#[test]
+fn test_execute_run_profile() {
+    let mock_runner = MockResticProfileRunner::new(0, "resticprofile backup complete");
+    let config_path = Path::new("/etc/backup/profiles.yaml");
+    let result = execute_run_profile(config_path, "self", false, &mock_runner).unwrap();
+    assert_eq!(result, "resticprofile backup complete");
 }
 
 #[test]

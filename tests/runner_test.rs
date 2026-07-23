@@ -1,6 +1,8 @@
 use backup::runner::executor::{CommandOutput, CommandRunner, MockExecutor};
 use backup::runner::rclone::{MockRcloneRunner, RcloneRunner, RcloneTool};
 use backup::runner::restic::{MockResticRunner, ResticRunner, ResticTool};
+use backup::runner::resticprofile::{ResticProfileRunner, ResticProfileTool};
+use std::path::Path;
 
 #[test]
 fn test_mock_executor_recording() {
@@ -167,5 +169,41 @@ fn test_mock_rclone_runner() {
 
     let remotes = runner.list_remotes().unwrap();
     assert!(remotes.contains("remote_ok"));
+}
+
+#[test]
+fn test_resticprofile_tool_with_mock_executor() {
+    let mock = MockExecutor::new();
+    mock.push_output(
+        "resticprofile",
+        CommandOutput {
+            status_code: 0,
+            stdout: "profile backup ok".into(),
+            stderr: "".into(),
+        },
+    );
+    mock.push_output(
+        "resticprofile",
+        CommandOutput {
+            status_code: 0,
+            stdout: "schedule enabled".into(),
+            stderr: "".into(),
+        },
+    );
+
+    let tool = ResticProfileTool::new(&mock);
+    let path = Path::new("/etc/backup/profiles.yaml");
+
+    let backup_res = tool.backup(path, "self", false).unwrap();
+    assert_eq!(backup_res, "profile backup ok");
+
+    let sched_res = tool.schedule_enable(path).unwrap();
+    assert_eq!(sched_res, "schedule enabled");
+
+    let calls = mock.get_calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].0, "resticprofile");
+    assert_eq!(calls[0].1, vec!["--config", "/etc/backup/profiles.yaml", "--name", "self", "backup"]);
+    assert_eq!(calls[1].1, vec!["--config", "/etc/backup/profiles.yaml", "schedule", "--all"]);
 }
 

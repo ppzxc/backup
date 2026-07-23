@@ -173,3 +173,50 @@ fn test_invalid_yaml_parse_error() {
     assert!(res.is_err());
 }
 
+#[test]
+fn test_resticprofile_config_yaml() {
+    use backup::config::model::ResticProfileConfig;
+
+    let yaml = r#"
+version: "2"
+default:
+  repository: "s3:https://s3.amazonaws.com/mybucket"
+  password-file: "/etc/backup/restic-password"
+self:
+  inherit: "default"
+  backup:
+    source:
+      - "/var/www"
+    schedule: "*-*-* 03:00:00"
+    schedule-permission: "system"
+    schedule-priority: "background"
+    schedule-ignore-on-battery-less-than: 20
+    run-before: "/usr/local/bin/dump.sh"
+    send-after-fail:
+      method: "POST"
+      url: "https://hooks.slack.com/test"
+      body: '{"text":"failed"}'
+  prune:
+    schedule: "Sun 04:00:00"
+    keep-daily: 7
+    keep-weekly: 4
+    keep-monthly: 12
+"#;
+    let config: ResticProfileConfig = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(config.version, "2");
+    assert_eq!(
+        config.default.as_ref().unwrap().repository.as_deref(),
+        Some("s3:https://s3.amazonaws.com/mybucket")
+    );
+    let self_prof = config.profiles.get("self").unwrap();
+    assert_eq!(self_prof.inherit.as_deref(), Some("default"));
+
+    let backup_sec = self_prof.backup.as_ref().unwrap();
+    assert_eq!(backup_sec.source.as_ref().unwrap(), &vec!["/var/www".to_string()]);
+    assert_eq!(backup_sec.schedule_ignore_on_battery_less_than, Some(20));
+    assert_eq!(
+        backup_sec.send_after_fail.as_ref().unwrap().url,
+        "https://hooks.slack.com/test"
+    );
+}
+
