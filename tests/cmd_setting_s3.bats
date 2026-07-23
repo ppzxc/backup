@@ -46,7 +46,7 @@ setup() {
   # backup.env 내용 파싱 및 검증
   source "$BACKUP_ENV_FILE"
   [ "$SECONDARY_BACKEND" = "s3" ]
-  [ "$SECONDARY_RESTIC_REPOSITORY" = "s3:https://sec.s3.com/sec-bucket/$(hostname)" ]
+  [ "$SECONDARY_RESTIC_REPOSITORY" = "s3:https://sec.s3.com/sec-bucket/backup" ]
   [ "$SECONDARY_RESTIC_PASSWORD" = "secpass" ]
   [ "$SECONDARY_AWS_ACCESS_KEY_ID" = "SEC_AK" ]
   [ "$SECONDARY_AWS_SECRET_ACCESS_KEY" = "SEC_SK" ]

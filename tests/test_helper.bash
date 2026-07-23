@@ -23,6 +23,7 @@ setup_backup_sh_env() {
   export PATH="${STUB_BIN}:${PATH}"
 
   export REQUIRE_ROOT_CHECK=0
+  export GUM_DISABLE=1
 
   # shellcheck source=/dev/null
   source "${BATS_TEST_DIRNAME}/../backup.sh"

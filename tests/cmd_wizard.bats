@@ -189,15 +189,14 @@ setup() {
   [ "$output" = "rclone:syno_backup:/backup/my-nas-box" ]
 }
 
-@test "wizard uses hostname as default folder name when Enter is pressed at the profile-name prompt" {
+@test "wizard uses backup as default folder name when Enter is pressed at the profile-name prompt" {
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
     printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\n\n\n\n\nn\ny\n\n\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
-  local hostname_val; hostname_val=$(hostname)
   run config_get "RESTIC_REPOSITORY" "$BACKUP_ENV_FILE"
-  [ "$output" = "rclone:syno_backup:/backup/${hostname_val}" ]
+  [ "$output" = "rclone:syno_backup:/backup/backup" ]
 }
 
 @test "wizard shows folder name in confirm summary" {
@@ -212,8 +211,10 @@ setup() {
 @test "wizard configures audit report settings when requested" {
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
-    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\ny\n임꺽정\n정보보안부장 CISO\n60\n\n\n\nn\ny\n\n\n" | cmd_wizard
+    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\ny\n임꺽정\n정보보안부장 CISO\n60\nn\ny\n\nn\ny\n" | cmd_wizard
   '
+  echo "STATUS: $status"
+  echo "OUTPUT: $output"
   [ "$status" -eq 0 ]
   [ -f "$BACKUP_ENV_FILE" ]
   run config_get "audit_tester" "$BACKUP_ENV_FILE"
@@ -224,13 +225,10 @@ setup() {
   [ "$output" = "60" ]
 }
 
-
-
-
 @test "wizard configures DB backup settings when requested" {
   run bash -c '
     source "'"${BATS_TEST_DIRNAME}"'/../backup.sh"
-    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\nn\ny\nmariadb\n\n7\n4\n12\n\ny\n\nn\ny\n\n\n" | cmd_wizard
+    printf "2\n1.2.3.4\n22\nbackup_restic\n\nrepo-pass\n\n\nn\ny\nmariadb\n\n7\n4\n12\n\ny\n\nn\ny\n" | cmd_wizard
   '
   [ "$status" -eq 0 ]
   [ -f "$BACKUP_ENV_FILE" ]

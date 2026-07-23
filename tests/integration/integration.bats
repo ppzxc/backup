@@ -496,8 +496,8 @@ seed_databases() {
   dexec "bash backup.sh init"
   dexec "bash backup.sh run"
 
-  # Invalidate primary password to simulate primary failure without HTTP retry timeouts
-  dexec "sed -i 's|RESTIC_PASSWORD=.*|RESTIC_PASSWORD=\"invalid_wrong_pass\"|g' /etc/backup/backup.env"
+  # Invalidate primary AWS access key to simulate primary S3 auth failure (instant 403)
+  dexec "sed -i 's|AWS_ACCESS_KEY_ID=.*|AWS_ACCESS_KEY_ID=\"INVALID_ACCESS_KEY\"|g' /etc/backup/backup.env"
 
   run dexec "bash backup.sh audit --restore-drill --report-file /tmp/audit_failover.md"
   dexec "test -f /tmp/audit_failover.md"
@@ -584,8 +584,13 @@ seed_databases() {
 
   dexec "bash backup.sh init"
 
+  dexec "python3 -m http.server 9999 >/dev/null 2>&1 &"
+  sleep 1
+
   run dexec "bash backup.sh run"
   [ "$status" -eq 0 ]
+
+  dexec "pkill -f 'http.server 9999' || true"
 }
 
 

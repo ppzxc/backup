@@ -71,11 +71,11 @@ setup() {
   [ "$output" = "/custom/exclude/*" ]
 }
 
-@test "cmd_setting sftp defaults profile-name to hostname and honors --profile-name override" {
+@test "cmd_setting sftp defaults profile-name to backup and honors --profile-name override" {
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret
   [ "$status" -eq 0 ]
   run config_get "profile_name" "$BACKUP_ENV_FILE"
-  [ "$output" = "$(hostname)" ]
+  [ "$output" = "backup" ]
 
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret --profile-name web01 --force
   [ "$status" -eq 0 ]
@@ -89,12 +89,11 @@ setup() {
   [[ "$output" == *"profile-name"* ]]
 }
 
-@test "cmd_setting defaults profile-name to the raw hostname even when it is a dotted FQDN" {
-  stub_command "hostname" 'echo "funa1.nanoit.kr"'
+@test "cmd_setting defaults profile-name to backup when unset" {
   run cmd_setting --backend sftp --host 1.2.3.4 --port 22 --user backup_restic --password secret
   [ "$status" -eq 0 ]
   run config_get "profile_name" "$BACKUP_ENV_FILE"
-  [ "$output" = "funa1.nanoit.kr" ]
+  [ "$output" = "backup" ]
 }
 
 @test "cmd_setting sftp accepts --db-type and writes BACKUP_DB_TYPE to backup.env" {
