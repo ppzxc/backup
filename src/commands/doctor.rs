@@ -51,6 +51,14 @@ impl DiagnosticCollector {
     }
 }
 
+pub struct DiagnosticEngine;
+
+impl DiagnosticEngine {
+    pub fn run_diagnostics(host_name: &str, timestamp: &str) -> AuditDiagnosticResults {
+        DiagnosticCollector::collect(host_name, timestamp)
+    }
+}
+
 pub struct IsmsReportRenderer;
 
 impl IsmsReportRenderer {

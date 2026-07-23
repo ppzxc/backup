@@ -3,6 +3,7 @@ use std::path::Path;
 use secrecy::SecretString;
 use crate::config::model::*;
 
+#[derive(Clone)]
 pub struct SetupParams {
     pub profile: String,
     pub backup_type: BackupType,
@@ -203,11 +204,28 @@ pub fn create_default_config_file(path: &Path, profile: &str, target: &str, repo
     config.save_to_path(path)
 }
 
-pub fn run_setup_with_prompter<P: SetupPrompter>(config_path: &Path, prompter: &P, non_interactive: bool) -> Result<()> {
-    use std::io::IsTerminal;
-    if !non_interactive && cfg!(not(test)) && std::io::stdin().is_terminal() {
-        let params = prompter.prompt_setup_params()?;
-        let config = BackupConfig {
+pub struct SetupEngine;
+
+impl SetupEngine {
+    pub fn validate_and_build(params: SetupParams) -> Result<BackupConfig> {
+        let password_len = secrecy::ExposeSecret::expose_secret(&params.primary_storage.password).len();
+        if password_len < 12 {
+            anyhow::bail!("ISMS Compliance Error: Password must be at least 12 characters long.");
+        }
+
+        if params.primary_storage.backend == "sftp" {
+            let key_file = params
+                .primary_storage
+                .sftp
+                .as_ref()
+                .and_then(|s| s.key_file.as_deref())
+                .unwrap_or("");
+            if key_file.trim().is_empty() {
+                anyhow::bail!("ISMS Compliance Error: SFTP requires SSH key_file path for passwordless key-based authentication.");
+            }
+        }
+
+        Ok(BackupConfig {
             version: "1.0".into(),
             profile: params.profile,
             backup: BackupTargets {
@@ -217,20 +235,32 @@ pub fn run_setup_with_prompter<P: SetupPrompter>(config_path: &Path, prompter: &
             },
             retention: params.retention,
             storage: StorageConfig {
-                primary: params.primary_storage.clone(),
-                secondary: params.secondary_storage.clone(),
+                primary: params.primary_storage,
+                secondary: params.secondary_storage,
             },
-            reports: params.reports.clone(),
-        };
-
-        config.save_to_path(config_path)?;
-        if let Some(parent) = config_path.parent() {
-            crate::config::registry::ConfigurationRegistry::save_profile_config(&config, parent)?;
-        }
-    } else {
-        create_default_config_file(config_path, "default", "/data", "rclone:syno_backup:/backup", "default_secret_pass123")?;
+            reports: params.reports,
+        })
     }
-    Ok(())
+
+    pub fn run<P: SetupPrompter>(config_path: &Path, prompter: &P, non_interactive: bool) -> Result<()> {
+        use std::io::IsTerminal;
+        if !non_interactive && cfg!(not(test)) && std::io::stdin().is_terminal() {
+            let params = prompter.prompt_setup_params()?;
+            let config = Self::validate_and_build(params)?;
+
+            config.save_to_path(config_path)?;
+            if let Some(parent) = config_path.parent() {
+                crate::config::registry::ConfigurationRegistry::save_profile_config(&config, parent)?;
+            }
+        } else {
+            create_default_config_file(config_path, "default", "/data", "rclone:syno_backup:/backup", "default_secret_pass123")?;
+        }
+        Ok(())
+    }
+}
+
+pub fn run_setup_with_prompter<P: SetupPrompter>(config_path: &Path, prompter: &P, non_interactive: bool) -> Result<()> {
+    SetupEngine::run(config_path, prompter, non_interactive)
 }
 
 pub fn run_setup(config_path: &Path) -> Result<()> {

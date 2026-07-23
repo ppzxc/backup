@@ -103,3 +103,47 @@ fn test_setup_with_prompter_success() {
     assert!(loaded.storage.secondary.as_ref().unwrap().enabled);
     assert!(loaded.reports.enable_annual_dr_drill_report);
 }
+
+#[test]
+fn test_setup_engine_validation_rules() {
+    use backup::commands::setup::SetupEngine;
+
+    let mut params = SetupParams {
+        profile: "test".into(),
+        backup_type: BackupType::Directory,
+        targets: vec!["/data".into()],
+        excludes: vec![],
+        retention: RetentionPolicy { keep_daily: 30, keep_weekly: 4, keep_monthly: 12 },
+        primary_storage: StorageTarget {
+            backend: "sftp".into(),
+            repository: "sftp:host:/var/backups".into(),
+            password: SecretString::new("short_pass".into()),
+            sftp: Some(SftpConfig {
+                host: "host".into(),
+                port: 22,
+                user: "backup".into(),
+                key_file: Some("/etc/backup/id_rsa".into()),
+            }),
+            s3: None,
+        },
+        secondary_storage: None,
+        reports: ReportsConfig::default(),
+    };
+
+    // Password < 12 characters failure
+    let err = SetupEngine::validate_and_build(params.clone()).unwrap_err();
+    assert!(err.to_string().contains("ISMS Compliance Error: Password must be at least 12 characters long."));
+
+    // Fix password
+    params.primary_storage.password = SecretString::new("valid_password_123".into());
+
+    // SFTP key empty failure
+    params.primary_storage.sftp.as_mut().unwrap().key_file = Some("".into());
+    let err = SetupEngine::validate_and_build(params.clone()).unwrap_err();
+    assert!(err.to_string().contains("ISMS Compliance Error: SFTP requires SSH key_file path"));
+
+    // Valid setup build
+    params.primary_storage.sftp.as_mut().unwrap().key_file = Some("/etc/backup/id_rsa".into());
+    let config = SetupEngine::validate_and_build(params).unwrap();
+    assert_eq!(config.profile, "test");
+}

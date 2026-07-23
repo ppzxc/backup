@@ -30,6 +30,11 @@ fn test_diagnostic_collector_and_renderer_seam() {
     let html = renderer.render_html(&results);
     assert!(html.contains("host-abc"));
     assert!(html.contains("0700 / 0600"));
+
+    use backup::commands::doctor::DiagnosticEngine;
+    let engine_results = DiagnosticEngine::run_diagnostics("host-abc", "2026-07-23 12:00:00");
+    assert_eq!(engine_results.host_name, "host-abc");
+    assert!(engine_results.overall_pass);
 }
 
 #[test]

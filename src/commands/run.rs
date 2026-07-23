@@ -17,6 +17,8 @@ pub struct PipelineEngine<'a, R: ResticProfileRunner> {
     runner: &'a R,
 }
 
+pub type BackupRunner<'a, R> = PipelineEngine<'a, R>;
+
 impl<'a, R: ResticProfileRunner> PipelineEngine<'a, R> {
     pub fn new(runner: &'a R) -> Self {
         Self { runner }
