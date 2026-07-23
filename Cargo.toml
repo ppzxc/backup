@@ -15,8 +15,8 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 anyhow = "1.0"
 thiserror = "2.0"
+tempfile = "3.10"
 
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"
-tempfile = "3.10"
