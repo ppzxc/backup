@@ -479,14 +479,26 @@ pub fn build_download_command(bin: &str, url: &str, target_dir: &str) -> String 
     }
 }
 
+fn is_dir_writable(path: &str) -> bool {
+    let test_file = Path::new(path).join(".write_test");
+    if std::fs::write(&test_file, "test").is_ok() {
+        let _ = std::fs::remove_file(test_file);
+        true
+    } else {
+        false
+    }
+}
+
 pub fn run_setup_dependencies_with_runner<R: CommandRunner>(runner: &R) -> Result<String> {
     let mut report = String::new();
     report.push_str("Checking binary dependencies...\n");
 
-    let install_target_dir = if Path::new("/usr/local/bin").is_dir() {
-        "/usr/local/bin"
+    let home_bin = std::env::var("HOME").map(|h| format!("{}/.local/bin", h)).unwrap_or_else(|_| "/tmp".into());
+    let install_target_dir = if Path::new("/usr/local/bin").is_dir() && is_dir_writable("/usr/local/bin") {
+        "/usr/local/bin".to_string()
     } else {
-        "/tmp"
+        let _ = std::fs::create_dir_all(&home_bin);
+        home_bin
     };
 
     let binaries = [
@@ -504,7 +516,7 @@ pub fn run_setup_dependencies_with_runner<R: CommandRunner>(runner: &R) -> Resul
             }
             _ => {
                 report.push_str(&format!("{}: MISSING -> Installing from {}\n", bin, url));
-                let cmd = build_download_command(bin, url, install_target_dir);
+                let cmd = build_download_command(bin, url, &install_target_dir);
                 let _ = runner.run("sh", &["-c", &cmd]);
                 report.push_str(&format!("{}: Installed to {}/{}\n", bin, install_target_dir, bin));
             }

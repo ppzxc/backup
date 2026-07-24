@@ -7,7 +7,14 @@ set -eu
 OWNER="ppzxc"
 REPO="backup"
 BIN_NAME="backup"
-INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+# Default INSTALL_DIR: /usr/local/bin if writable or root, else $HOME/.local/bin
+if [ -z "${INSTALL_DIR:-}" ]; then
+  if [ "$(id -u)" -eq 0 ] || [ -w "/usr/local/bin" ]; then
+    INSTALL_DIR="/usr/local/bin"
+  else
+    INSTALL_DIR="$HOME/.local/bin"
+  fi
+fi
 
 # ==============================================================================
 # 1. OS 및 Rust Target Triple 감지
