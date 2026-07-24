@@ -89,7 +89,6 @@ impl BackupConfig {
                 version: "2".into(),
                 global: None,
                 groups: None,
-                default: None,
                 profiles: std::collections::BTreeMap::new(),
             })
         } else {
@@ -97,15 +96,14 @@ impl BackupConfig {
                 version: "2".into(),
                 global: None,
                 groups: None,
-                default: None,
                 profiles: std::collections::BTreeMap::new(),
             }
         };
 
         restic_config.version = "2".into();
 
-        // Populate default profile if not present or update repository/password
-        let mut default_profile = restic_config.default.unwrap_or_default();
+        // Populate default profile inside profiles map
+        let mut default_profile = restic_config.profiles.remove("default").unwrap_or_default();
         if default_profile.description.is_none() {
             default_profile.description = Some("Contains default parameters like repository and password".into());
         }
@@ -118,7 +116,7 @@ impl BackupConfig {
             env_map.insert("AWS_SECRET_ACCESS_KEY".into(), s3.secret_access_key.expose_secret().to_string());
             default_profile.env = Some(env_map);
         }
-        restic_config.default = Some(default_profile);
+        restic_config.profiles.insert("default".into(), default_profile);
 
         // Build current target profile section
         let profile_section = ProfileSection {
@@ -319,9 +317,7 @@ pub struct ResticProfileConfig {
     pub global: Option<GlobalSection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub groups: Option<std::collections::BTreeMap<String, GroupSection>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default: Option<ProfileSection>,
-    #[serde(flatten)]
+    #[serde(default)]
     pub profiles: std::collections::BTreeMap<String, ProfileSection>,
 }
 

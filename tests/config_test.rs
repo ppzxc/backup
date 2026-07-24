@@ -179,33 +179,35 @@ fn test_resticprofile_config_yaml() {
 
     let yaml = r#"
 version: "2"
-default:
-  repository: "s3:https://s3.amazonaws.com/mybucket"
-  password-file: "/etc/backup/restic-password"
-self:
-  inherit: "default"
-  backup:
-    source:
-      - "/var/www"
-    schedule: "*-*-* 03:00:00"
-    schedule-permission: "system"
-    schedule-priority: "background"
-    schedule-ignore-on-battery-less-than: 20
-    run-before: "/usr/local/bin/dump.sh"
-    send-after-fail:
-      method: "POST"
-      url: "https://hooks.slack.com/test"
-      body: '{"text":"failed"}'
-  prune:
-    schedule: "Sun 04:00:00"
-    keep-daily: 7
-    keep-weekly: 4
-    keep-monthly: 12
+profiles:
+  default:
+    repository: "s3:https://s3.amazonaws.com/mybucket"
+    password-file: "/etc/backup/restic-password"
+  self:
+    inherit: "default"
+    backup:
+      source:
+        - "/var/www"
+      schedule: "*-*-* 03:00:00"
+      schedule-permission: "system"
+      schedule-priority: "background"
+      schedule-ignore-on-battery-less-than: 20
+      run-before: "/usr/local/bin/dump.sh"
+      send-after-fail:
+        method: "POST"
+        url: "https://hooks.slack.com/test"
+        body: '{"text":"failed"}'
+    prune:
+      schedule: "Sun 04:00:00"
+      keep-daily: 7
+      keep-weekly: 4
+      keep-monthly: 12
 "#;
     let config: ResticProfileConfig = serde_yaml::from_str(yaml).unwrap();
     assert_eq!(config.version, "2");
+    let default_prof = config.profiles.get("default").unwrap();
     assert_eq!(
-        config.default.as_ref().unwrap().repository.as_deref(),
+        default_prof.repository.as_deref(),
         Some("s3:https://s3.amazonaws.com/mybucket")
     );
     let self_prof = config.profiles.get("self").unwrap();
