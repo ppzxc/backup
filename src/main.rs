@@ -33,6 +33,9 @@ enum Commands {
     },
     /// Execute backup pipeline / 백업 파이프라인 수동 실행
     Run {
+        /// Profile name to run (default: "default")
+        #[arg(long, short = 'p')]
+        profile: Option<String>,
         #[arg(long)]
         skip_database: bool,
         #[arg(long)]
@@ -202,11 +205,19 @@ fn main() -> anyhow::Result<()> {
         },
 
         Commands::Run {
+            profile,
             skip_database,
             skip_secondary_sync,
             skip_retention,
             dry_run,
         } => {
+            let target_profile = profile.unwrap_or_else(|| {
+                if !config.profile.is_empty() {
+                    config.profile.clone()
+                } else {
+                    "default".to_string()
+                }
+            });
             let opts = backup::commands::run::PipelineOptions {
                 skip_database,
                 skip_secondary_sync,
@@ -215,7 +226,7 @@ fn main() -> anyhow::Result<()> {
             };
             let out = backup::commands::run::execute_run_profile(
                 default_config_path,
-                "default",
+                &target_profile,
                 &opts,
                 &resticprofile,
             )?;

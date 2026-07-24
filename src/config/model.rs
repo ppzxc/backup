@@ -91,11 +91,17 @@ impl BackupConfig {
         };
 
         if existing_content.trim().is_empty() {
-            existing_content = format!(
+            let mut default_block = format!(
                 "version: \"2\"\ndefault:\n  repository: \"{}\"\n  password: \"{}\"\n",
                 self.storage.primary.repository,
                 self.storage.primary.password.expose_secret()
             );
+            if let Some(ref s3) = self.storage.primary.s3 {
+                default_block.push_str("  env:\n");
+                default_block.push_str(&format!("    AWS_ACCESS_KEY_ID: \"{}\"\n", s3.access_key_id));
+                default_block.push_str(&format!("    AWS_SECRET_ACCESS_KEY: \"{}\"\n", s3.secret_access_key.expose_secret()));
+            }
+            existing_content = default_block;
         }
 
         let new_profile_block = format!(

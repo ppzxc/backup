@@ -23,10 +23,17 @@ impl<'a, E: CommandRunner> ResticProfileTool<'a, E> {
 
     fn check_output(&self, output: CommandOutput) -> Result<String> {
         if output.status_code != 0 {
+            let err_msg = if !output.stderr.trim().is_empty() {
+                output.stderr.trim().to_string()
+            } else if !output.stdout.trim().is_empty() {
+                output.stdout.trim().to_string()
+            } else {
+                format!("command exited with status code {}", output.status_code)
+            };
             anyhow::bail!(
                 "resticprofile failed with exit code {}: {}",
                 output.status_code,
-                output.stderr
+                err_msg
             );
         }
         Ok(output.stdout)
