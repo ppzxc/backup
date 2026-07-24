@@ -6,6 +6,15 @@ fn test_cli_version() {
     cmd.arg("--version").assert().success();
 }
 
+#[test]
+fn test_cli_version_subcommand() {
+    let mut cmd = Command::cargo_bin("backup").unwrap();
+    let assert = cmd.arg("version").assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains(env!("CARGO_PKG_VERSION")), "backup version 출력에 CARGO_PKG_VERSION이 포함되어야 합니다");
+}
+
+
 /// LANG=ko_KR.UTF-8 환경에서 --help 출력이 한국어만 포함하는지 검증
 #[test]
 fn test_help_korean_when_lang_ko() {

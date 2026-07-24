@@ -3,7 +3,7 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use backup::i18n::Language;
 
 #[derive(Parser)]
-#[command(name = "backup", version = "0.1.5")]
+#[command(name = "backup", version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -65,6 +65,8 @@ enum Commands {
     Status,
     /// Self-update backup binary and assets / 바이너리 및 자산 자가 업데이트
     Update,
+    /// Display CLI binary version / CLI 바이너리 버전 표시
+    Version,
     /// Uninstall backup CLI and scheduled timers / 백업 CLI 및 스케줄러 삭제
     Uninstall {
         #[arg(long)]
@@ -259,8 +261,11 @@ fn main() -> anyhow::Result<()> {
             println!("{}", out);
         }
         Commands::Update => {
-            let out = backup::commands::update::execute_update_check("0.1.0")?;
+            let out = backup::commands::update::execute_update_check(env!("CARGO_PKG_VERSION"))?;
             println!("{}", out);
+        }
+        Commands::Version => {
+            println!("backup {}", env!("CARGO_PKG_VERSION"));
         }
         Commands::Uninstall { yes, .. } => {
             let out = backup::commands::uninstall::perform_uninstall(yes)?;

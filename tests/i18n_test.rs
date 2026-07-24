@@ -65,6 +65,7 @@ fn test_cli_help_korean_contains_only_korean() {
     assert!(h.cmd_snapshots.contains("스냅샷"), "snapshots 도움말이 한국어여야 합니다");
     assert!(h.cmd_status.contains("운영 상태"), "status 도움말이 한국어여야 합니다");
     assert!(h.cmd_update.contains("업데이트"), "update 도움말이 한국어여야 합니다");
+    assert!(h.cmd_version.contains("버전"), "version 도움말이 한국어여야 합니다");
     assert!(h.cmd_uninstall.contains("삭제"), "uninstall 도움말이 한국어여야 합니다");
 }
 
@@ -80,6 +81,7 @@ fn test_cli_help_english_contains_only_english() {
     assert!(h.cmd_snapshots.contains("snapshots"), "snapshots help must be English");
     assert!(h.cmd_status.contains("operational"), "status help must be English");
     assert!(h.cmd_update.contains("Self-update"), "update help must be English");
+    assert!(h.cmd_version.contains("version"), "version help must be English");
     assert!(h.cmd_uninstall.contains("Uninstall"), "uninstall help must be English");
 }
 
@@ -108,6 +110,7 @@ fn test_cli_help_no_korean_mode_with_english_keywords_all_fields() {
         ("cmd_snapshots",          h.cmd_snapshots),
         ("cmd_status",             h.cmd_status),
         ("cmd_update",             h.cmd_update),
+        ("cmd_version",            h.cmd_version),
         ("cmd_uninstall",          h.cmd_uninstall),
         ("cmd_setup_dependencies", h.cmd_setup_dependencies),
         ("cmd_setup_backend_init", h.cmd_setup_backend_init),
@@ -165,6 +168,7 @@ fn test_cli_help_no_english_mode_with_korean_chars_all_fields() {
         ("cmd_snapshots",          h.cmd_snapshots),
         ("cmd_status",             h.cmd_status),
         ("cmd_update",             h.cmd_update),
+        ("cmd_version",            h.cmd_version),
         ("cmd_uninstall",          h.cmd_uninstall),
         ("cmd_setup_dependencies", h.cmd_setup_dependencies),
         ("cmd_setup_backend_init", h.cmd_setup_backend_init),

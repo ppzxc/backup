@@ -279,8 +279,7 @@ impl SetupEngine {
     }
 
     pub fn run<P: SetupPrompter>(config_path: &Path, prompter: &P, non_interactive: bool, lang_opt: Option<Language>) -> Result<()> {
-        use std::io::IsTerminal;
-        if !non_interactive && cfg!(not(test)) && std::io::stdin().is_terminal() {
+        if !non_interactive {
             let params = prompter.prompt_setup_params(lang_opt)?;
             let config = Self::validate_and_build(params)?;
 
@@ -357,7 +356,6 @@ pub fn run_setup_dependencies() -> Result<String> {
     let runner = SystemExecutor;
     run_setup_dependencies_with_runner(&runner)
 }
-
 
 
 

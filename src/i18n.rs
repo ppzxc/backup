@@ -153,6 +153,7 @@ pub struct CliHelp {
     pub cmd_snapshots: &'static str,
     pub cmd_status: &'static str,
     pub cmd_update: &'static str,
+    pub cmd_version: &'static str,
     pub cmd_uninstall: &'static str,
     // setup sub-subcommands
     pub cmd_setup_dependencies: &'static str,
@@ -206,6 +207,7 @@ impl CliHelp {
                 cmd_snapshots: "1차·2차 저장소의 스냅샷 목록 조회",
                 cmd_status: "운영 상태 및 스냅샷 주기 확인",
                 cmd_update: "백업 바이너리 및 자산 자가 업데이트",
+                cmd_version: "CLI 바이너리 버전 표시",
                 cmd_uninstall: "백업 CLI 및 스케줄러 삭제",
                 cmd_setup_dependencies: "필수 바이너리 의존성(restic, rclone, resticprofile) 확인 및 다운로드",
                 cmd_setup_backend_init: "1차·2차 백엔드 어댑터 저장소 초기화",
@@ -246,6 +248,7 @@ impl CliHelp {
                 cmd_snapshots: "List snapshots across primary and secondary storage targets",
                 cmd_status: "Display operational status and snapshot recency",
                 cmd_update: "Self-update backup binary and assets",
+                cmd_version: "Display CLI binary version",
                 cmd_uninstall: "Uninstall backup CLI and scheduled timers",
                 cmd_setup_dependencies: "Verify and download required binary dependencies (restic, rclone, resticprofile)",
                 cmd_setup_backend_init: "Initialize primary and secondary backend adapter repositories",
@@ -355,6 +358,7 @@ impl CliHelp {
         cmd = cmd.mut_subcommand("snapshots", |c| c.about(self.cmd_snapshots));
         cmd = cmd.mut_subcommand("status", |c| c.about(self.cmd_status));
         cmd = cmd.mut_subcommand("update", |c| c.about(self.cmd_update));
+        cmd = cmd.mut_subcommand("version", |c| c.about(self.cmd_version));
 
         cmd = cmd.mut_subcommand("uninstall", |c| {
             c.about(self.cmd_uninstall)
