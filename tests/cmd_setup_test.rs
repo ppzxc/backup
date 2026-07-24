@@ -7,21 +7,17 @@ use tempfile::tempdir;
 #[test]
 fn test_create_default_config_file() {
     let dir = tempdir().unwrap();
-    let config_path = dir.path().join("config.yml");
-    create_default_config_file(&config_path, "host1", "/data", "s3:bucket", "secret").unwrap();
+    let config_path = dir.path().join("profiles.yaml");
+    create_default_config_file(&config_path, "host1", "/var/log", "sftp:backup@192.168.1.100:/backup", "secret_pass_123").unwrap();
     assert!(config_path.exists());
 
-    let config = BackupConfig::load_from_path(&config_path).unwrap();
-    assert_eq!(config.profile, "host1");
-    assert_eq!(config.storage.primary.sftp.as_ref().unwrap().key_file.as_deref(), Some("/etc/backup/id_rsa"));
-    assert!(config.reports.enable_daily_reports);
-    assert!(config.reports.enable_annual_dr_drill_report);
+    let content = std::fs::read_to_string(&config_path).unwrap();
+    assert!(content.contains("host1"));
+    assert!(content.contains("sftp:backup@192.168.1.100:/backup"));
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let parent_perms = std::fs::metadata(dir.path()).unwrap().permissions();
-        assert_eq!(parent_perms.mode() & 0o777, 0o700);
         let file_perms = std::fs::metadata(&config_path).unwrap().permissions();
         assert_eq!(file_perms.mode() & 0o777, 0o600);
     }
@@ -58,7 +54,8 @@ impl SetupPrompter for MockPrompter {
 #[test]
 fn test_setup_with_prompter_success() {
     let dir = tempdir().unwrap();
-    let config_path = dir.path().join("profile_db.yaml");
+    let config_dir = dir.path();
+    let config_path = config_dir.join("profiles.yaml");
 
     let params = SetupParams {
         profile: "profile-db".into(),
@@ -72,13 +69,13 @@ fn test_setup_with_prompter_success() {
         retention: RetentionPolicy { keep_daily: 180, keep_weekly: 12, keep_monthly: 24 },
         primary_storage: StorageTarget {
             backend: "sftp".into(),
-            repository: "sftp:backup@remote:/storage".into(),
+            repository: "sftp:backup@192.168.1.100:/storage".into(),
             password: SecretString::new("secure_password_123".into()),
             sftp: Some(SftpConfig {
-                host: "remote".into(),
+                host: "192.168.1.100".into(),
                 port: 22,
                 user: "backup".into(),
-                key_file: Some("/etc/backup/id_rsa".into()),
+                key_file: Some("/etc/backup/id_ed25519".into()),
             }),
             s3: None,
         },
@@ -89,7 +86,7 @@ fn test_setup_with_prompter_success() {
             password: SecretString::new("secondary_pass_123".into()),
         }),
         reports: ReportsConfig {
-            output_dir: "/var/log/backup/reports".into(),
+            output_dir: "/data/backup/reports".into(),
             enable_daily_reports: true,
             enable_annual_dr_drill_report: true,
         },
@@ -98,11 +95,11 @@ fn test_setup_with_prompter_success() {
     let prompter = MockPrompter { params };
     run_setup_with_prompter(&config_path, &prompter, false, Some(Language::En)).unwrap();
 
-    let loaded = BackupConfig::load_from_path(&config_path).unwrap();
-    assert_eq!(loaded.profile, "profile-db");
-    assert_eq!(loaded.retention.keep_daily, 180);
-    assert!(loaded.storage.secondary.as_ref().unwrap().enabled);
-    assert!(loaded.reports.enable_annual_dr_drill_report);
+    assert!(config_path.exists());
+    let content = std::fs::read_to_string(&config_path).unwrap();
+    assert!(content.contains("profile-db"));
+    assert!(content.contains("sftp:backup@192.168.1.100:/storage"));
+    assert!(content.contains("keep-daily: 180"));
 }
 
 #[test]

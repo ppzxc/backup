@@ -244,10 +244,7 @@ storage:
     let config: BackupConfig = serde_yaml::from_str(yaml).unwrap();
     config.save_and_sync(&config_dir).unwrap();
 
-    let env_file = config_dir.join("backup.env");
     let profiles_file = config_dir.join("profiles.yaml");
-
-    assert!(env_file.exists());
     assert!(profiles_file.exists());
 
     let profiles_content = fs::read_to_string(&profiles_file).unwrap();
@@ -258,10 +255,72 @@ storage:
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let env_mode = fs::metadata(&env_file).unwrap().permissions().mode() & 0o777;
         let prof_mode = fs::metadata(&profiles_file).unwrap().permissions().mode() & 0o777;
-        assert_eq!(env_mode, 0o600);
         assert_eq!(prof_mode, 0o600);
     }
 }
+
+#[test]
+fn test_profiles_yaml_single_file_unification_and_merge() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("etc_backup");
+
+    let yaml1 = r#"
+version: "1.0"
+profile: "log"
+backup:
+  targets: ["/var/log"]
+  excludes: []
+retention:
+  keepDaily: 7
+  keepWeekly: 4
+  keepMonthly: 12
+storage:
+  primary:
+    backend: "sftp"
+    repository: "sftp:backup@192.168.1.100:/backup"
+    password: "secret_pass_123"
+"#;
+    let config1: BackupConfig = serde_yaml::from_str(yaml1).unwrap();
+    config1.save_and_sync(&config_dir).unwrap();
+
+    let env_file = config_dir.join("backup.env");
+    let config_yml = config_dir.join("config.yml");
+    let profiles_file = config_dir.join("profiles.yaml");
+
+    // Only profiles.yaml should exist (no backup.env, no config.yml)
+    assert!(!env_file.exists(), "backup.env should not be created");
+    assert!(!config_yml.exists(), "config.yml should not be created");
+    assert!(profiles_file.exists(), "profiles.yaml must exist");
+
+    let content1 = fs::read_to_string(&profiles_file).unwrap();
+    assert!(content1.contains("log:"));
+    assert!(content1.contains("sftp:backup@192.168.1.100:/backup"));
+
+    // Now save a second profile "db"
+    let yaml2 = r#"
+version: "1.0"
+profile: "db"
+backup:
+  targets: ["db-stream:mysql"]
+  excludes: []
+retention:
+  keepDaily: 180
+  keepWeekly: 12
+  keepMonthly: 24
+storage:
+  primary:
+    backend: "s3"
+    repository: "s3:https://s3.amazonaws.com/db-backups"
+    password: "secret_pass_123"
+"#;
+    let config2: BackupConfig = serde_yaml::from_str(yaml2).unwrap();
+    config2.save_and_sync(&config_dir).unwrap();
+
+    let content2 = fs::read_to_string(&profiles_file).unwrap();
+    // Both log and db profiles must exist
+    assert!(content2.contains("log:"), "Original 'log' profile must be preserved");
+    assert!(content2.contains("db:"), "New 'db' profile must be merged");
+}
+
 

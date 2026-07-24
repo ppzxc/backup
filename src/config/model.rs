@@ -22,7 +22,7 @@ pub struct ReportsConfig {
 impl Default for ReportsConfig {
     fn default() -> Self {
         Self {
-            output_dir: "/var/log/backup/reports".into(),
+            output_dir: "/data/backup/reports".into(),
             enable_daily_reports: true,
             enable_annual_dr_drill_report: true,
         }
@@ -74,15 +74,32 @@ impl BackupConfig {
     }
 
     pub fn save_and_sync(&self, config_dir: &Path) -> Result<()> {
-        let env_file = config_dir.join("backup.env");
-        self.save_to_path(&env_file)?;
+        if !config_dir.exists() {
+            fs::create_dir_all(config_dir)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(config_dir, fs::Permissions::from_mode(0o700))?;
+            }
+        }
 
-        // Render resticprofile YAML structure
         let profiles_yaml_path = config_dir.join("profiles.yaml");
-        let profile_yaml = format!(
-            "version: \"2\"\ndefault:\n  repository: \"{}\"\n  password: \"{}\"\n{}:\n  inherit: \"default\"\n  backup:\n    source:\n{}\n    schedule: \"*-*-* 03:00:00\"\n  retention:\n    keep-daily: {}\n    keep-weekly: {}\n    keep-monthly: {}\n",
-            self.storage.primary.repository,
-            self.storage.primary.password.expose_secret(),
+        let mut existing_content = if profiles_yaml_path.exists() {
+            fs::read_to_string(&profiles_yaml_path).unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        if existing_content.trim().is_empty() {
+            existing_content = format!(
+                "version: \"2\"\ndefault:\n  repository: \"{}\"\n  password: \"{}\"\n",
+                self.storage.primary.repository,
+                self.storage.primary.password.expose_secret()
+            );
+        }
+
+        let new_profile_block = format!(
+            "{}:\n  inherit: \"default\"\n  backup:\n    source:\n{}\n    schedule: \"*-*-* 03:00:00\"\n  retention:\n    keep-daily: {}\n    keep-weekly: {}\n    keep-monthly: {}\n",
             self.profile,
             self.backup.targets.iter().map(|t| format!("      - \"{}\"", t)).collect::<Vec<_>>().join("\n"),
             self.retention.keep_daily,
@@ -90,7 +107,24 @@ impl BackupConfig {
             self.retention.keep_monthly
         );
 
-        fs::write(&profiles_yaml_path, profile_yaml)?;
+        let profile_key = format!("{}:", self.profile);
+        if let Some(pos) = existing_content.find(&profile_key) {
+            // Find end of section (next unindented profile header or EOF)
+            let rest = &existing_content[pos..];
+            let block_end = rest[profile_key.len()..]
+                .find("\n\n")
+                .or_else(|| rest[profile_key.len()..].find("\n[a-zA-Z0-9_]+:"))
+                .map(|p| pos + profile_key.len() + p)
+                .unwrap_or(existing_content.len());
+            existing_content.replace_range(pos..block_end, new_profile_block.trim_end());
+        } else {
+            if !existing_content.ends_with('\n') {
+                existing_content.push('\n');
+            }
+            existing_content.push_str(&new_profile_block);
+        }
+
+        fs::write(&profiles_yaml_path, existing_content)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

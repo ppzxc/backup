@@ -136,7 +136,7 @@ enum ScheduleAction {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let default_config_path = std::path::Path::new("/etc/backup/config.yml");
+    let default_config_path = std::path::Path::new("/etc/backup/profiles.yaml");
     let config = backup::config::model::BackupConfig::load_from_path(default_config_path).unwrap_or_default();
     let executor = backup::runner::executor::SystemExecutor;
     let rclone = backup::runner::rclone::RcloneTool::new(&executor);

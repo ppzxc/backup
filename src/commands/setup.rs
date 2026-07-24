@@ -52,7 +52,7 @@ impl SetupPrompter for InquirePrompter {
 
         let (backup_type, targets) = if backup_type_choice.starts_with("[1]") {
             let t = inquire::Text::new(msg.enter_target_dir)
-                .with_default("/data")
+                .with_default("/var/log")
                 .prompt()?;
             let target_list: Vec<String> = t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
             (BackupType::Directory, target_list)
@@ -76,7 +76,7 @@ impl SetupPrompter for InquirePrompter {
 
         // Retention defaults depending on type
         let (default_daily, default_weekly, default_monthly) = match backup_type {
-            BackupType::Directory => (30, 4, 12),
+            BackupType::Directory => (7, 4, 12),
             BackupType::DbStream { .. } => (180, 12, 24),
         };
 
@@ -94,9 +94,55 @@ impl SetupPrompter for InquirePrompter {
         let backend = inquire::Select::new(msg.primary_storage_backend, vec!["sftp", "s3", "local"])
             .prompt()?;
 
-        let repository = inquire::Text::new(msg.primary_repo_uri)
-            .with_default("sftp:user@backup-server:/var/backups")
-            .prompt()?;
+        let (repository, sftp_config) = if backend == "sftp" {
+            let host = inquire::Text::new(msg.sftp_host).with_default("192.168.1.100").prompt()?;
+            let port = inquire::CustomType::<u16>::new(msg.sftp_port).with_default(22).prompt()?;
+            let user = inquire::Text::new(msg.sftp_user).with_default("backup").prompt()?;
+            let path = inquire::Text::new(msg.sftp_path).with_default("/backup").prompt()?;
+
+            let gen_key = inquire::Confirm::new(msg.sftp_auto_gen_key).with_default(true).prompt()?;
+            let key_file = if gen_key {
+                let key_path = "/etc/backup/id_ed25519";
+                let pub_path = "/etc/backup/id_ed25519.pub";
+                if !Path::new(key_path).exists() {
+                    let _ = std::process::Command::new("ssh-keygen")
+                        .args(["-t", "ed25519", "-N", "", "-f", key_path])
+                        .output();
+                }
+                if let Ok(pub_key) = std::fs::read_to_string(pub_path) {
+                    println!("\n=== SSH Public Key (/etc/backup/id_ed25519.pub) ===");
+                    println!("{}", pub_key.trim());
+                    println!("Please register this public key into remote server's ~/.ssh/authorized_keys\n");
+                }
+                key_path.to_string()
+            } else {
+                let k = inquire::Text::new(msg.sftp_key_file)
+                    .with_default("/etc/backup/id_rsa")
+                    .prompt()?;
+                if k.trim().is_empty() {
+                    anyhow::bail!(msg.isms_sftp_key_error);
+                }
+                k
+            };
+
+            let repo_uri = format!("sftp:{}@{}:{}", user, host, path);
+            (repo_uri, Some(SftpConfig {
+                host,
+                port,
+                user,
+                key_file: Some(key_file),
+            }))
+        } else if backend == "s3" {
+            let repo_uri = inquire::Text::new(msg.primary_repo_uri)
+                .with_default("s3:https://s3.amazonaws.com/my-backup-bucket")
+                .prompt()?;
+            (repo_uri, None)
+        } else {
+            let repo_uri = inquire::Text::new(msg.primary_repo_uri)
+                .with_default("/data/backup")
+                .prompt()?;
+            (repo_uri, None)
+        };
 
         let password = inquire::Password::new(msg.enter_encryption_password)
             .without_confirmation()
@@ -105,26 +151,6 @@ impl SetupPrompter for InquirePrompter {
         if password.len() < 12 {
             anyhow::bail!(msg.isms_password_error);
         }
-
-        let sftp_config = if backend == "sftp" {
-            let host = inquire::Text::new(msg.sftp_host).with_default("backup-server").prompt()?;
-            let port = inquire::CustomType::<u16>::new(msg.sftp_port).with_default(22).prompt()?;
-            let user = inquire::Text::new(msg.sftp_user).with_default("backup").prompt()?;
-            let key_file = inquire::Text::new(msg.sftp_key_file)
-                .with_default("/etc/backup/id_rsa")
-                .prompt()?;
-            if key_file.trim().is_empty() {
-                anyhow::bail!(msg.isms_sftp_key_error);
-            }
-            Some(SftpConfig {
-                host,
-                port,
-                user,
-                key_file: Some(key_file),
-            })
-        } else {
-            None
-        };
 
         let primary_storage = StorageTarget {
             backend: backend.to_string(),
@@ -158,10 +184,12 @@ impl SetupPrompter for InquirePrompter {
             .with_default(true)
             .prompt()?;
 
+        let report_dir_path = "/data/backup/reports";
         let reports = if enable_reports {
             let output_dir = inquire::Text::new(msg.report_export_dir)
-                .with_default("/var/log/backup/reports")
+                .with_default(report_dir_path)
                 .prompt()?;
+            let _ = std::fs::create_dir_all(&output_dir);
             ReportsConfig {
                 output_dir,
                 enable_daily_reports: true,
@@ -169,7 +197,7 @@ impl SetupPrompter for InquirePrompter {
             }
         } else {
             ReportsConfig {
-                output_dir: "/var/log/backup/reports".into(),
+                output_dir: report_dir_path.into(),
                 enable_daily_reports: false,
                 enable_annual_dr_drill_report: false,
             }
@@ -201,17 +229,17 @@ pub fn create_default_config_file(path: &Path, profile: &str, target: &str, repo
             targets: vec![target.into()],
             excludes: vec![],
         },
-        retention: RetentionPolicy { keep_daily: 30, keep_weekly: 4, keep_monthly: 12 },
+        retention: RetentionPolicy { keep_daily: 7, keep_weekly: 4, keep_monthly: 12 },
         storage: StorageConfig {
             primary: StorageTarget {
                 backend: "sftp".into(),
                 repository: repo.into(),
                 password: SecretString::new(pwd.into()),
                 sftp: Some(SftpConfig {
-                    host: "backup-server".into(),
+                    host: "192.168.1.100".into(),
                     port: 22,
                     user: "backup".into(),
-                    key_file: Some("/etc/backup/id_rsa".into()),
+                    key_file: Some("/etc/backup/id_ed25519".into()),
                 }),
                 s3: None,
             },
@@ -219,7 +247,8 @@ pub fn create_default_config_file(path: &Path, profile: &str, target: &str, repo
         },
         reports: ReportsConfig::default(),
     };
-    config.save_to_path(path)
+    let config_dir = path.parent().unwrap_or(path);
+    config.save_and_sync(config_dir)
 }
 
 pub struct SetupEngine;
@@ -266,12 +295,13 @@ impl SetupEngine {
             let params = prompter.prompt_setup_params(lang_opt)?;
             let config = Self::validate_and_build(params)?;
 
-            config.save_to_path(config_path)?;
             if let Some(parent) = config_path.parent() {
                 crate::config::registry::ConfigurationRegistry::save_profile_config(&config, parent)?;
+            } else {
+                crate::config::registry::ConfigurationRegistry::save_profile_config(&config, config_path)?;
             }
         } else {
-            create_default_config_file(config_path, "default", "/data", "rclone:syno_backup:/backup", "default_secret_pass123")?;
+            create_default_config_file(config_path, "default", "/var/log", "sftp:backup@192.168.1.100:/backup", "default_secret_pass123")?;
         }
         Ok(())
     }
