@@ -28,7 +28,7 @@ struct MockPrompter {
 }
 
 impl SetupPrompter for MockPrompter {
-    fn prompt_setup_params(&self, _lang_opt: Option<Language>) -> anyhow::Result<SetupParams> {
+    fn prompt_setup_params(&self, _lang_opt: Option<Language>, _config_dir: &std::path::Path) -> anyhow::Result<SetupParams> {
         if self.params.primary_storage.backend == "sftp" {
             let key = self.params.primary_storage.sftp.as_ref().and_then(|s| s.key_file.as_deref()).unwrap_or("");
             if key.trim().is_empty() {
@@ -236,7 +236,7 @@ fn test_setup_auto_detects_language_when_lang_opt_none() {
         received_lang: Arc<Mutex<Option<Language>>>,
     }
     impl SetupPrompter for CapturingPrompter {
-        fn prompt_setup_params(&self, lang_opt: Option<Language>) -> anyhow::Result<SetupParams> {
+        fn prompt_setup_params(&self, lang_opt: Option<Language>, _config_dir: &std::path::Path) -> anyhow::Result<SetupParams> {
             *self.received_lang.lock().unwrap() = lang_opt;
             anyhow::bail!("capture_only") // 언어 캡처가 목적이므로 에러로 조기 종료
         }

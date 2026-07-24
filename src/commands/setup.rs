@@ -17,7 +17,7 @@ pub struct SetupParams {
 }
 
 pub trait SetupPrompter {
-    fn prompt_setup_params(&self, lang_opt: Option<Language>) -> Result<SetupParams>;
+    fn prompt_setup_params(&self, lang_opt: Option<Language>, config_dir: &Path) -> Result<SetupParams>;
 }
 
 pub struct InquirePrompter;
@@ -41,7 +41,7 @@ fn prompt_text_with_default(msg: &str, default_val: &str, lang: Language) -> Res
 }
 
 impl SetupPrompter for InquirePrompter {
-    fn prompt_setup_params(&self, lang_opt: Option<Language>) -> Result<SetupParams> {
+    fn prompt_setup_params(&self, lang_opt: Option<Language>, config_dir: &Path) -> Result<SetupParams> {
         // lang_opt은 항상 Some(..)으로 전달됩니다 (호출자가 detect()로 채워줌).
         // 만약을 위해 None이면 detect()로 fallback합니다.
         let lang = lang_opt.unwrap_or_else(Language::detect);
@@ -92,7 +92,14 @@ impl SetupPrompter for InquirePrompter {
             .prompt()?;
 
         // Primary & Secondary Storage Setup
-        let profiles_yaml_path = Path::new("/etc/backup/profiles.yaml");
+        let target_profiles_path = config_dir.join("profiles.yaml");
+        let default_yaml_path = Path::new("/etc/backup/profiles.yaml");
+        let profiles_yaml_path = if target_profiles_path.exists() {
+            target_profiles_path.as_path()
+        } else {
+            default_yaml_path
+        };
+
         let existing_restic = if profiles_yaml_path.exists() {
             ResticProfileConfig::load_from_path(profiles_yaml_path).ok()
         } else {
@@ -420,7 +427,7 @@ impl SetupEngine {
         };
 
         if !non_interactive {
-            let params = prompter.prompt_setup_params(lang_opt)?;
+            let params = prompter.prompt_setup_params(lang_opt, config_dir)?;
             let config = Self::validate_and_build(params)?;
             crate::config::registry::ConfigurationRegistry::save_profile_config(&config, config_dir)?;
         } else {
