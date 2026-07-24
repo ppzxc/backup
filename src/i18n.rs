@@ -83,6 +83,9 @@ pub struct I18nMessages {
 
     // Storage reuse and SFTP key setup
     pub reuse_existing_storage_prompt: &'static str,
+    pub reuse_existing_storage_label: &'static str,
+    pub reuse_primary_label: &'static str,
+    pub reuse_secondary_label: &'static str,
     pub sftp_pubkey_notice: &'static str,
     pub sftp_press_enter: &'static str,
 }
@@ -134,7 +137,10 @@ impl I18nMessages {
                 s3_bucket: "S3 버킷 이름:",
                 s3_path: "S3 버킷 내 하위 폴더 경로 (예: backup, log 등 / 생략 가능):",
 
-                reuse_existing_storage_prompt: "기존 1차/2차 저장소 설정을 그대로 사용하시겠습니까?",
+                reuse_existing_storage_prompt: "그대로 사용하시겠습니까?",
+                reuse_existing_storage_label: "기존 저장소 확인",
+                reuse_primary_label: "1차",
+                reuse_secondary_label: "2차",
                 sftp_pubkey_notice: "SFTP 원격 서버의 ~/.ssh/authorized_keys 파일에 아래 공개키를 등록하세요:",
                 sftp_press_enter: "원격 서버 설정 완료 후 [Enter]를 누르면 다음으로 진행합니다...",
             },
@@ -182,7 +188,10 @@ impl I18nMessages {
                 s3_bucket: "S3 Bucket Name:",
                 s3_path: "S3 Bucket Subfolder Path (e.g. backup, log / optional):",
 
-                reuse_existing_storage_prompt: "Use existing Primary/Secondary storage configuration?",
+                reuse_existing_storage_prompt: "Use as-is?",
+                reuse_existing_storage_label: "Existing storage found",
+                reuse_primary_label: "Primary",
+                reuse_secondary_label: "Secondary",
                 sftp_pubkey_notice: "Register the following public key in the remote server's ~/.ssh/authorized_keys file:",
                 sftp_press_enter: "After configuring the remote server, press [Enter] to continue...",
             },

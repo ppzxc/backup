@@ -109,14 +109,18 @@ impl SetupPrompter for InquirePrompter {
         let primary_prof = existing_restic.as_ref().and_then(|c| c.profiles.get("primary"));
         let reuse_storage = if let Some(p) = primary_prof {
             if let Some(ref repo) = p.repository {
-                println!("\n[i] Found existing storage configuration:");
-                println!("    Primary Repository: {}", repo);
-                if let Some(sec) = existing_restic.as_ref().and_then(|c| c.profiles.get("secondary")) {
-                    if let Some(ref sec_repo) = sec.repository {
-                        println!("    Secondary Repository: {}", sec_repo);
-                    }
-                }
-                inquire::Confirm::new(msg.reuse_existing_storage_prompt)
+                let sec_repo = existing_restic.as_ref()
+                    .and_then(|c| c.profiles.get("secondary"))
+                    .and_then(|s| s.repository.as_deref())
+                    .unwrap_or("-");
+                let prompt_label = format!(
+                    "{} ({}: {}, {}: {}) — {}",
+                    msg.reuse_existing_storage_label,
+                    msg.reuse_primary_label, repo,
+                    msg.reuse_secondary_label, sec_repo,
+                    msg.reuse_existing_storage_prompt
+                );
+                inquire::Confirm::new(&prompt_label)
                     .with_default(true)
                     .prompt()?
             } else {
