@@ -7,6 +7,15 @@ fn test_cli_version() {
 }
 
 #[test]
+fn test_bilingual_help_output() {
+    let mut cmd = Command::cargo_bin("backup").unwrap();
+    let assert = cmd.arg("--help").assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("백업 환경 및 프로필 설정 마법사"));
+    assert!(stdout.contains("백업 설정 레지스트리 관리"));
+}
+
+#[test]
 fn test_subcommands_not_placeholder() {
     let subcommands = vec![
         vec!["setup", "--help"],

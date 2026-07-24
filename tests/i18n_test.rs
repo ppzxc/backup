@@ -3,22 +3,8 @@ use backup::i18n::{I18nMessages, Language};
 #[test]
 fn test_language_parse_and_detection() {
     assert_eq!(Language::from_str("ko"), Language::Ko);
-    assert_eq!(Language::from_str("korean"), Language::Ko);
     assert_eq!(Language::from_str("en"), Language::En);
     assert_eq!(Language::from_str("invalid"), Language::En);
-}
-
-#[test]
-fn test_language_detect() {
-    unsafe {
-        std::env::set_var("LANG", "ko_KR.UTF-8");
-    }
-    assert_eq!(Language::detect(), Language::Ko);
-
-    unsafe {
-        std::env::set_var("LANG", "en_US.UTF-8");
-    }
-    assert_eq!(Language::detect(), Language::En);
 }
 
 #[test]

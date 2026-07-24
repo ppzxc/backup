@@ -15,10 +15,10 @@
 !/Cargo.lock
 !/src/
 !/src/**
-!/.superpowers/
-!/.superpowers/**
 !/tests/
 !/tests/**
+!/.superpowers/
+!/.superpowers/**
 !/docs/
 /docs/*
 !/docs/prd-codebase-architecture-improvements.md
