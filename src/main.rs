@@ -211,26 +211,38 @@ fn main() -> anyhow::Result<()> {
             skip_retention,
             dry_run,
         } => {
-            let target_profile = profile.unwrap_or_else(|| {
-                if !config.profile.is_empty() {
-                    config.profile.clone()
-                } else {
-                    "default".to_string()
-                }
-            });
             let opts = backup::commands::run::PipelineOptions {
                 skip_database,
                 skip_secondary_sync,
                 skip_retention,
                 dry_run,
             };
-            let out = backup::commands::run::execute_run_profile(
-                default_config_path,
-                &target_profile,
-                &opts,
-                &resticprofile,
-            )?;
-            println!("{}", out.trim_end());
+
+            let profiles_to_run = if let Some(p) = profile {
+                vec![p]
+            } else if let Ok(parsed) = backup::config::model::ResticProfileConfig::load_from_path(default_config_path) {
+                let names = parsed.profile_names();
+                if names.is_empty() {
+                    vec!["default".to_string()]
+                } else {
+                    names
+                }
+            } else if !config.profile.is_empty() {
+                vec![config.profile.clone()]
+            } else {
+                vec!["default".to_string()]
+            };
+
+            for target_profile in &profiles_to_run {
+                println!("=== Running Backup Profile: [{}] ===", target_profile);
+                let out = backup::commands::run::execute_run_profile(
+                    default_config_path,
+                    target_profile,
+                    &opts,
+                    &resticprofile,
+                )?;
+                println!("{}", out.trim_end());
+            }
         }
 
         Commands::Doctor { action } => match action {

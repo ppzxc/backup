@@ -275,6 +275,22 @@ pub struct ResticProfileConfig {
     pub profiles: std::collections::BTreeMap<String, ProfileSection>,
 }
 
+impl ResticProfileConfig {
+    pub fn load_from_path(path: &Path) -> Result<Self> {
+        let content = fs::read_to_string(path)?;
+        let config: Self = serde_yaml::from_str(&content)?;
+        Ok(config)
+    }
+
+    pub fn profile_names(&self) -> Vec<String> {
+        self.profiles
+            .keys()
+            .filter(|k| k.as_str() != "default")
+            .cloned()
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct ProfileSection {
