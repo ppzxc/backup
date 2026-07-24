@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use backup::i18n::{CliHelp, Language};
 
 #[derive(Parser)]
 #[command(name = "backup", version = "0.1.3")]
@@ -135,7 +136,14 @@ enum ScheduleAction {
 }
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    // 시스템 LANG/LC_ALL 환경변수로 언어를 감지하고,
+    // derive(Parser)로 생성된 clap Command 트리를 해당 언어 도움말로 교체한 뒤 파싱합니다.
+    let lang = Language::detect();
+    let base_cmd = Cli::command();
+    let localized_cmd = CliHelp::apply_to_command(lang, base_cmd);
+    let matches = localized_cmd.get_matches();
+    let cli = Cli::from_arg_matches(&matches)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let default_config_path = std::path::Path::new("/etc/backup/profiles.yaml");
     let config = backup::config::model::BackupConfig::load_from_path(default_config_path).unwrap_or_default();
     let executor = backup::runner::executor::SystemExecutor;

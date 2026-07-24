@@ -125,3 +125,228 @@ impl I18nMessages {
         }
     }
 }
+
+/// CLI 도움말 텍스트 (서브커맨드/옵션별 언어별 설명)
+#[derive(Debug, Clone, Copy)]
+pub struct CliHelp {
+    // top-level about
+    pub about: &'static str,
+    // subcommands
+    pub cmd_setup: &'static str,
+    pub cmd_config: &'static str,
+    pub cmd_backend: &'static str,
+    pub cmd_run: &'static str,
+    pub cmd_doctor: &'static str,
+    pub cmd_schedule: &'static str,
+    pub cmd_restore: &'static str,
+    pub cmd_snapshots: &'static str,
+    pub cmd_status: &'static str,
+    pub cmd_update: &'static str,
+    pub cmd_uninstall: &'static str,
+    // setup sub-subcommands
+    pub cmd_setup_dependencies: &'static str,
+    pub cmd_setup_backend_init: &'static str,
+    // setup options
+    pub opt_setup_lang: &'static str,
+    pub opt_setup_non_interactive: &'static str,
+    // config sub-subcommands
+    pub cmd_config_show: &'static str,
+    pub cmd_config_edit: &'static str,
+    pub cmd_config_import_legacy: &'static str,
+    pub cmd_config_export: &'static str,
+    pub opt_config_import_file: &'static str,
+    pub opt_config_export_format: &'static str,
+    // backend sub-subcommands
+    pub cmd_backend_migrate: &'static str,
+    // run options
+    pub opt_run_skip_database: &'static str,
+    pub opt_run_skip_secondary_sync: &'static str,
+    pub opt_run_skip_retention: &'static str,
+    pub opt_run_dry_run: &'static str,
+    // doctor sub-subcommands
+    pub cmd_doctor_environment: &'static str,
+    pub cmd_doctor_time_sync: &'static str,
+    pub cmd_doctor_restore_drill: &'static str,
+    pub opt_doctor_file: &'static str,
+    // schedule sub-subcommands
+    pub cmd_schedule_enable: &'static str,
+    pub cmd_schedule_disable: &'static str,
+    pub cmd_schedule_status: &'static str,
+    // restore options
+    pub opt_restore_snapshot: &'static str,
+    pub opt_restore_target: &'static str,
+    // uninstall options
+    pub opt_uninstall_yes: &'static str,
+    pub opt_uninstall_purge: &'static str,
+}
+
+impl CliHelp {
+    pub fn get(lang: Language) -> Self {
+        match lang {
+            Language::Ko => Self {
+                about: "백업 CLI — restic/rclone 기반 백업 자동화 도구",
+                cmd_setup: "백업 환경 및 백업 프로필 설정 마법사",
+                cmd_config: "백업 설정 레지스트리 관리",
+                cmd_backend: "저장소 백엔드 어댑터 마이그레이션",
+                cmd_run: "백업 파이프라인 수동 실행",
+                cmd_doctor: "시스템, 보안 및 ISMS-P 진단 보고서",
+                cmd_schedule: "Systemd 타이머 / Cron 스케줄러 관리",
+                cmd_restore: "스냅샷 기반 파일 및 DB 복구",
+                cmd_snapshots: "1차·2차 저장소의 스냅샷 목록 조회",
+                cmd_status: "운영 상태 및 스냅샷 주기 확인",
+                cmd_update: "백업 바이너리 및 자산 자가 업데이트",
+                cmd_uninstall: "백업 CLI 및 스케줄러 삭제",
+                cmd_setup_dependencies: "필수 바이너리 의존성(restic, rclone, resticprofile) 확인 및 다운로드",
+                cmd_setup_backend_init: "1차·2차 백엔드 어댑터 저장소 초기화",
+                opt_setup_lang: "언어 선택 (ko/en)",
+                opt_setup_non_interactive: "비대화형(자동화) 모드로 실행",
+                cmd_config_show: "마스킹 처리된 비밀값으로 현재 설정 값 표시",
+                cmd_config_edit: "권한 검증과 함께 설정 파일 편집",
+                cmd_config_import_legacy: "기존 Bash 스타일 backup.env 설정 가져오기",
+                cmd_config_export: "지정한 형식으로 현재 설정 내보내기",
+                opt_config_import_file: "가져올 레거시 설정 파일 경로",
+                opt_config_export_format: "내보내기 형식 (기본값: yaml)",
+                cmd_backend_migrate: "1차 저장소에서 새 저장소 대상으로 스냅샷 마이그레이션",
+                opt_run_skip_database: "데이터베이스 백업 단계 건너뜀",
+                opt_run_skip_secondary_sync: "2차 저장소 동기화 단계 건너뜀",
+                opt_run_skip_retention: "보존 정책 적용 단계 건너뜀",
+                opt_run_dry_run: "실제 실행 없이 파이프라인 시뮬레이션",
+                cmd_doctor_environment: "백업 환경 디렉터리/파일 권한 및 비밀값 마스킹 검사",
+                cmd_doctor_time_sync: "NTP/Chrony 시간 동기화 상태 점검",
+                cmd_doctor_restore_drill: "복구 드릴 실행, RTO 측정 및 DB 헤더 무결성 확인",
+                opt_doctor_file: "진단 결과를 내보낼 파일 경로",
+                cmd_schedule_enable: "Systemd 타이머 / Cron 폴백 활성화",
+                cmd_schedule_disable: "예약 타이머 비활성화",
+                cmd_schedule_status: "타이머/스케줄러 상태 표시",
+                opt_restore_snapshot: "복구할 스냅샷 ID (기본값: latest)",
+                opt_restore_target: "복구 대상 경로 (기본값: /tmp/restore)",
+                opt_uninstall_yes: "삭제 확인 (프롬프트 생략)",
+                opt_uninstall_purge: "설정 파일 및 데이터까지 완전 삭제",
+            },
+            Language::En => Self {
+                about: "Backup CLI — restic/rclone based backup automation tool",
+                cmd_setup: "Backup environment and profile setup wizard",
+                cmd_config: "Configuration registry management",
+                cmd_backend: "Storage backend adapter migration",
+                cmd_run: "Execute backup pipeline manually",
+                cmd_doctor: "System, security, and audit report diagnostics",
+                cmd_schedule: "Systemd timer / Cron scheduler management",
+                cmd_restore: "Restore files or database dumps from snapshot",
+                cmd_snapshots: "List snapshots across primary and secondary storage targets",
+                cmd_status: "Display operational status and snapshot recency",
+                cmd_update: "Self-update backup binary and assets",
+                cmd_uninstall: "Uninstall backup CLI and scheduled timers",
+                cmd_setup_dependencies: "Verify and download required binary dependencies (restic, rclone, resticprofile)",
+                cmd_setup_backend_init: "Initialize primary and secondary backend adapter repositories",
+                opt_setup_lang: "Select language (ko/en)",
+                opt_setup_non_interactive: "Run in non-interactive (automation) mode",
+                cmd_config_show: "Show active configuration values with masked secrets",
+                cmd_config_edit: "Edit configuration file with permission validation",
+                cmd_config_import_legacy: "Import legacy Bash-style backup.env configuration",
+                cmd_config_export: "Export active configuration in specified format",
+                opt_config_import_file: "Path to the legacy config file to import",
+                opt_config_export_format: "Export format (default: yaml)",
+                cmd_backend_migrate: "Migrate snapshots from primary to new storage target",
+                opt_run_skip_database: "Skip the database backup step",
+                opt_run_skip_secondary_sync: "Skip the secondary storage sync step",
+                opt_run_skip_retention: "Skip the retention policy enforcement step",
+                opt_run_dry_run: "Simulate the pipeline without executing",
+                cmd_doctor_environment: "Check backup environment directory/file permissions and secret masking",
+                cmd_doctor_time_sync: "Inspect NTP/Chrony time synchronization status",
+                cmd_doctor_restore_drill: "Execute restore drill, measure RTO, and check database header integrity",
+                opt_doctor_file: "File path to export diagnostic results",
+                cmd_schedule_enable: "Enable systemd timers / cron fallback",
+                cmd_schedule_disable: "Disable scheduled timers",
+                cmd_schedule_status: "Display timer/scheduler status",
+                opt_restore_snapshot: "Snapshot ID to restore (default: latest)",
+                opt_restore_target: "Restore destination path (default: /tmp/restore)",
+                opt_uninstall_yes: "Confirm uninstall (skip prompt)",
+                opt_uninstall_purge: "Also remove configuration files and data",
+            },
+        }
+    }
+
+    /// `clap::Command` 트리를 감지된 언어의 도움말 텍스트로 수정(mutate)합니다.
+    /// derive(Parser)로 생성된 command 구조를 유지하면서 about/help 문자열만 교체합니다.
+    pub fn apply_to_command(lang: Language, mut cmd: clap::Command) -> clap::Command {
+        let h = Self::get(lang);
+
+        cmd = cmd.about(h.about);
+
+        cmd = cmd.mut_subcommand("setup", |c| {
+            c.about(h.cmd_setup)
+                .mut_arg("lang", |a| a.help(h.opt_setup_lang))
+                .mut_arg("non_interactive", |a| a.help(h.opt_setup_non_interactive))
+                .mut_subcommand("dependencies", |s| s.about(h.cmd_setup_dependencies))
+                .mut_subcommand("backend-init", |s| s.about(h.cmd_setup_backend_init))
+        });
+
+        cmd = cmd.mut_subcommand("config", |c| {
+            c.about(h.cmd_config)
+                .mut_subcommand("show", |s| s.about(h.cmd_config_show))
+                .mut_subcommand("edit", |s| s.about(h.cmd_config_edit))
+                .mut_subcommand("import-legacy", |s| {
+                    s.about(h.cmd_config_import_legacy)
+                        .mut_arg("file", |a| a.help(h.opt_config_import_file))
+                })
+                .mut_subcommand("export", |s| {
+                    s.about(h.cmd_config_export)
+                        .mut_arg("format", |a| a.help(h.opt_config_export_format))
+                })
+        });
+
+        cmd = cmd.mut_subcommand("backend", |c| {
+            c.about(h.cmd_backend)
+                .mut_subcommand("migrate", |s| s.about(h.cmd_backend_migrate))
+        });
+
+        cmd = cmd.mut_subcommand("run", |c| {
+            c.about(h.cmd_run)
+                .mut_arg("skip_database", |a| a.help(h.opt_run_skip_database))
+                .mut_arg("skip_secondary_sync", |a| a.help(h.opt_run_skip_secondary_sync))
+                .mut_arg("skip_retention", |a| a.help(h.opt_run_skip_retention))
+                .mut_arg("dry_run", |a| a.help(h.opt_run_dry_run))
+        });
+
+        cmd = cmd.mut_subcommand("doctor", |c| {
+            c.about(h.cmd_doctor)
+                .mut_subcommand("environment", |s| {
+                    s.about(h.cmd_doctor_environment)
+                        .mut_arg("file", |a| a.help(h.opt_doctor_file))
+                })
+                .mut_subcommand("time-sync", |s| {
+                    s.about(h.cmd_doctor_time_sync)
+                        .mut_arg("file", |a| a.help(h.opt_doctor_file))
+                })
+                .mut_subcommand("restore-drill", |s| {
+                    s.about(h.cmd_doctor_restore_drill)
+                        .mut_arg("file", |a| a.help(h.opt_doctor_file))
+                })
+        });
+
+        cmd = cmd.mut_subcommand("schedule", |c| {
+            c.about(h.cmd_schedule)
+                .mut_subcommand("enable", |s| s.about(h.cmd_schedule_enable))
+                .mut_subcommand("disable", |s| s.about(h.cmd_schedule_disable))
+                .mut_subcommand("status", |s| s.about(h.cmd_schedule_status))
+        });
+
+        cmd = cmd.mut_subcommand("restore", |c| {
+            c.about(h.cmd_restore)
+                .mut_arg("snapshot", |a| a.help(h.opt_restore_snapshot))
+                .mut_arg("target", |a| a.help(h.opt_restore_target))
+        });
+
+        cmd = cmd.mut_subcommand("snapshots", |c| c.about(h.cmd_snapshots));
+        cmd = cmd.mut_subcommand("status", |c| c.about(h.cmd_status));
+        cmd = cmd.mut_subcommand("update", |c| c.about(h.cmd_update));
+
+        cmd = cmd.mut_subcommand("uninstall", |c| {
+            c.about(h.cmd_uninstall)
+                .mut_arg("yes", |a| a.help(h.opt_uninstall_yes))
+                .mut_arg("purge", |a| a.help(h.opt_uninstall_purge))
+        });
+
+        cmd
+    }
+}
