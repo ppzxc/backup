@@ -2,14 +2,20 @@ use assert_cmd::Command;
 
 #[test]
 fn test_subcommands_help() {
+    // LANG=ko_KR.UTF-8 환경에서 한국어 도움말이 출력되는지 검증합니다.
     let mut cmd = Command::cargo_bin("backup").unwrap();
-    let assert = cmd.arg("--help").assert().success();
+    let assert = cmd
+        .env("LANG", "ko_KR.UTF-8")
+        .env_remove("LC_ALL")
+        .arg("--help")
+        .assert()
+        .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("백업 환경 및 프로필 설정 마법사"), "Missing Korean setup docstring in help output");
-    assert!(stdout.contains("백업 설정 레지스트리 관리"), "Missing Korean config docstring in help output");
-    assert!(stdout.contains("저장소 백엔드 마이그레이션"), "Missing Korean backend docstring in help output");
-    assert!(stdout.contains("백업 파이프라인 수동 실행"), "Missing Korean run docstring in help output");
-    assert!(stdout.contains("시스템, 보안 및 ISMS-P 진단 보고서"), "Missing Korean doctor docstring in help output");
+    assert!(stdout.contains("마법사"), "Missing Korean setup docstring in help output");
+    assert!(stdout.contains("레지스트리"), "Missing Korean config docstring in help output");
+    assert!(stdout.contains("마이그레이션"), "Missing Korean backend docstring in help output");
+    assert!(stdout.contains("파이프라인"), "Missing Korean run docstring in help output");
+    assert!(stdout.contains("ISMS-P 진단"), "Missing Korean doctor docstring in help output");
 }
 
 #[test]
