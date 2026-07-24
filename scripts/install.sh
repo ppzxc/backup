@@ -17,7 +17,7 @@ ARCH="$(uname -m)"
 
 case "$OS" in
   Linux*)
-    OS_TARGET="unknown-linux-gnu"
+    OS_TARGET="unknown-linux-musl"
     ;;
   Darwin*)
     OS_TARGET="apple-darwin"
