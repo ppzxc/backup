@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use backup::i18n::Language;
+use backup::runner::resticprofile::ResticProfileRunner;
 
 #[derive(Parser)]
 #[command(name = "backup", version)]
@@ -163,7 +164,20 @@ fn main() -> anyhow::Result<()> {
                     let out = backup::commands::setup::run_setup_dependencies()?;
                     println!("{}", out);
                 }
-                Some(SetupAction::BackendInit) => println!("Backend storage repository initialized successfully."),
+                Some(SetupAction::BackendInit) => {
+                    if let Ok(parsed) = backup::config::model::ResticProfileConfig::load_from_path(default_config_path) {
+                        let names = parsed.profile_names();
+                        for name in names {
+                            println!("=== Initializing Backend Storage for Profile: [{}] ===", name);
+                            match resticprofile.init(default_config_path, &name) {
+                                Ok(res) => println!("{}", res.trim_end()),
+                                Err(err) => println!("Repository initialization note ({})", err),
+                            }
+                        }
+                    } else {
+                        println!("Backend storage repository initialization initiated.");
+                    }
+                }
                 None => {
                     let prompter = backup::commands::setup::InquirePrompter;
                     let lang_opt = lang.as_deref().map(backup::i18n::Language::from_str);
@@ -171,6 +185,11 @@ fn main() -> anyhow::Result<()> {
                         println!("Setup initialized (Config target: {}, status: {})", default_config_path.display(), err);
                     } else {
                         println!("Setup completed successfully.");
+                        if let Ok(parsed) = backup::config::model::ResticProfileConfig::load_from_path(default_config_path) {
+                            for name in parsed.profile_names() {
+                                let _ = resticprofile.init(default_config_path, &name);
+                            }
+                        }
                     }
                 }
             }

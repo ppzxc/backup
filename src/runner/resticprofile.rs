@@ -4,6 +4,7 @@ use crate::runner::executor::{CommandOutput, CommandRunner};
 
 pub trait ResticProfileRunner {
     fn backup(&self, config_path: &Path, profile: &str, dry_run: bool) -> Result<String>;
+    fn init(&self, config_path: &Path, profile: &str) -> Result<String>;
     fn schedule_enable(&self, config_path: &Path) -> Result<String>;
     fn schedule_disable(&self, config_path: &Path) -> Result<String>;
     fn schedule_status(&self, config_path: &Path) -> Result<String>;
@@ -49,6 +50,12 @@ impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {
         }
         args.push("backup");
         let output = self.executor.run("resticprofile", &args)?;
+        self.check_output(output)
+    }
+
+    fn init(&self, config_path: &Path, profile: &str) -> Result<String> {
+        let config_str = config_path.to_string_lossy();
+        let output = self.executor.run("resticprofile", &["--config", &config_str, "--name", profile, "init"])?;
         self.check_output(output)
     }
 
@@ -105,6 +112,12 @@ impl MockResticProfileRunner {
 
 impl ResticProfileRunner for MockResticProfileRunner {
     fn backup(&self, _config_path: &Path, _profile: &str, _dry_run: bool) -> Result<String> {
+        if self.exit_code != 0 {
+            anyhow::bail!("mock error: {}", self.response);
+        }
+        Ok(self.response.clone())
+    }
+    fn init(&self, _config_path: &Path, _profile: &str) -> Result<String> {
         if self.exit_code != 0 {
             anyhow::bail!("mock error: {}", self.response);
         }
