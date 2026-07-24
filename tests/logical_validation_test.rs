@@ -46,9 +46,10 @@ fn test_executor_non_zero_exit_error_propagation() {
 fn test_invalid_yaml_missing_fields_validation() {
     let invalid_yaml = r#"
 version: "2"
-self:
-  backup:
-    schedule-ignore-on-battery-less-than: [invalid_array_instead_of_number]
+profiles:
+  self:
+    backup:
+      schedule-ignore-on-battery-less-than: [invalid_array_instead_of_number]
 "#;
     let res: Result<ResticProfileConfig, _> = serde_yaml::from_str(invalid_yaml);
     assert!(res.is_err());
