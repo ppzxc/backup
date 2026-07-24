@@ -24,20 +24,9 @@ pub struct InquirePrompter;
 
 impl SetupPrompter for InquirePrompter {
     fn prompt_setup_params(&self, lang_opt: Option<Language>) -> Result<SetupParams> {
-        let lang = match lang_opt {
-            Some(l) => l,
-            None => {
-                let choice = inquire::Select::new(
-                    "Select Language / 언어 선택:",
-                    vec!["[1] 한국어 (Korean)", "[2] English"],
-                ).prompt()?;
-                if choice.starts_with("[1]") {
-                    Language::Ko
-                } else {
-                    Language::En
-                }
-            }
-        };
+        // lang_opt은 항상 Some(..)으로 전달됩니다 (호출자가 detect()로 채워줌).
+        // 만약을 위해 None이면 detect()로 fallback합니다.
+        let lang = lang_opt.unwrap_or_else(Language::detect);
 
         let msg = I18nMessages::get(lang);
 
@@ -308,7 +297,10 @@ impl SetupEngine {
 }
 
 pub fn run_setup_with_prompter<P: SetupPrompter>(config_path: &Path, prompter: &P, non_interactive: bool, lang_opt: Option<Language>) -> Result<()> {
-    SetupEngine::run(config_path, prompter, non_interactive, lang_opt)
+    // lang_opt이 None이면 LANG/LC_ALL 환경변수로 자동 감지합니다.
+    // prompter에는 항상 Some(..)을 전달하여 언어 선택 프롬프트를 건너뜁니다.
+    let resolved_lang = lang_opt.or_else(|| Some(Language::detect()));
+    SetupEngine::run(config_path, prompter, non_interactive, resolved_lang)
 }
 
 pub fn run_setup(config_path: &Path, lang_opt: Option<Language>) -> Result<()> {

@@ -178,3 +178,34 @@ fn test_run_setup_dependencies_with_mock_runner() {
     assert!(report.contains("rclone: MISSING -> Installing from"));
     assert!(report.contains("resticprofile: OK (/usr/bin/resticprofile)"));
 }
+
+/// lang_opt이 None일 때 Language::detect()로 언어를 자동 감지하여 프롬프트 없이 진행하는지 검증.
+/// setup 내부 prompter가 받은 lang_opt이 Some(..)이어야 합니다.
+#[test]
+fn test_setup_auto_detects_language_when_lang_opt_none() {
+    use std::sync::{Arc, Mutex};
+
+    struct CapturingPrompter {
+        received_lang: Arc<Mutex<Option<Language>>>,
+    }
+    impl SetupPrompter for CapturingPrompter {
+        fn prompt_setup_params(&self, lang_opt: Option<Language>) -> anyhow::Result<SetupParams> {
+            *self.received_lang.lock().unwrap() = lang_opt;
+            anyhow::bail!("capture_only") // 언어 캡처가 목적이므로 에러로 조기 종료
+        }
+    }
+
+    let received = Arc::new(Mutex::new(None::<Language>));
+    let prompter = CapturingPrompter { received_lang: Arc::clone(&received) };
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("profiles.yaml");
+
+    // lang_opt = None으로 호출 → run_setup_with_prompter 내부에서 detect()로 채워 Some(..)으로 전달
+    let _ = run_setup_with_prompter(&config_path, &prompter, false, None);
+
+    let captured = received.lock().unwrap();
+    assert!(
+        captured.is_some(),
+        "lang_opt이 None이면 Language::detect()로 채워 Some(..)을 prompter에 전달해야 합니다"
+    );
+}
