@@ -78,18 +78,12 @@ pub fn execute_status_from_profiles_config<R: crate::runner::resticprofile::Rest
     );
 
     match runner.list_snapshots(config_path, target_profile_name) {
-        Ok(json_raw) => {
-            if let Ok(snapshots) = serde_json::from_str::<Vec<ResticSnapshotInfo>>(&json_raw) {
-                if let Some(latest) = snapshots.first() {
-                    output_str.push_str(&format!(
-                        "\nLatest Snapshot: {}\nSnapshot Time: {}\nTotal Snapshots: {}",
-                        latest.id, latest.time, snapshots.len()
-                    ));
-                } else {
-                    output_str.push_str("\nSnapshots: None");
-                }
+        Ok(raw_output) => {
+            let trimmed = raw_output.trim();
+            if trimmed.is_empty() {
+                output_str.push_str("\nSnapshots: None");
             } else {
-                output_str.push_str(&format!("\nSnapshots:\n{}", json_raw.trim()));
+                output_str.push_str(&format!("\nSnapshots:\n{}", trimmed));
             }
         }
         Err(err) => {

@@ -256,3 +256,44 @@ fn test_setup_auto_detects_language_when_lang_opt_none() {
         "lang_opt이 None이면 Language::detect()로 채워 Some(..)을 prompter에 전달해야 합니다"
     );
 }
+
+#[test]
+fn test_setup_auto_enables_schedule() {
+    use backup::commands::setup::run_setup_with_prompter_and_runner;
+    use backup::runner::resticprofile::MockResticProfileRunner;
+
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("profiles.yaml");
+
+    let params = SetupParams {
+        profile: "default".into(),
+        backup_type: BackupType::Directory,
+        targets: vec!["/var/log".into()],
+        excludes: vec![],
+        retention: RetentionPolicy { keep_daily: 7, keep_weekly: 4, keep_monthly: 12 },
+        primary_storage: StorageTarget {
+            backend: "sftp".into(),
+            repository: "sftp:backup@192.168.1.100:/storage".into(),
+            password: SecretString::new("secure_password_123".into()),
+            sftp: Some(SftpConfig {
+                host: "192.168.1.100".into(),
+                port: 22,
+                user: "backup".into(),
+                key_file: Some("/etc/backup/id_ed25519".into()),
+            }),
+            s3: None,
+        },
+        secondary_storage: None,
+        reports: ReportsConfig::default(),
+    };
+
+    let prompter = MockPrompter { params };
+    let runner = MockResticProfileRunner::new(0, "scheduled successfully");
+
+    run_setup_with_prompter_and_runner(&config_path, &prompter, false, Some(Language::En), &runner).unwrap();
+
+    assert!(config_path.exists());
+    let mock_calls = runner.calls.lock().unwrap();
+    assert_eq!(mock_calls.len(), 1);
+    assert_eq!(mock_calls[0].0, "schedule_enable");
+}

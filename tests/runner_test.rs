@@ -233,8 +233,8 @@ fn test_resticprofile_tool_all_methods() {
     let calls = mock.get_calls();
     assert_eq!(calls.len(), 5);
     assert_eq!(calls[0].1, vec!["--config", "/etc/backup/profiles.yaml", "unschedule", "--all"]);
-    assert_eq!(calls[1].1, vec!["--config", "/etc/backup/profiles.yaml", "status"]);
-    assert_eq!(calls[2].1, vec!["--config", "/etc/backup/profiles.yaml", "--name", "self", "snapshots", "--json"]);
+    assert_eq!(calls[1].1, vec!["--config", "/etc/backup/profiles.yaml", "status", "--all"]);
+    assert_eq!(calls[2].1, vec!["--config", "/etc/backup/profiles.yaml", "--name", "self", "snapshots"]);
     assert_eq!(calls[3].1, vec!["--config", "/etc/backup/profiles.yaml", "--name", "self", "prune"]);
     assert_eq!(calls[4].1, vec!["--config", "/etc/backup/profiles.yaml", "--name", "self", "check"]);
 }

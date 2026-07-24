@@ -161,22 +161,15 @@ profiles:
     let temp_file = NamedTempFile::new().unwrap();
     std::fs::write(temp_file.path(), yaml_content).unwrap();
 
-    let mock_json = r#"[
-        {
-            "id": "abc12345",
-            "time": "2026-07-24T17:40:00+09:00",
-            "paths": ["/var/log"],
-            "hostname": "funa1"
-        }
-    ]"#;
+    let mock_table = "ID        Time                 Host        Tags        Paths\n------------------------------------------------------------------\nabc12345  2026-07-24 17:40:00  funa1                   /var/log";
 
-    let mock_runner = MockResticProfileRunner::new(0, mock_json);
+    let mock_runner = MockResticProfileRunner::new(0, mock_table);
     let status_res = execute_status_from_profiles_config(temp_file.path(), Some("log"), &mock_runner).unwrap();
 
     assert!(status_res.contains("Profile: log"));
     assert!(status_res.contains("Repository: s3:https://59.25.177.53:39000/backup/ns0327/log"));
     assert!(status_res.contains("Targets: [\"/var/log\"]"));
-    assert!(status_res.contains("Latest Snapshot: abc12345"));
+    assert!(status_res.contains("abc12345"));
 }
 
 #[test]

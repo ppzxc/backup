@@ -339,28 +339,65 @@ impl SetupEngine {
         })
     }
 
-    pub fn run<P: SetupPrompter>(config_path: &Path, prompter: &P, non_interactive: bool, lang_opt: Option<Language>) -> Result<()> {
+    pub fn run<P: SetupPrompter, R: crate::runner::resticprofile::ResticProfileRunner>(
+        config_path: &Path,
+        prompter: &P,
+        non_interactive: bool,
+        lang_opt: Option<Language>,
+        runner: &R,
+    ) -> Result<()> {
+        let config_dir = if let Some(parent) = config_path.parent() {
+            if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            }
+        } else {
+            config_path
+        };
+
         if !non_interactive {
             let params = prompter.prompt_setup_params(lang_opt)?;
             let config = Self::validate_and_build(params)?;
-
-            if let Some(parent) = config_path.parent() {
-                crate::config::registry::ConfigurationRegistry::save_profile_config(&config, parent)?;
-            } else {
-                crate::config::registry::ConfigurationRegistry::save_profile_config(&config, config_path)?;
-            }
+            crate::config::registry::ConfigurationRegistry::save_profile_config(&config, config_dir)?;
         } else {
             create_default_config_file(config_path, "default", "/var/log", "sftp:backup@192.168.1.100:/backup", "default_secret_pass123")?;
         }
+
+        let profiles_yaml_path = if config_path.ends_with("profiles.yaml") {
+            config_path.to_path_buf()
+        } else {
+            config_dir.join("profiles.yaml")
+        };
+
+        if profiles_yaml_path.exists() {
+            let _ = runner.schedule_enable(&profiles_yaml_path);
+        }
+
         Ok(())
     }
 }
 
-pub fn run_setup_with_prompter<P: SetupPrompter>(config_path: &Path, prompter: &P, non_interactive: bool, lang_opt: Option<Language>) -> Result<()> {
-    // lang_opt이 None이면 LANG/LC_ALL 환경변수로 자동 감지합니다.
-    // prompter에는 항상 Some(..)을 전달하여 언어 선택 프롬프트를 건너뜁니다.
+pub fn run_setup_with_prompter_and_runner<P: SetupPrompter, R: crate::runner::resticprofile::ResticProfileRunner>(
+    config_path: &Path,
+    prompter: &P,
+    non_interactive: bool,
+    lang_opt: Option<Language>,
+    runner: &R,
+) -> Result<()> {
     let resolved_lang = lang_opt.or_else(|| Some(Language::detect()));
-    SetupEngine::run(config_path, prompter, non_interactive, resolved_lang)
+    SetupEngine::run(config_path, prompter, non_interactive, resolved_lang, runner)
+}
+
+pub fn run_setup_with_prompter<P: SetupPrompter>(
+    config_path: &Path,
+    prompter: &P,
+    non_interactive: bool,
+    lang_opt: Option<Language>,
+) -> Result<()> {
+    let executor = crate::runner::executor::SystemExecutor;
+    let runner = crate::runner::resticprofile::ResticProfileTool::new(&executor);
+    run_setup_with_prompter_and_runner(config_path, prompter, non_interactive, lang_opt, &runner)
 }
 
 pub fn run_setup(config_path: &Path, lang_opt: Option<Language>) -> Result<()> {
