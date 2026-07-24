@@ -3,7 +3,7 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use backup::i18n::Language;
 
 #[derive(Parser)]
-#[command(name = "backup", version = "0.1.3")]
+#[command(name = "backup", version = "0.1.4")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
