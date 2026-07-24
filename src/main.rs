@@ -10,8 +10,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Backup Environment and Backup Profile setup
+    /// Backup Environment and Backup Profile setup / 백업 환경 및 프로필 설정 마법사
     Setup {
+        /// Select language (ko/en) / 언어 선택 (ko/en)
         #[arg(long)]
         lang: Option<String>,
         #[arg(long)]
@@ -19,17 +20,17 @@ enum Commands {
         #[command(subcommand)]
         action: Option<SetupAction>,
     },
-    /// Configuration Registry management
+    /// Configuration Registry management / 백업 설정 레지스트리 관리
     Config {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Storage Backend Adapter migration
+    /// Storage Backend Adapter migration / 저장소 백엔드 마이그레이션
     Backend {
         #[command(subcommand)]
         action: BackendAction,
     },
-    /// Execute backup pipeline
+    /// Execute backup pipeline / 백업 파이프라인 수동 실행
     Run {
         #[arg(long)]
         skip_database: bool,
@@ -40,31 +41,30 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// System, security, and audit report diagnostics
+    /// System, security, and audit report diagnostics / 시스템, 보안 및 ISMS-P 진단 보고서
     Doctor {
         #[command(subcommand)]
         action: Option<DoctorAction>,
     },
-    /// Systemd timer / Cron scheduler management
+    /// Systemd timer / Cron scheduler management / 스케줄러 타이머 관리
     Schedule {
         #[command(subcommand)]
         action: ScheduleAction,
     },
-    /// Restore files or database dumps from snapshot
+    /// Restore files or database dumps from snapshot / 스냅샷 기반 파일 및 DB 복구
     Restore {
         #[arg(long, default_value = "latest")]
         snapshot: String,
         #[arg(long, default_value = "/tmp/restore")]
         target: String,
     },
-
-    /// List snapshots across primary and secondary storage targets
+    /// List snapshots across primary and secondary storage targets / 스냅샷 목록 조회
     Snapshots,
-    /// Display operational status and snapshot recency
+    /// Display operational status and snapshot recency / 운영 상태 및 스냅샷 주기 확인
     Status,
-    /// Self-update backup binary and assets
+    /// Self-update backup binary and assets / 바이너리 및 자산 자가 업데이트
     Update,
-    /// Uninstall backup CLI and scheduled timers
+    /// Uninstall backup CLI and scheduled timers / 백업 CLI 및 스케줄러 삭제
     Uninstall {
         #[arg(long)]
         yes: bool,

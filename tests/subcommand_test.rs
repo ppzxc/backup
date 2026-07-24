@@ -1,13 +1,15 @@
 use assert_cmd::Command;
 
-fn assert_cmd_args_success(args: &[&str]) {
-    let mut cmd = Command::cargo_bin("backup").unwrap();
-    cmd.args(args).assert().success();
-}
-
 #[test]
 fn test_subcommands_help() {
-    assert_cmd_args_success(&["--help"]);
+    let mut cmd = Command::cargo_bin("backup").unwrap();
+    let assert = cmd.arg("--help").assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("백업 환경 및 프로필 설정 마법사"), "Missing Korean setup docstring in help output");
+    assert!(stdout.contains("백업 설정 레지스트리 관리"), "Missing Korean config docstring in help output");
+    assert!(stdout.contains("저장소 백엔드 마이그레이션"), "Missing Korean backend docstring in help output");
+    assert!(stdout.contains("백업 파이프라인 수동 실행"), "Missing Korean run docstring in help output");
+    assert!(stdout.contains("시스템, 보안 및 ISMS-P 진단 보고서"), "Missing Korean doctor docstring in help output");
 }
 
 #[test]
