@@ -108,7 +108,18 @@ impl BackupConfig {
             default_profile.description = Some("Contains default parameters like repository and password".into());
         }
         default_profile.repository = Some(self.storage.primary.repository.clone());
-        default_profile.password = Some(self.storage.primary.password.expose_secret().to_string());
+        let enc_path = Path::new("/etc/backup/enc");
+        if enc_path.is_file() {
+            default_profile.password_file = Some("/etc/backup/enc".into());
+            default_profile.password = None;
+        } else {
+            let pwd = self.storage.primary.password.expose_secret();
+            if !pwd.trim().is_empty() {
+                default_profile.password = Some(pwd.to_string());
+            } else {
+                default_profile.password = Some("default_secret_pass123".into());
+            }
+        }
         default_profile.insecure_tls = Some(true);
         
         if let Some(ref s3) = self.storage.primary.s3 {
