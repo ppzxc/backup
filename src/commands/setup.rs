@@ -95,7 +95,7 @@ impl SetupPrompter for InquirePrompter {
         let backend = inquire::Select::new(msg.primary_storage_backend, vec!["sftp", "s3", "local"])
             .prompt()?;
 
-        let (repository, sftp_config) = if backend == "sftp" {
+        let (repository, sftp_config, s3_config) = if backend == "sftp" {
             let host = prompt_text_with_default(msg.sftp_host, "192.168.1.100", lang)?;
             let port = inquire::CustomType::<u16>::new(msg.sftp_port).with_default(22).prompt()?;
             let user = prompt_text_with_default(msg.sftp_user, "backup", lang)?;
@@ -130,17 +130,42 @@ impl SetupPrompter for InquirePrompter {
                 port,
                 user,
                 key_file: Some(key_file),
-            }))
+            }), None)
         } else if backend == "s3" {
-            let repo_uri = prompt_text_with_default(
-                msg.primary_repo_uri,
-                "s3:https://s3.amazonaws.com/my-backup-bucket",
-                lang,
-            )?;
-            (repo_uri, None)
+            let mode_choice = inquire::Select::new(
+                msg.s3_mode_select,
+                vec![msg.s3_mode_detailed, msg.s3_mode_uri_only],
+            ).prompt()?;
+
+            if mode_choice.starts_with("[1]") {
+                let endpoint = prompt_text_with_default(msg.s3_endpoint, "https://s3.amazonaws.com", lang)?;
+                let access_key_id = inquire::Text::new(msg.s3_access_key_id).prompt()?;
+                let secret_access_key_str = inquire::Password::new(msg.s3_secret_access_key)
+                    .without_confirmation()
+                    .prompt()?;
+                let _region = prompt_text_with_default(msg.s3_region, "", lang)?;
+                let bucket = prompt_text_with_default(msg.s3_bucket, "my-backup-bucket", lang)?;
+
+                let clean_endpoint = endpoint.trim_start_matches("s3:").trim_end_matches('/');
+                let repo_uri = format!("s3:{}/{}", clean_endpoint, bucket);
+
+                let s3_conf = S3Config {
+                    endpoint,
+                    access_key_id,
+                    secret_access_key: SecretString::new(secret_access_key_str),
+                };
+                (repo_uri, None, Some(s3_conf))
+            } else {
+                let repo_uri = prompt_text_with_default(
+                    msg.primary_repo_uri,
+                    "s3:https://s3.amazonaws.com/my-backup-bucket",
+                    lang,
+                )?;
+                (repo_uri, None, None)
+            }
         } else {
             let repo_uri = prompt_text_with_default(msg.primary_repo_uri, "/data/backup", lang)?;
-            (repo_uri, None)
+            (repo_uri, None, None)
         };
 
         let default_enc_path = Path::new("/etc/backup/enc");
@@ -178,7 +203,7 @@ impl SetupPrompter for InquirePrompter {
             repository,
             password: SecretString::new(password),
             sftp: sftp_config,
-            s3: None,
+            s3: s3_config,
         };
 
         // Secondary Storage Setup (Optional)

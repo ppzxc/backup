@@ -69,6 +69,16 @@ pub struct I18nMessages {
     pub secondary_password: &'static str,
     pub enable_isms_reports: &'static str,
     pub report_export_dir: &'static str,
+
+    // S3 setup messages
+    pub s3_mode_select: &'static str,
+    pub s3_mode_detailed: &'static str,
+    pub s3_mode_uri_only: &'static str,
+    pub s3_endpoint: &'static str,
+    pub s3_access_key_id: &'static str,
+    pub s3_secret_access_key: &'static str,
+    pub s3_region: &'static str,
+    pub s3_bucket: &'static str,
 }
 
 impl I18nMessages {
@@ -107,6 +117,15 @@ impl I18nMessages {
                 secondary_password: "2차 저장소 비밀번호:",
                 enable_isms_reports: "ISMS 감사 및 일일/연간 보고서 자동 생성 활성화:",
                 report_export_dir: "보고서 출력 디렉터리 경로:",
+
+                s3_mode_select: "S3 설정 방식 선택:",
+                s3_mode_detailed: "[1] S3 상세 정보 분해 입력 (Endpoint, Access Key, Secret Key 등) - 기본값",
+                s3_mode_uri_only: "[2] S3 Repository URI만 직접 입력",
+                s3_endpoint: "S3 엔드포인트 URL:",
+                s3_access_key_id: "S3 Access Key ID:",
+                s3_secret_access_key: "S3 Secret Access Key:",
+                s3_region: "S3 리전 (선택사항):",
+                s3_bucket: "S3 버킷 이름:",
             },
             Language::En => Self {
                 select_language: "Select Language / 언어 선택:",
@@ -141,6 +160,15 @@ impl I18nMessages {
                 secondary_password: "Secondary Password:",
                 enable_isms_reports: "Enable ISMS Audit & Daily/Annual Report Generation?",
                 report_export_dir: "Report Export Directory:",
+
+                s3_mode_select: "Select S3 Configuration Mode:",
+                s3_mode_detailed: "[1] Detailed S3 Parameters (Endpoint, Access Key, Secret Key, etc.) - Default",
+                s3_mode_uri_only: "[2] S3 Repository URI Only",
+                s3_endpoint: "S3 Endpoint URL:",
+                s3_access_key_id: "S3 Access Key ID:",
+                s3_secret_access_key: "S3 Secret Access Key:",
+                s3_region: "S3 Region (optional):",
+                s3_bucket: "S3 Bucket Name:",
             },
         }
     }
