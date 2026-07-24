@@ -43,12 +43,11 @@ impl<'a, E: CommandRunner> ResticProfileTool<'a, E> {
 impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {
     fn backup(&self, config_path: &Path, profile: &str, dry_run: bool) -> Result<String> {
         let config_str = config_path.to_string_lossy();
-        let target = format!("{}.backup", profile);
-        let mut args = vec!["--config", &config_str];
+        let mut args = vec!["--config", &config_str, "--name", profile];
         if dry_run {
             args.push("--dry-run");
         }
-        args.push(&target);
+        args.push("backup");
         let output = self.executor.run("resticprofile", &args)?;
         self.check_output(output)
     }
@@ -73,22 +72,19 @@ impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {
 
     fn list_snapshots(&self, config_path: &Path, profile: &str) -> Result<String> {
         let config_str = config_path.to_string_lossy();
-        let target = format!("{}.snapshots", profile);
-        let output = self.executor.run("resticprofile", &["--config", &config_str, &target])?;
+        let output = self.executor.run("resticprofile", &["--config", &config_str, "--name", profile, "snapshots"])?;
         self.check_output(output)
     }
 
     fn prune(&self, config_path: &Path, profile: &str) -> Result<String> {
         let config_str = config_path.to_string_lossy();
-        let target = format!("{}.prune", profile);
-        let output = self.executor.run("resticprofile", &["--config", &config_str, &target])?;
+        let output = self.executor.run("resticprofile", &["--config", &config_str, "--name", profile, "prune"])?;
         self.check_output(output)
     }
 
     fn check(&self, config_path: &Path, profile: &str) -> Result<String> {
         let config_str = config_path.to_string_lossy();
-        let target = format!("{}.check", profile);
-        let output = self.executor.run("resticprofile", &["--config", &config_str, &target])?;
+        let output = self.executor.run("resticprofile", &["--config", &config_str, "--name", profile, "check"])?;
         self.check_output(output)
     }
 }
