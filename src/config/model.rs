@@ -116,8 +116,11 @@ impl BackupConfig {
             primary_profile.description = Some("Primary Storage configuration".into());
         }
         primary_profile.repository = Some(self.storage.primary.repository.clone());
-        let enc_path = Path::new("/etc/backup/enc");
+        let enc_path = config_dir.join("enc");
         if enc_path.is_file() {
+            primary_profile.password_file = Some(enc_path.to_string_lossy().to_string());
+            primary_profile.password = None;
+        } else if Path::new("/etc/backup/enc").is_file() {
             primary_profile.password_file = Some("/etc/backup/enc".into());
             primary_profile.password = None;
         } else {

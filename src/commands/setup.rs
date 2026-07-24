@@ -170,14 +170,23 @@ impl SetupPrompter for InquirePrompter {
                 .prompt()?;
 
             let (repository, sftp_config, s3_config) = if backend == "sftp" {
-                let key_path = "/etc/backup/id_ed25519";
-                let pub_path = "/etc/backup/id_ed25519.pub";
-                if !Path::new(key_path).exists() {
+                let key_dir = config_dir;
+                let key_path = key_dir.join("id_ed25519");
+                let pub_path = key_dir.join("id_ed25519.pub");
+                if let Err(e) = std::fs::create_dir_all(key_dir) {
+                    eprintln!("Warning: Failed to create directory {:?}: {}", key_dir, e);
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(key_dir, std::fs::Permissions::from_mode(0o700));
+                }
+                if !key_path.exists() {
                     let _ = std::process::Command::new("ssh-keygen")
-                        .args(["-t", "ed25519", "-N", "", "-f", key_path])
+                        .args(["-t", "ed25519", "-N", "", "-f", key_path.to_str().unwrap_or("/etc/backup/id_ed25519")])
                         .output();
                 }
-                if let Ok(pub_key) = std::fs::read_to_string(pub_path) {
+                if let Ok(pub_key) = std::fs::read_to_string(&pub_path) {
                     println!("\n================================================================================");
                     println!("{}", msg.sftp_pubkey_notice);
                     println!("================================================================================");
@@ -196,7 +205,7 @@ impl SetupPrompter for InquirePrompter {
                     host,
                     port,
                     user,
-                    key_file: Some(key_path.to_string()),
+                    key_file: Some(key_path.to_string_lossy().to_string()),
                 }), None)
             } else if backend == "s3" {
                 let mode_choice = inquire::Select::new(
@@ -241,8 +250,8 @@ impl SetupPrompter for InquirePrompter {
                 (repo_uri, None, None)
             };
 
-            let default_enc_path = Path::new("/etc/backup/enc");
-            let password = if let Some(existing_pass) = resolve_encryption_keyfile(default_enc_path) {
+            let enc_file_path = config_dir.join("enc");
+            let password = if let Some(existing_pass) = resolve_encryption_keyfile(&enc_file_path) {
                 println!("\n{}", msg.found_existing_keyfile);
                 existing_pass
             } else {
@@ -252,7 +261,7 @@ impl SetupPrompter for InquirePrompter {
 
                 if auto_gen {
                     let gen_pass = generate_secure_password();
-                    let _ = save_encryption_keyfile(default_enc_path, &gen_pass);
+                    let _ = save_encryption_keyfile(&enc_file_path, &gen_pass);
                     gen_pass
                 } else {
                     let user_pass = inquire::Password::new(msg.enter_encryption_password)
@@ -265,7 +274,7 @@ impl SetupPrompter for InquirePrompter {
                         .with_default(true)
                         .prompt()?;
                     if save_key {
-                        let _ = save_encryption_keyfile(default_enc_path, &user_pass);
+                        let _ = save_encryption_keyfile(&enc_file_path, &user_pass);
                     }
                     user_pass
                 }
