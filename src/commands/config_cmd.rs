@@ -13,6 +13,8 @@ pub fn execute_config_import_legacy(source_path: &std::path::Path, target_path: 
     let content = std::fs::read_to_string(source_path)?;
     let config = crate::config::legacy_import::parse_legacy_env(&content)?;
     config.save_to_path(target_path)?;
+    let config_dir = target_path.parent().unwrap_or(target_path);
+    config.save_and_sync(config_dir)?;
     Ok(format!("Imported legacy configuration from {} to {}", source_path.display(), target_path.display()))
 }
 
