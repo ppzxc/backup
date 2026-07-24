@@ -13,6 +13,23 @@
 
 ---
 
+## 🚀 빠른 설치 (Quick Installation)
+
+단 한 줄의 원클릭 원격 스크립트로 최신 `backup` CLI 바이너리를 자동 설치할 수 있습니다:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ppzxc/backup/main/scripts/install.sh | sh
+```
+
+### 소스코드 직접 빌드 및 설치 (Rust 환경)
+```bash
+git clone https://github.com/ppzxc/backup.git
+cd backup
+cargo install --path .
+```
+
+---
+
 ## 🌟 주요 특징 (Key Features)
 
 * **고성능 & 안전한 Rust CLI**: 빠른 실행 속도, 강력한 타입 안정성 및 메모리 안전성 보장.

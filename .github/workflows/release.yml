@@ -14,10 +14,15 @@ jobs:
       - name: Build release binary
         run: cargo build --release
       - name: Package binary
-        run: tar -czvf backup-linux-amd64.tar.gz -C target/release backup
+        run: |
+          TAG=${GITHUB_REF_NAME}
+          TARGET="x86_64-unknown-linux-gnu"
+          TAR_NAME="backup-${TAG}-${TARGET}.tar.gz"
+          tar -czvf "${TAR_NAME}" -C target/release backup
+          echo "TAR_NAME=${TAR_NAME}" >> $GITHUB_ENV
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: backup-linux-amd64.tar.gz
+          files: ${{ env.TAR_NAME }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
