@@ -109,6 +109,7 @@ impl BackupConfig {
         }
         default_profile.repository = Some(self.storage.primary.repository.clone());
         default_profile.password = Some(self.storage.primary.password.expose_secret().to_string());
+        default_profile.insecure_tls = Some(true);
         
         if let Some(ref s3) = self.storage.primary.s3 {
             let mut env_map = default_profile.env.unwrap_or_default();
@@ -123,6 +124,7 @@ impl BackupConfig {
             description: Some(format!("Backup profile for {}", self.profile)),
             inherit: Some("default".into()),
             initialize: Some(true),
+            insecure_tls: None,
             backup: Some(BackupCommandSection {
                 source: Some(self.backup.targets.clone()),
                 exclude: if self.backup.excludes.is_empty() { None } else { Some(self.backup.excludes.clone()) },
@@ -372,6 +374,8 @@ pub struct ProfileSection {
     pub password_file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub insecure_tls: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inherit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
