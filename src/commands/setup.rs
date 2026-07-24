@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::path::Path;
 use secrecy::SecretString;
 use crate::config::model::*;
+use crate::i18n::{Language, I18nMessages};
 
 #[derive(Clone)]
 pub struct SetupParams {
@@ -16,31 +17,48 @@ pub struct SetupParams {
 }
 
 pub trait SetupPrompter {
-    fn prompt_setup_params(&self) -> Result<SetupParams>;
+    fn prompt_setup_params(&self, lang_opt: Option<Language>) -> Result<SetupParams>;
 }
 
 pub struct InquirePrompter;
 
 impl SetupPrompter for InquirePrompter {
-    fn prompt_setup_params(&self) -> Result<SetupParams> {
-        let profile = inquire::Text::new("Enter Profile Name:")
+    fn prompt_setup_params(&self, lang_opt: Option<Language>) -> Result<SetupParams> {
+        let lang = match lang_opt {
+            Some(l) => l,
+            None => {
+                let choice = inquire::Select::new(
+                    "Select Language / 언어 선택:",
+                    vec!["[1] 한국어 (Korean)", "[2] English"],
+                ).prompt()?;
+                if choice.starts_with("[1]") {
+                    Language::Ko
+                } else {
+                    Language::En
+                }
+            }
+        };
+
+        let msg = I18nMessages::get(lang);
+
+        let profile = inquire::Text::new(msg.enter_profile_name)
             .with_default("default")
             .prompt()?;
 
         let backup_type_choice = inquire::Select::new(
-            "Select Backup Type:",
-            vec!["[1] Directory Batch Backup", "[2] DB Streaming Backup"],
+            msg.select_backup_type,
+            vec![msg.dir_batch_backup, msg.db_stream_backup],
         ).prompt()?;
 
         let (backup_type, targets) = if backup_type_choice.starts_with("[1]") {
-            let t = inquire::Text::new("Enter Target Directory(ies), comma-separated:")
+            let t = inquire::Text::new(msg.enter_target_dir)
                 .with_default("/data")
                 .prompt()?;
             let target_list: Vec<String> = t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
             (BackupType::Directory, target_list)
         } else {
-            let db_kind = inquire::Select::new("Select DB Type:", vec!["mysql", "postgres"]).prompt()?;
-            let conn = inquire::Text::new("Enter Connection URL (optional):").prompt_skippable()?;
+            let db_kind = inquire::Select::new(msg.select_db_type, vec!["mysql", "postgres"]).prompt()?;
+            let conn = inquire::Text::new(msg.enter_conn_url).prompt_skippable()?;
             (
                 BackupType::DbStream {
                     db_type: db_kind.to_string(),
@@ -51,7 +69,7 @@ impl SetupPrompter for InquirePrompter {
             )
         };
 
-        let excludes_str = inquire::Text::new("Enter Exclude Patterns, comma-separated (optional):")
+        let excludes_str = inquire::Text::new(msg.enter_exclude_patterns)
             .with_default("")
             .prompt()?;
         let excludes: Vec<String> = excludes_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
@@ -62,41 +80,41 @@ impl SetupPrompter for InquirePrompter {
             BackupType::DbStream { .. } => (180, 12, 24),
         };
 
-        let keep_daily = inquire::CustomType::<u32>::new("Retention: Keep Daily Snapshots:")
+        let keep_daily = inquire::CustomType::<u32>::new(msg.retention_keep_daily)
             .with_default(default_daily)
             .prompt()?;
-        let keep_weekly = inquire::CustomType::<u32>::new("Retention: Keep Weekly Snapshots:")
+        let keep_weekly = inquire::CustomType::<u32>::new(msg.retention_keep_weekly)
             .with_default(default_weekly)
             .prompt()?;
-        let keep_monthly = inquire::CustomType::<u32>::new("Retention: Keep Monthly Snapshots:")
+        let keep_monthly = inquire::CustomType::<u32>::new(msg.retention_keep_monthly)
             .with_default(default_monthly)
             .prompt()?;
 
         // Primary Storage Setup
-        let backend = inquire::Select::new("Primary Storage Backend:", vec!["sftp", "s3", "local"])
+        let backend = inquire::Select::new(msg.primary_storage_backend, vec!["sftp", "s3", "local"])
             .prompt()?;
 
-        let repository = inquire::Text::new("Primary Repository URI:")
+        let repository = inquire::Text::new(msg.primary_repo_uri)
             .with_default("sftp:user@backup-server:/var/backups")
             .prompt()?;
 
-        let password = inquire::Password::new("Enter Encryption Password (min 12 chars for ISMS):")
+        let password = inquire::Password::new(msg.enter_encryption_password)
             .without_confirmation()
             .prompt()?;
         
         if password.len() < 12 {
-            anyhow::bail!("ISMS Compliance Error: Password must be at least 12 characters long.");
+            anyhow::bail!(msg.isms_password_error);
         }
 
         let sftp_config = if backend == "sftp" {
-            let host = inquire::Text::new("SFTP Host:").with_default("backup-server").prompt()?;
-            let port = inquire::CustomType::<u16>::new("SFTP Port:").with_default(22).prompt()?;
-            let user = inquire::Text::new("SFTP User:").with_default("backup").prompt()?;
-            let key_file = inquire::Text::new("SFTP SSH Key File Path (Required for ISMS):")
+            let host = inquire::Text::new(msg.sftp_host).with_default("backup-server").prompt()?;
+            let port = inquire::CustomType::<u16>::new(msg.sftp_port).with_default(22).prompt()?;
+            let user = inquire::Text::new(msg.sftp_user).with_default("backup").prompt()?;
+            let key_file = inquire::Text::new(msg.sftp_key_file)
                 .with_default("/etc/backup/id_rsa")
                 .prompt()?;
             if key_file.trim().is_empty() {
-                anyhow::bail!("ISMS Compliance Error: SFTP requires SSH key_file path for passwordless key-based authentication.");
+                anyhow::bail!(msg.isms_sftp_key_error);
             }
             Some(SftpConfig {
                 host,
@@ -117,14 +135,14 @@ impl SetupPrompter for InquirePrompter {
         };
 
         // Secondary Storage Setup (Optional)
-        let enable_sec = inquire::Confirm::new("Configure Secondary (Offsite/Redundant) Storage?")
+        let enable_sec = inquire::Confirm::new(msg.config_secondary_storage)
             .with_default(false)
             .prompt()?;
 
         let secondary_storage = if enable_sec {
-            let sec_backend = inquire::Select::new("Secondary Backend:", vec!["sftp", "s3", "local"]).prompt()?;
-            let sec_repo = inquire::Text::new("Secondary Repository URI:").prompt()?;
-            let sec_pass = inquire::Password::new("Secondary Password:").without_confirmation().prompt()?;
+            let sec_backend = inquire::Select::new(msg.secondary_backend, vec!["sftp", "s3", "local"]).prompt()?;
+            let sec_repo = inquire::Text::new(msg.secondary_repo_uri).prompt()?;
+            let sec_pass = inquire::Password::new(msg.secondary_password).without_confirmation().prompt()?;
             Some(SecondaryStorageTarget {
                 enabled: true,
                 backend: sec_backend.to_string(),
@@ -136,12 +154,12 @@ impl SetupPrompter for InquirePrompter {
         };
 
         // ISMS Report Options Setup
-        let enable_reports = inquire::Confirm::new("Enable ISMS Audit & Daily/Annual Report Generation?")
+        let enable_reports = inquire::Confirm::new(msg.enable_isms_reports)
             .with_default(true)
             .prompt()?;
 
         let reports = if enable_reports {
-            let output_dir = inquire::Text::new("Report Export Directory:")
+            let output_dir = inquire::Text::new(msg.report_export_dir)
                 .with_default("/var/log/backup/reports")
                 .prompt()?;
             ReportsConfig {
@@ -242,10 +260,10 @@ impl SetupEngine {
         })
     }
 
-    pub fn run<P: SetupPrompter>(config_path: &Path, prompter: &P, non_interactive: bool) -> Result<()> {
+    pub fn run<P: SetupPrompter>(config_path: &Path, prompter: &P, non_interactive: bool, lang_opt: Option<Language>) -> Result<()> {
         use std::io::IsTerminal;
         if !non_interactive && cfg!(not(test)) && std::io::stdin().is_terminal() {
-            let params = prompter.prompt_setup_params()?;
+            let params = prompter.prompt_setup_params(lang_opt)?;
             let config = Self::validate_and_build(params)?;
 
             config.save_to_path(config_path)?;
@@ -259,13 +277,13 @@ impl SetupEngine {
     }
 }
 
-pub fn run_setup_with_prompter<P: SetupPrompter>(config_path: &Path, prompter: &P, non_interactive: bool) -> Result<()> {
-    SetupEngine::run(config_path, prompter, non_interactive)
+pub fn run_setup_with_prompter<P: SetupPrompter>(config_path: &Path, prompter: &P, non_interactive: bool, lang_opt: Option<Language>) -> Result<()> {
+    SetupEngine::run(config_path, prompter, non_interactive, lang_opt)
 }
 
-pub fn run_setup(config_path: &Path) -> Result<()> {
+pub fn run_setup(config_path: &Path, lang_opt: Option<Language>) -> Result<()> {
     let prompter = InquirePrompter;
-    run_setup_with_prompter(config_path, &prompter, false)
+    run_setup_with_prompter(config_path, &prompter, false, lang_opt)
 }
 
 use crate::runner::executor::{CommandRunner, SystemExecutor};

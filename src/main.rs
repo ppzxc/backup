@@ -13,6 +13,8 @@ enum Commands {
     /// Backup Environment and Backup Profile setup
     Setup {
         #[arg(long)]
+        lang: Option<String>,
+        #[arg(long)]
         non_interactive: bool,
         #[command(subcommand)]
         action: Option<SetupAction>,
@@ -142,7 +144,7 @@ fn main() -> anyhow::Result<()> {
     let restic = backup::runner::restic::ResticTool::new(&executor);
 
     match cli.command {
-        Commands::Setup { non_interactive, action } => {
+        Commands::Setup { lang, non_interactive, action } => {
             match action {
                 Some(SetupAction::Dependencies) => {
                     let out = backup::commands::setup::run_setup_dependencies()?;
@@ -151,7 +153,8 @@ fn main() -> anyhow::Result<()> {
                 Some(SetupAction::BackendInit) => println!("Backend storage repository initialized successfully."),
                 None => {
                     let prompter = backup::commands::setup::InquirePrompter;
-                    if let Err(err) = backup::commands::setup::run_setup_with_prompter(default_config_path, &prompter, non_interactive) {
+                    let lang_opt = lang.as_deref().map(backup::i18n::Language::from_str);
+                    if let Err(err) = backup::commands::setup::run_setup_with_prompter(default_config_path, &prompter, non_interactive, lang_opt) {
                         println!("Setup initialized (Config target: {}, status: {})", default_config_path.display(), err);
                     } else {
                         println!("Setup completed successfully.");

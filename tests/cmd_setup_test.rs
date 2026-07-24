@@ -1,5 +1,6 @@
 use backup::commands::setup::{create_default_config_file, run_setup_with_prompter, SetupParams, SetupPrompter};
 use backup::config::model::*;
+use backup::i18n::Language;
 use secrecy::SecretString;
 use tempfile::tempdir;
 
@@ -31,7 +32,7 @@ struct MockPrompter {
 }
 
 impl SetupPrompter for MockPrompter {
-    fn prompt_setup_params(&self) -> anyhow::Result<SetupParams> {
+    fn prompt_setup_params(&self, _lang_opt: Option<Language>) -> anyhow::Result<SetupParams> {
         if self.params.primary_storage.backend == "sftp" {
             let key = self.params.primary_storage.sftp.as_ref().and_then(|s| s.key_file.as_deref()).unwrap_or("");
             if key.trim().is_empty() {
@@ -95,7 +96,7 @@ fn test_setup_with_prompter_success() {
     };
 
     let prompter = MockPrompter { params };
-    run_setup_with_prompter(&config_path, &prompter, false).unwrap();
+    run_setup_with_prompter(&config_path, &prompter, false, Some(Language::En)).unwrap();
 
     let loaded = BackupConfig::load_from_path(&config_path).unwrap();
     assert_eq!(loaded.profile, "profile-db");
