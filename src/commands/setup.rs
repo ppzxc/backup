@@ -435,6 +435,13 @@ impl SetupEngine {
             config_path
         };
 
+        let _ = std::fs::create_dir_all(config_dir);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(config_dir, std::fs::Permissions::from_mode(0o700));
+        }
+
         if !non_interactive {
             let params = prompter.prompt_setup_params(lang_opt, config_dir)?;
             let config = Self::validate_and_build(params)?;
