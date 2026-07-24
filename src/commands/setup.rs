@@ -145,9 +145,15 @@ impl SetupPrompter for InquirePrompter {
                     .prompt()?;
                 let _region = prompt_text_with_default(msg.s3_region, "", lang)?;
                 let bucket = prompt_text_with_default(msg.s3_bucket, "my-backup-bucket", lang)?;
+                let subfolder = prompt_text_with_default(msg.s3_path, "", lang)?;
 
                 let clean_endpoint = endpoint.trim_start_matches("s3:").trim_end_matches('/');
-                let repo_uri = format!("s3:{}/{}", clean_endpoint, bucket);
+                let clean_subfolder = subfolder.trim_matches('/');
+                let repo_uri = if clean_subfolder.is_empty() {
+                    format!("s3:{}/{}", clean_endpoint, bucket)
+                } else {
+                    format!("s3:{}/{}/{}", clean_endpoint, bucket, clean_subfolder)
+                };
 
                 let s3_conf = S3Config {
                     endpoint,
@@ -158,7 +164,7 @@ impl SetupPrompter for InquirePrompter {
             } else {
                 let repo_uri = prompt_text_with_default(
                     msg.primary_repo_uri,
-                    "s3:https://s3.amazonaws.com/my-backup-bucket",
+                    "s3:https://s3.amazonaws.com/my-backup-bucket/backup",
                     lang,
                 )?;
                 (repo_uri, None, None)

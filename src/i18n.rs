@@ -79,6 +79,7 @@ pub struct I18nMessages {
     pub s3_secret_access_key: &'static str,
     pub s3_region: &'static str,
     pub s3_bucket: &'static str,
+    pub s3_path: &'static str,
 }
 
 impl I18nMessages {
@@ -126,6 +127,7 @@ impl I18nMessages {
                 s3_secret_access_key: "S3 Secret Access Key:",
                 s3_region: "S3 리전 (선택사항):",
                 s3_bucket: "S3 버킷 이름:",
+                s3_path: "S3 버킷 내 하위 폴더 경로 (예: backup, log 등 / 생략 가능):",
             },
             Language::En => Self {
                 select_language: "Select Language / 언어 선택:",
@@ -169,6 +171,7 @@ impl I18nMessages {
                 s3_secret_access_key: "S3 Secret Access Key:",
                 s3_region: "S3 Region (optional):",
                 s3_bucket: "S3 Bucket Name:",
+                s3_path: "S3 Bucket Subfolder Path (e.g. backup, log / optional):",
             },
         }
     }
