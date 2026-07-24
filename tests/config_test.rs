@@ -211,7 +211,7 @@ profiles:
         Some("s3:https://s3.amazonaws.com/mybucket")
     );
     let self_prof = config.profiles.get("self").unwrap();
-    assert_eq!(self_prof.inherit.as_deref(), Some("default"));
+    assert_eq!(self_prof.inherit.as_deref(), Some(["default".to_string()].as_slice()));
 
     let backup_sec = self_prof.backup.as_ref().unwrap();
     assert_eq!(backup_sec.source.as_ref().unwrap(), &vec!["/var/www".to_string()]);
@@ -323,6 +323,56 @@ storage:
     // Both log and db profiles must exist
     assert!(content2.contains("log:"), "Original 'log' profile must be preserved");
     assert!(content2.contains("db:"), "New 'db' profile must be merged");
+}
+
+#[test]
+fn test_profiles_yaml_three_layer_separation() {
+    use backup::config::model::ResticProfileConfig;
+
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("etc_backup");
+
+    let yaml = r#"
+version: "1.0"
+profile: "web-data"
+backup:
+  targets: ["/var/www/html"]
+  excludes: []
+retention:
+  keepDaily: 7
+  keepWeekly: 4
+  keepMonthly: 12
+storage:
+  primary:
+    backend: "s3"
+    repository: "s3:https://s3.amazonaws.com/primary-bucket"
+    password: "primary_password_123"
+  secondary:
+    enabled: true
+    backend: "s3"
+    repository: "s3:https://s3.amazonaws.com/secondary-bucket"
+    password: "secondary_password_123"
+"#;
+    let config: BackupConfig = serde_yaml::from_str(yaml).unwrap();
+    config.save_and_sync(&config_dir).unwrap();
+
+    let profiles_file = config_dir.join("profiles.yaml");
+    let restic_config = ResticProfileConfig::load_from_path(&profiles_file).unwrap();
+
+    assert!(restic_config.profiles.contains_key("default"));
+    assert!(restic_config.profiles.contains_key("primary"));
+    assert!(restic_config.profiles.contains_key("secondary"));
+    assert!(restic_config.profiles.contains_key("web-data"));
+
+    let primary_prof = restic_config.profiles.get("primary").unwrap();
+    assert_eq!(primary_prof.repository.as_deref(), Some("s3:https://s3.amazonaws.com/primary-bucket"));
+
+    let secondary_prof = restic_config.profiles.get("secondary").unwrap();
+    assert_eq!(secondary_prof.repository.as_deref(), Some("s3:https://s3.amazonaws.com/secondary-bucket"));
+
+    let web_prof = restic_config.profiles.get("web-data").unwrap();
+    assert_eq!(web_prof.inherit.as_deref(), Some(["default".to_string(), "primary".to_string()].as_slice()));
+    assert_eq!(web_prof.copy.as_ref().unwrap().profile.as_deref(), Some("secondary"));
 }
 
 

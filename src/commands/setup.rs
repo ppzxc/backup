@@ -91,18 +91,78 @@ impl SetupPrompter for InquirePrompter {
             .with_default(default_monthly)
             .prompt()?;
 
-        // Primary Storage Setup
-        let backend = inquire::Select::new(msg.primary_storage_backend, vec!["sftp", "s3", "local"])
-            .prompt()?;
+        // Primary & Secondary Storage Setup
+        let profiles_yaml_path = Path::new("/etc/backup/profiles.yaml");
+        let existing_restic = if profiles_yaml_path.exists() {
+            ResticProfileConfig::load_from_path(profiles_yaml_path).ok()
+        } else {
+            None
+        };
 
-        let (repository, sftp_config, s3_config) = if backend == "sftp" {
-            let host = prompt_text_with_default(msg.sftp_host, "192.168.1.100", lang)?;
-            let port = inquire::CustomType::<u16>::new(msg.sftp_port).with_default(22).prompt()?;
-            let user = prompt_text_with_default(msg.sftp_user, "backup", lang)?;
-            let path = prompt_text_with_default(msg.sftp_path, "/backup", lang)?;
+        let primary_prof = existing_restic.as_ref().and_then(|c| c.profiles.get("primary"));
+        let reuse_storage = if let Some(p) = primary_prof {
+            if let Some(ref repo) = p.repository {
+                println!("\n[i] Found existing storage configuration:");
+                println!("    Primary Repository: {}", repo);
+                if let Some(sec) = existing_restic.as_ref().and_then(|c| c.profiles.get("secondary")) {
+                    if let Some(ref sec_repo) = sec.repository {
+                        println!("    Secondary Repository: {}", sec_repo);
+                    }
+                }
+                inquire::Confirm::new(msg.reuse_existing_storage_prompt)
+                    .with_default(true)
+                    .prompt()?
+            } else {
+                false
+            }
+        } else {
+            false
+        };
 
-            let gen_key = inquire::Confirm::new(msg.sftp_auto_gen_key).with_default(true).prompt()?;
-            let key_file = if gen_key {
+        let (primary_storage, secondary_storage) = if reuse_storage {
+            let p = primary_prof.unwrap();
+            let repo = p.repository.clone().unwrap_or_default();
+            let backend = if repo.starts_with("s3:") {
+                "s3"
+            } else if repo.starts_with("sftp:") {
+                "sftp"
+            } else {
+                "local"
+            };
+
+            let pwd = p.password.clone().unwrap_or_else(|| "default_secret_pass123".to_string());
+            let primary = StorageTarget {
+                backend: backend.to_string(),
+                repository: repo,
+                password: SecretString::new(pwd),
+                sftp: None,
+                s3: None,
+            };
+
+            let secondary = existing_restic.as_ref().and_then(|c| c.profiles.get("secondary")).map(|sec_prof| {
+                let sec_repo = sec_prof.repository.clone().unwrap_or_default();
+                let sec_backend = if sec_repo.starts_with("s3:") {
+                    "s3"
+                } else if sec_repo.starts_with("sftp:") {
+                    "sftp"
+                } else {
+                    "local"
+                };
+                let sec_pwd = sec_prof.password.clone().unwrap_or_default();
+                SecondaryStorageTarget {
+                    enabled: true,
+                    backend: sec_backend.to_string(),
+                    repository: sec_repo,
+                    password: SecretString::new(sec_pwd),
+                }
+            });
+
+            (primary, secondary)
+        } else {
+            let backend = inquire::Select::new(msg.primary_storage_backend, vec!["sftp", "s3", "local"])
+                .prompt()?;
+
+            let (repository, sftp_config, s3_config) = if backend == "sftp" {
                 let key_path = "/etc/backup/id_ed25519";
                 let pub_path = "/etc/backup/id_ed25519.pub";
                 if !Path::new(key_path).exists() {
@@ -111,124 +171,127 @@ impl SetupPrompter for InquirePrompter {
                         .output();
                 }
                 if let Ok(pub_key) = std::fs::read_to_string(pub_path) {
-                    println!("\n=== SSH Public Key (/etc/backup/id_ed25519.pub) ===");
-                    println!("{}", pub_key.trim());
-                    println!("Please register this public key into remote server's ~/.ssh/authorized_keys\n");
+                    println!("\n================================================================================");
+                    println!("{}", msg.sftp_pubkey_notice);
+                    println!("================================================================================");
+                    println!("{}\n", pub_key.trim());
                 }
-                key_path.to_string()
+
+                let _ = inquire::Text::new(msg.sftp_press_enter).prompt_skippable()?;
+
+                let host = prompt_text_with_default(msg.sftp_host, "192.168.1.100", lang)?;
+                let port = inquire::CustomType::<u16>::new(msg.sftp_port).with_default(22).prompt()?;
+                let user = prompt_text_with_default(msg.sftp_user, "backup", lang)?;
+                let path = prompt_text_with_default(msg.sftp_path, "/backup", lang)?;
+
+                let repo_uri = format!("sftp:{}@{}:{}", user, host, path);
+                (repo_uri, Some(SftpConfig {
+                    host,
+                    port,
+                    user,
+                    key_file: Some(key_path.to_string()),
+                }), None)
+            } else if backend == "s3" {
+                let mode_choice = inquire::Select::new(
+                    msg.s3_mode_select,
+                    vec![msg.s3_mode_detailed, msg.s3_mode_uri_only],
+                ).prompt()?;
+
+                if mode_choice.starts_with("[1]") {
+                    let endpoint = prompt_text_with_default(msg.s3_endpoint, "https://s3.amazonaws.com", lang)?;
+                    let access_key_id = inquire::Text::new(msg.s3_access_key_id).prompt()?;
+                    let secret_access_key_str = inquire::Password::new(msg.s3_secret_access_key)
+                        .without_confirmation()
+                        .prompt()?;
+                    let _region = prompt_text_with_default(msg.s3_region, "", lang)?;
+                    let bucket = prompt_text_with_default(msg.s3_bucket, "my-backup-bucket", lang)?;
+                    let subfolder = prompt_text_with_default(msg.s3_path, "", lang)?;
+
+                    let clean_endpoint = endpoint.trim_start_matches("s3:").trim_end_matches('/');
+                    let clean_subfolder = subfolder.trim_matches('/');
+                    let repo_uri = if clean_subfolder.is_empty() {
+                        format!("s3:{}/{}", clean_endpoint, bucket)
+                    } else {
+                        format!("s3:{}/{}/{}", clean_endpoint, bucket, clean_subfolder)
+                    };
+
+                    let s3_conf = S3Config {
+                        endpoint,
+                        access_key_id,
+                        secret_access_key: SecretString::new(secret_access_key_str),
+                    };
+                    (repo_uri, None, Some(s3_conf))
+                } else {
+                    let repo_uri = prompt_text_with_default(
+                        msg.primary_repo_uri,
+                        "s3:https://s3.amazonaws.com/my-backup-bucket/backup",
+                        lang,
+                    )?;
+                    (repo_uri, None, None)
+                }
             } else {
-                let k = prompt_text_with_default(msg.sftp_key_file, "/etc/backup/id_rsa", lang)?;
-                if k.trim().is_empty() {
-                    anyhow::bail!(msg.isms_sftp_key_error);
-                }
-                k
+                let repo_uri = prompt_text_with_default(msg.primary_repo_uri, "/data/backup", lang)?;
+                (repo_uri, None, None)
             };
 
-            let repo_uri = format!("sftp:{}@{}:{}", user, host, path);
-            (repo_uri, Some(SftpConfig {
-                host,
-                port,
-                user,
-                key_file: Some(key_file),
-            }), None)
-        } else if backend == "s3" {
-            let mode_choice = inquire::Select::new(
-                msg.s3_mode_select,
-                vec![msg.s3_mode_detailed, msg.s3_mode_uri_only],
-            ).prompt()?;
-
-            if mode_choice.starts_with("[1]") {
-                let endpoint = prompt_text_with_default(msg.s3_endpoint, "https://s3.amazonaws.com", lang)?;
-                let access_key_id = inquire::Text::new(msg.s3_access_key_id).prompt()?;
-                let secret_access_key_str = inquire::Password::new(msg.s3_secret_access_key)
-                    .without_confirmation()
-                    .prompt()?;
-                let _region = prompt_text_with_default(msg.s3_region, "", lang)?;
-                let bucket = prompt_text_with_default(msg.s3_bucket, "my-backup-bucket", lang)?;
-                let subfolder = prompt_text_with_default(msg.s3_path, "", lang)?;
-
-                let clean_endpoint = endpoint.trim_start_matches("s3:").trim_end_matches('/');
-                let clean_subfolder = subfolder.trim_matches('/');
-                let repo_uri = if clean_subfolder.is_empty() {
-                    format!("s3:{}/{}", clean_endpoint, bucket)
-                } else {
-                    format!("s3:{}/{}/{}", clean_endpoint, bucket, clean_subfolder)
-                };
-
-                let s3_conf = S3Config {
-                    endpoint,
-                    access_key_id,
-                    secret_access_key: SecretString::new(secret_access_key_str),
-                };
-                (repo_uri, None, Some(s3_conf))
+            let default_enc_path = Path::new("/etc/backup/enc");
+            let password = if let Some(existing_pass) = resolve_encryption_keyfile(default_enc_path) {
+                println!("\n{}", msg.found_existing_keyfile);
+                existing_pass
             } else {
-                let repo_uri = prompt_text_with_default(
-                    msg.primary_repo_uri,
-                    "s3:https://s3.amazonaws.com/my-backup-bucket/backup",
-                    lang,
-                )?;
-                (repo_uri, None, None)
-            }
-        } else {
-            let repo_uri = prompt_text_with_default(msg.primary_repo_uri, "/data/backup", lang)?;
-            (repo_uri, None, None)
-        };
-
-        let default_enc_path = Path::new("/etc/backup/enc");
-        let password = if let Some(existing_pass) = resolve_encryption_keyfile(default_enc_path) {
-            println!("\n{}", msg.found_existing_keyfile);
-            existing_pass
-        } else {
-            let auto_gen = inquire::Confirm::new(msg.auto_generate_password_prompt)
-                .with_default(true)
-                .prompt()?;
-
-            if auto_gen {
-                let gen_pass = generate_secure_password();
-                let _ = save_encryption_keyfile(default_enc_path, &gen_pass);
-                gen_pass
-            } else {
-                let user_pass = inquire::Password::new(msg.enter_encryption_password)
-                    .without_confirmation()
-                    .prompt()?;
-                if user_pass.len() < 12 {
-                    anyhow::bail!(msg.isms_password_error);
-                }
-                let save_key = inquire::Confirm::new(msg.save_password_to_keyfile_prompt)
+                let auto_gen = inquire::Confirm::new(msg.auto_generate_password_prompt)
                     .with_default(true)
                     .prompt()?;
-                if save_key {
-                    let _ = save_encryption_keyfile(default_enc_path, &user_pass);
+
+                if auto_gen {
+                    let gen_pass = generate_secure_password();
+                    let _ = save_encryption_keyfile(default_enc_path, &gen_pass);
+                    gen_pass
+                } else {
+                    let user_pass = inquire::Password::new(msg.enter_encryption_password)
+                        .without_confirmation()
+                        .prompt()?;
+                    if user_pass.len() < 12 {
+                        anyhow::bail!(msg.isms_password_error);
+                    }
+                    let save_key = inquire::Confirm::new(msg.save_password_to_keyfile_prompt)
+                        .with_default(true)
+                        .prompt()?;
+                    if save_key {
+                        let _ = save_encryption_keyfile(default_enc_path, &user_pass);
+                    }
+                    user_pass
                 }
-                user_pass
-            }
-        };
+            };
 
-        let primary_storage = StorageTarget {
-            backend: backend.to_string(),
-            repository,
-            password: SecretString::new(password),
-            sftp: sftp_config,
-            s3: s3_config,
-        };
+            let primary = StorageTarget {
+                backend: backend.to_string(),
+                repository,
+                password: SecretString::new(password),
+                sftp: sftp_config,
+                s3: s3_config,
+            };
 
-        // Secondary Storage Setup (Optional)
-        let enable_sec = inquire::Confirm::new(msg.config_secondary_storage)
-            .with_default(false)
-            .prompt()?;
+            // Secondary Storage Setup (Optional)
+            let enable_sec = inquire::Confirm::new(msg.config_secondary_storage)
+                .with_default(false)
+                .prompt()?;
 
-        let secondary_storage = if enable_sec {
-            let sec_backend = inquire::Select::new(msg.secondary_backend, vec!["sftp", "s3", "local"]).prompt()?;
-            let sec_repo = inquire::Text::new(msg.secondary_repo_uri).prompt()?;
-            let sec_pass = inquire::Password::new(msg.secondary_password).without_confirmation().prompt()?;
-            Some(SecondaryStorageTarget {
-                enabled: true,
-                backend: sec_backend.to_string(),
-                repository: sec_repo,
-                password: SecretString::new(sec_pass),
-            })
-        } else {
-            None
+            let secondary = if enable_sec {
+                let sec_backend = inquire::Select::new(msg.secondary_backend, vec!["sftp", "s3", "local"]).prompt()?;
+                let sec_repo = inquire::Text::new(msg.secondary_repo_uri).prompt()?;
+                let sec_pass = inquire::Password::new(msg.secondary_password).without_confirmation().prompt()?;
+                Some(SecondaryStorageTarget {
+                    enabled: true,
+                    backend: sec_backend.to_string(),
+                    repository: sec_repo,
+                    password: SecretString::new(sec_pass),
+                })
+            } else {
+                None
+            };
+
+            (primary, secondary)
         };
 
         // ISMS Report Options Setup

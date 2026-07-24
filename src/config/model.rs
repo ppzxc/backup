@@ -102,38 +102,71 @@ impl BackupConfig {
 
         restic_config.version = "2".into();
 
-        // Populate default profile inside profiles map
+        // 1. Populate default profile (truly global options only)
         let mut default_profile = restic_config.profiles.remove("default").unwrap_or_default();
         if default_profile.description.is_none() {
-            default_profile.description = Some("Contains default parameters like repository and password".into());
+            default_profile.description = Some("Global common options".into());
         }
-        default_profile.repository = Some(self.storage.primary.repository.clone());
+        default_profile.insecure_tls = Some(true);
+        restic_config.profiles.insert("default".into(), default_profile);
+
+        // 2. Populate primary profile (1st storage configuration)
+        let mut primary_profile = restic_config.profiles.remove("primary").unwrap_or_default();
+        if primary_profile.description.is_none() {
+            primary_profile.description = Some("Primary Storage configuration".into());
+        }
+        primary_profile.repository = Some(self.storage.primary.repository.clone());
         let enc_path = Path::new("/etc/backup/enc");
         if enc_path.is_file() {
-            default_profile.password_file = Some("/etc/backup/enc".into());
-            default_profile.password = None;
+            primary_profile.password_file = Some("/etc/backup/enc".into());
+            primary_profile.password = None;
         } else {
             let pwd = self.storage.primary.password.expose_secret();
             if !pwd.trim().is_empty() {
-                default_profile.password = Some(pwd.to_string());
+                primary_profile.password = Some(pwd.to_string());
             } else {
-                default_profile.password = Some("default_secret_pass123".into());
+                primary_profile.password = Some("default_secret_pass123".into());
             }
         }
-        default_profile.insecure_tls = Some(true);
-        
         if let Some(ref s3) = self.storage.primary.s3 {
-            let mut env_map = default_profile.env.unwrap_or_default();
+            let mut env_map = primary_profile.env.unwrap_or_default();
             env_map.insert("AWS_ACCESS_KEY_ID".into(), s3.access_key_id.clone());
             env_map.insert("AWS_SECRET_ACCESS_KEY".into(), s3.secret_access_key.expose_secret().to_string());
-            default_profile.env = Some(env_map);
+            primary_profile.env = Some(env_map);
         }
-        restic_config.profiles.insert("default".into(), default_profile);
+        restic_config.profiles.insert("primary".into(), primary_profile);
 
-        // Build current target profile section
+        // 3. Populate secondary profile (if enabled)
+        if let Some(ref sec) = self.storage.secondary {
+            if sec.enabled {
+                let mut secondary_profile = restic_config.profiles.remove("secondary").unwrap_or_default();
+                if secondary_profile.description.is_none() {
+                    secondary_profile.description = Some("Secondary Storage configuration".into());
+                }
+                secondary_profile.repository = Some(sec.repository.clone());
+                let pwd = sec.password.expose_secret();
+                if !pwd.trim().is_empty() {
+                    secondary_profile.password = Some(pwd.to_string());
+                }
+                restic_config.profiles.insert("secondary".into(), secondary_profile);
+            }
+        }
+
+        // 4. Build target profile section
+        let copy_section = if self.storage.secondary.as_ref().map_or(false, |s| s.enabled) {
+            Some(CopyCommandSection {
+                profile: Some("secondary".into()),
+                initialize: Some(true),
+                schedule: Some("*-*-* 04:00:00".into()),
+                ..Default::default()
+            })
+        } else {
+            None
+        };
+
         let profile_section = ProfileSection {
             description: Some(format!("Backup profile for {}", self.profile)),
-            inherit: Some("default".into()),
+            inherit: Some(vec!["default".into(), "primary".into()]),
             initialize: Some(true),
             insecure_tls: None,
             backup: Some(BackupCommandSection {
@@ -182,6 +215,7 @@ impl BackupConfig {
             password_file: None,
             password: None,
             env: None,
+            copy: copy_section,
         };
 
         restic_config.profiles.insert(self.profile.clone(), profile_section);
@@ -344,7 +378,7 @@ impl ResticProfileConfig {
     pub fn profile_names(&self) -> Vec<String> {
         self.profiles
             .keys()
-            .filter(|k| k.as_str() != "default")
+            .filter(|k| k.as_str() != "default" && k.as_str() != "primary" && k.as_str() != "secondary")
             .cloned()
             .collect()
     }
@@ -387,8 +421,9 @@ pub struct ProfileSection {
     pub password: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub insecure_tls: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub inherit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "inherit_serde")]
+    pub inherit: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initialize: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -403,6 +438,64 @@ pub struct ProfileSection {
     pub prune: Option<PruneCommandSection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub check: Option<CheckCommandSection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copy: Option<CopyCommandSection>,
+}
+
+pub mod inherit_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Deserialize, Serialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        Single(String),
+        Multiple(Vec<String>),
+    }
+
+    pub fn serialize<S>(val: &Option<Vec<String>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match val {
+            Some(v) => {
+                if v.len() == 1 {
+                    serializer.serialize_str(&v[0])
+                } else {
+                    v.serialize(serializer)
+                }
+            }
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt: Option<StringOrVec> = Option::deserialize(deserializer)?;
+        match opt {
+            Some(StringOrVec::Single(s)) => Ok(Some(vec![s])),
+            Some(StringOrVec::Multiple(v)) => Ok(Some(v)),
+            None => Ok(None),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct CopyCommandSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initialize: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

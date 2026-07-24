@@ -42,16 +42,16 @@ pub fn execute_status_from_profiles_config<R: crate::runner::resticprofile::Rest
         .get(target_profile_name)
         .ok_or_else(|| anyhow::anyhow!("Profile '{}' not found in config", target_profile_name))?;
 
-    let parent_section = profile_section
-        .inherit
-        .as_deref()
-        .and_then(|p| restic_config.profiles.get(p))
-        .or_else(|| restic_config.profiles.get("default"));
-
     let repository = profile_section
         .repository
         .as_deref()
-        .or_else(|| parent_section.and_then(|d| d.repository.as_deref()))
+        .or_else(|| {
+            profile_section.inherit.as_ref().and_then(|parents| {
+                parents.iter().find_map(|p| restic_config.profiles.get(p).and_then(|sec| sec.repository.as_deref()))
+            })
+        })
+        .or_else(|| restic_config.profiles.get("primary").and_then(|p| p.repository.as_deref()))
+        .or_else(|| restic_config.profiles.get("default").and_then(|p| p.repository.as_deref()))
         .unwrap_or("unknown");
 
     let backend = if repository.starts_with("s3:") {
@@ -68,7 +68,12 @@ pub fn execute_status_from_profiles_config<R: crate::runner::resticprofile::Rest
         .backup
         .as_ref()
         .and_then(|b| b.source.as_ref())
-        .or_else(|| parent_section.and_then(|d| d.backup.as_ref().and_then(|b| b.source.as_ref())))
+        .or_else(|| {
+            profile_section.inherit.as_ref().and_then(|parents| {
+                parents.iter().find_map(|p| restic_config.profiles.get(p).and_then(|sec| sec.backup.as_ref().and_then(|b| b.source.as_ref())))
+            })
+        })
+        .or_else(|| restic_config.profiles.get("default").and_then(|p| p.backup.as_ref().and_then(|b| b.source.as_ref())))
         .cloned()
         .unwrap_or_default();
 
