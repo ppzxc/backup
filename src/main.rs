@@ -66,7 +66,11 @@ enum Commands {
     /// List snapshots across primary and secondary storage targets / 스냅샷 목록 조회
     Snapshots,
     /// Display operational status and snapshot recency / 운영 상태 및 스냅샷 주기 확인
-    Status,
+    Status {
+        /// Profile name to query status for (optional)
+        #[arg(long, short = 'p')]
+        profile: Option<String>,
+    },
     /// Self-update backup binary and assets / 바이너리 및 자산 자가 업데이트
     Update,
     /// Display CLI binary version / CLI 바이너리 버전 표시
@@ -298,8 +302,9 @@ fn main() -> anyhow::Result<()> {
             let out = backup::commands::snapshots::execute_snapshots(&config, &restic)?;
             println!("{}", out);
         }
-        Commands::Status => {
-            let out = backup::commands::status::execute_status(&config)?;
+        Commands::Status { profile } => {
+            let executor = backup::runner::executor::SystemExecutor;
+            let out = backup::commands::status::execute_status_with_runner(&config, &executor, profile.as_deref())?;
             println!("{}", out);
         }
         Commands::Update => {

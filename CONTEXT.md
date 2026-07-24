@@ -67,7 +67,7 @@
 ### 7. 기타 운영 커맨드
 * **`backup restore`**: 백업 데이터 및 DB 복원 실행
 * **`backup snapshots`**: 1차/2차 저장소 스냅샷 목록 조회
-* **`backup status`**: 저장소 위치 및 백업 상태 종합 조회
+* **`backup status [--profile <name>]`**: 백업 프로필별 저장소 위치, 최신 스냅샷(ID/시각/용량) 및 파이프라인 상태 종합 동적 조회 (조회 실패 시 Graceful Fallback 경고 표기)
 * **`backup update`**: 자기 자신(Rust 바이너리) 및 설정 갱신
 * **`backup uninstall [--purge]`**: 스케줄 해제 및 바이너리 삭제 (`--purge` 시 설정/캐시 완전 제거)
 

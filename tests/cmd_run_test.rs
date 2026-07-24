@@ -39,6 +39,110 @@ fn test_execute_run() {
 }
 
 #[test]
+fn test_execute_status_dynamic() {
+    use backup::commands::status::execute_status_with_runner;
+    use backup::runner::executor::{CommandOutput, MockExecutor};
+
+    let config = BackupConfig {
+        version: "1.0".into(),
+        profile: "log".into(),
+        backup: BackupTargets {
+            backup_type: BackupType::Directory,
+            targets: vec!["/var/log".into()],
+            excludes: vec![],
+        },
+        retention: RetentionPolicy {
+            keep_daily: 7,
+            keep_weekly: 4,
+            keep_monthly: 12,
+        },
+        storage: StorageConfig {
+            primary: StorageTarget {
+                backend: "sftp".into(),
+                repository: "rclone:syno_backup:/backup".into(),
+                password: SecretString::new("secret".into()),
+                sftp: None,
+                s3: None,
+            },
+            secondary: None,
+        },
+        reports: ReportsConfig::default(),
+    };
+
+    let mock_executor = MockExecutor::new();
+    let json_output = r#"[
+        {
+            "id": "01012723",
+            "time": "2026-07-24T17:31:02+09:00",
+            "paths": ["/var/log"],
+            "hostname": "funa1.nanoit.kr"
+        }
+    ]"#;
+    mock_executor.push_output(
+        "restic",
+        CommandOutput {
+            status_code: 0,
+            stdout: json_output.into(),
+            stderr: "".into(),
+        },
+    );
+
+    let status_res = execute_status_with_runner(&config, &mock_executor, Some("log")).unwrap();
+    assert!(status_res.contains("Profile: log"));
+    assert!(status_res.contains("Backend: sftp"));
+    assert!(status_res.contains("Repository: rclone:syno_backup:/backup"));
+    assert!(status_res.contains("Targets: [\"/var/log\"]"));
+    assert!(status_res.contains("Latest Snapshot: 01012723"));
+    assert!(status_res.contains("Snapshot Time: 2026-07-24T17:31:02+09:00"));
+}
+
+#[test]
+fn test_execute_status_fallback_on_error() {
+    use backup::commands::status::execute_status_with_runner;
+    use backup::runner::executor::{CommandOutput, MockExecutor};
+
+    let config = BackupConfig {
+        version: "1.0".into(),
+        profile: "default".into(),
+        backup: BackupTargets {
+            backup_type: BackupType::Directory,
+            targets: vec!["/data".into()],
+            excludes: vec![],
+        },
+        retention: RetentionPolicy {
+            keep_daily: 7,
+            keep_weekly: 4,
+            keep_monthly: 12,
+        },
+        storage: StorageConfig {
+            primary: StorageTarget {
+                backend: "sftp".into(),
+                repository: "rclone:syno_backup:/backup".into(),
+                password: SecretString::new("secret".into()),
+                sftp: None,
+                s3: None,
+            },
+            secondary: None,
+        },
+        reports: ReportsConfig::default(),
+    };
+
+    let mock_executor = MockExecutor::new();
+    mock_executor.push_output(
+        "restic",
+        CommandOutput {
+            status_code: 1,
+            stdout: "".into(),
+            stderr: "repository does not exist".into(),
+        },
+    );
+
+    let status_res = execute_status_with_runner(&config, &mock_executor, None).unwrap();
+    assert!(status_res.contains("Profile: default"));
+    assert!(status_res.contains("[WARN] Failed to fetch snapshots"));
+}
+
+#[test]
 fn test_execute_run_profile() {
     use backup::commands::run::PipelineOptions;
     let mock_runner = MockResticProfileRunner::new(0, "resticprofile backup complete");
