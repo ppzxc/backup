@@ -39,8 +39,6 @@ fn test_e2e_cli_lifecycle_full_subcommands() {
     // 6. Config edit & Backend migrate
     Command::cargo_bin("backup").unwrap().args(&["config", "edit"]).assert().success();
     Command::cargo_bin("backup").unwrap().args(&["backend", "migrate"]).assert().success();
-
-    // 7. Update
-    Command::cargo_bin("backup").unwrap().arg("update").assert().success();
 }
+
 

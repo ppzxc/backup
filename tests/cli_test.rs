@@ -3,7 +3,9 @@ use assert_cmd::Command;
 #[test]
 fn test_cli_version() {
     let mut cmd = Command::cargo_bin("backup").unwrap();
-    cmd.arg("--version").assert().success();
+    let assert = cmd.arg("--version").assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains(env!("CARGO_PKG_VERSION")), "--version 출력에 CARGO_PKG_VERSION이 포함되어야 합니다");
 }
 
 #[test]

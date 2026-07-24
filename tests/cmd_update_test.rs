@@ -16,3 +16,21 @@ fn test_is_newer_version() {
     assert!(!is_newer_version("0.1.5", "v0.1.5"));
     assert!(!is_newer_version("0.1.5", "0.1.4"));
 }
+
+#[test]
+fn test_execute_update_check_with_mock_runner_already_up_to_date() {
+    use backup::runner::executor::{CommandOutput, MockExecutor};
+    use backup::commands::update::execute_update_check_with_runner;
+
+    let mock = MockExecutor::new();
+    let json_body = r#"{"tag_name":"v0.1.5","assets":[{"name":"backup-v0.1.5-x86_64-unknown-linux-musl.tar.gz","browser_download_url":"https://example.com/asset.tar.gz"}]}"#;
+    mock.push_output("curl", CommandOutput {
+        status_code: 0,
+        stdout: json_body.into(),
+        stderr: "".into(),
+    });
+
+    let msg = execute_update_check_with_runner("0.1.5", &mock).unwrap();
+    assert!(msg.contains("Already up to date"), "최신 버전인 경우 Already up to date 메시지가 반환되어야 합니다");
+}
+
