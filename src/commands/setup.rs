@@ -31,7 +31,7 @@ impl SetupPrompter for InquirePrompter {
         let msg = I18nMessages::get(lang);
 
         let profile = inquire::Text::new(msg.enter_profile_name)
-            .with_default("default")
+            .with_initial_value("default")
             .prompt()?;
 
         let backup_type_choice = inquire::Select::new(
@@ -41,7 +41,7 @@ impl SetupPrompter for InquirePrompter {
 
         let (backup_type, targets) = if backup_type_choice.starts_with("[1]") {
             let t = inquire::Text::new(msg.enter_target_dir)
-                .with_default("/var/log")
+                .with_initial_value("/var/log")
                 .prompt()?;
             let target_list: Vec<String> = t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
             (BackupType::Directory, target_list)
@@ -59,7 +59,7 @@ impl SetupPrompter for InquirePrompter {
         };
 
         let excludes_str = inquire::Text::new(msg.enter_exclude_patterns)
-            .with_default("")
+            .with_initial_value("")
             .prompt()?;
         let excludes: Vec<String> = excludes_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
 
@@ -84,10 +84,10 @@ impl SetupPrompter for InquirePrompter {
             .prompt()?;
 
         let (repository, sftp_config) = if backend == "sftp" {
-            let host = inquire::Text::new(msg.sftp_host).with_default("192.168.1.100").prompt()?;
+            let host = inquire::Text::new(msg.sftp_host).with_initial_value("192.168.1.100").prompt()?;
             let port = inquire::CustomType::<u16>::new(msg.sftp_port).with_default(22).prompt()?;
-            let user = inquire::Text::new(msg.sftp_user).with_default("backup").prompt()?;
-            let path = inquire::Text::new(msg.sftp_path).with_default("/backup").prompt()?;
+            let user = inquire::Text::new(msg.sftp_user).with_initial_value("backup").prompt()?;
+            let path = inquire::Text::new(msg.sftp_path).with_initial_value("/backup").prompt()?;
 
             let gen_key = inquire::Confirm::new(msg.sftp_auto_gen_key).with_default(true).prompt()?;
             let key_file = if gen_key {
@@ -106,7 +106,7 @@ impl SetupPrompter for InquirePrompter {
                 key_path.to_string()
             } else {
                 let k = inquire::Text::new(msg.sftp_key_file)
-                    .with_default("/etc/backup/id_rsa")
+                    .with_initial_value("/etc/backup/id_rsa")
                     .prompt()?;
                 if k.trim().is_empty() {
                     anyhow::bail!(msg.isms_sftp_key_error);
@@ -123,12 +123,12 @@ impl SetupPrompter for InquirePrompter {
             }))
         } else if backend == "s3" {
             let repo_uri = inquire::Text::new(msg.primary_repo_uri)
-                .with_default("s3:https://s3.amazonaws.com/my-backup-bucket")
+                .with_initial_value("s3:https://s3.amazonaws.com/my-backup-bucket")
                 .prompt()?;
             (repo_uri, None)
         } else {
             let repo_uri = inquire::Text::new(msg.primary_repo_uri)
-                .with_default("/data/backup")
+                .with_initial_value("/data/backup")
                 .prompt()?;
             (repo_uri, None)
         };
@@ -176,7 +176,7 @@ impl SetupPrompter for InquirePrompter {
         let report_dir_path = "/data/backup/reports";
         let reports = if enable_reports {
             let output_dir = inquire::Text::new(msg.report_export_dir)
-                .with_default(report_dir_path)
+                .with_initial_value(report_dir_path)
                 .prompt()?;
             let _ = std::fs::create_dir_all(&output_dir);
             ReportsConfig {
