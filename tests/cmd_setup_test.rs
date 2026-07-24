@@ -179,6 +179,53 @@ fn test_run_setup_dependencies_with_mock_runner() {
     assert!(report.contains("resticprofile: OK (/usr/bin/resticprofile)"));
 }
 
+#[test]
+fn test_generate_secure_password_length_and_complexity() {
+    use backup::commands::setup::generate_secure_password;
+    let pwd = generate_secure_password();
+    assert_eq!(pwd.len(), 32, "자동 생성 비밀번호 길이는 32자여야 합니다");
+    assert!(pwd.chars().any(|c| c.is_ascii_uppercase()), "대문자가 포함되어야 합니다");
+    assert!(pwd.chars().any(|c| c.is_ascii_lowercase()), "소문자가 포함되어야 합니다");
+    assert!(pwd.chars().any(|c| c.is_ascii_digit()), "숫자가 포함되어야 합니다");
+}
+
+#[test]
+fn test_resolve_encryption_keyfile_uses_existing_file() {
+    use backup::commands::setup::resolve_encryption_keyfile;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let enc_path = dir.path().join("enc");
+    std::fs::write(&enc_path, "existing_secret_password_12345\n").unwrap();
+
+    let pwd = resolve_encryption_keyfile(&enc_path).unwrap();
+    assert_eq!(pwd, "existing_secret_password_12345");
+}
+
+#[test]
+fn test_save_encryption_keyfile_permission_600() {
+    use backup::commands::setup::save_encryption_keyfile;
+    use tempfile::tempdir;
+
+    let dir = tempdir().unwrap();
+    let enc_path = dir.path().join("sub/enc");
+    save_encryption_keyfile(&enc_path, "generated_secret_password_12345").unwrap();
+
+    assert!(enc_path.exists());
+    let content = std::fs::read_to_string(&enc_path).unwrap();
+    assert_eq!(content.trim(), "generated_secret_password_12345");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::metadata(&enc_path).unwrap().permissions();
+        assert_eq!(perms.mode() & 0o777, 0o600, "enc 키파일 권한은 600이어야 합니다");
+        let dir_perms = std::fs::metadata(enc_path.parent().unwrap()).unwrap().permissions();
+        assert_eq!(dir_perms.mode() & 0o777, 0o700, "etc/backup 디렉터리 권한은 700이어야 합니다");
+    }
+}
+
+
 /// lang_opt이 None일 때 Language::detect()로 언어를 자동 감지하여 프롬프트 없이 진행하는지 검증.
 /// setup 내부 prompter가 받은 lang_opt이 Some(..)이어야 합니다.
 #[test]

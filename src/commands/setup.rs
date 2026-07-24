@@ -133,13 +133,35 @@ impl SetupPrompter for InquirePrompter {
             (repo_uri, None)
         };
 
-        let password = inquire::Password::new(msg.enter_encryption_password)
-            .without_confirmation()
-            .prompt()?;
-        
-        if password.len() < 12 {
-            anyhow::bail!(msg.isms_password_error);
-        }
+        let default_enc_path = Path::new("/etc/backup/enc");
+        let password = if let Some(existing_pass) = resolve_encryption_keyfile(default_enc_path) {
+            println!("\n{}", msg.found_existing_keyfile);
+            existing_pass
+        } else {
+            let auto_gen = inquire::Confirm::new(msg.auto_generate_password_prompt)
+                .with_default(true)
+                .prompt()?;
+
+            if auto_gen {
+                let gen_pass = generate_secure_password();
+                let _ = save_encryption_keyfile(default_enc_path, &gen_pass);
+                gen_pass
+            } else {
+                let user_pass = inquire::Password::new(msg.enter_encryption_password)
+                    .without_confirmation()
+                    .prompt()?;
+                if user_pass.len() < 12 {
+                    anyhow::bail!(msg.isms_password_error);
+                }
+                let save_key = inquire::Confirm::new(msg.save_password_to_keyfile_prompt)
+                    .with_default(true)
+                    .prompt()?;
+                if save_key {
+                    let _ = save_encryption_keyfile(default_enc_path, &user_pass);
+                }
+                user_pass
+            }
+        };
 
         let primary_storage = StorageTarget {
             backend: backend.to_string(),
@@ -352,10 +374,69 @@ pub fn run_setup_dependencies_with_runner<R: CommandRunner>(runner: &R) -> Resul
     Ok(report)
 }
 
+pub fn generate_secure_password() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let charset = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=";
+    let mut state = seed;
+    let mut password = String::with_capacity(32);
+
+    // 대문자, 소문자, 숫자, 특수문자 각 1개 이상 보장
+    password.push(('A' as u8 + (state % 26) as u8) as char);
+    state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    password.push(('a' as u8 + (state % 26) as u8) as char);
+    state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    password.push(('0' as u8 + (state % 10) as u8) as char);
+    state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    password.push(b"!@#$%^&*()_+-="[(state % 14) as usize] as char);
+
+    for _ in 4..32 {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let idx = (state as usize) % charset.len();
+        password.push(charset[idx] as char);
+    }
+    password
+}
+
+pub fn resolve_encryption_keyfile(path: &Path) -> Option<String> {
+    if path.is_file() {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            let trimmed = content.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
+}
+
+pub fn save_encryption_keyfile(path: &Path, password: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    std::fs::write(path, format!("{}\n", password))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    Ok(())
+}
+
 pub fn run_setup_dependencies() -> Result<String> {
     let runner = SystemExecutor;
     run_setup_dependencies_with_runner(&runner)
 }
+
+
 
 
 

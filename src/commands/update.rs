@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use std::process::Command;
+use crate::runner::executor::{CommandRunner, SystemExecutor};
 
 /// 시맨틱 버전 수치 파싱 (예: "v0.1.5" -> Some((0, 1, 5)))
 pub fn parse_version(v: &str) -> Option<(u32, u32, u32)> {
@@ -25,24 +25,24 @@ pub fn is_newer_version(current: &str, latest: &str) -> bool {
 }
 
 /// GitHub Releases API를 조회하여 최신 태그명과 다운로드 URL을 가져옵니다.
-pub fn fetch_latest_release_info() -> Result<(String, String)> {
-    let output = Command::new("curl")
-        .args([
+pub fn fetch_latest_release_info_with_runner<R: CommandRunner>(runner: &R) -> Result<(String, String)> {
+    let output = runner.run(
+        "curl",
+        &[
             "-fsSL",
             "-H",
             "User-Agent: backup-cli",
             "-H",
             "Accept: application/vnd.github.v3+json",
             "https://api.github.com/repos/ppzxc/backup/releases/latest",
-        ])
-        .output()?;
+        ],
+    )?;
 
-    if !output.status.success() {
+    if output.status_code != 0 {
         return Err(anyhow!("Failed to fetch release info from GitHub Releases API"));
     }
 
-    let body = String::from_utf8(output.stdout)?;
-    let json: serde_json::Value = serde_json::from_str(&body)?;
+    let json: serde_json::Value = serde_json::from_str(&output.stdout)?;
 
     let tag_name = json["tag_name"]
         .as_str()
@@ -66,7 +66,6 @@ pub fn fetch_latest_release_info() -> Result<(String, String)> {
     }
 
     if download_url.is_empty() {
-        // 백업 기본 URL 구조
         download_url = format!(
             "https://github.com/ppzxc/backup/releases/download/{}/{}",
             tag_name, target_asset_name
@@ -76,32 +75,28 @@ pub fn fetch_latest_release_info() -> Result<(String, String)> {
     Ok((tag_name, download_url))
 }
 
+pub fn fetch_latest_release_info() -> Result<(String, String)> {
+    let runner = SystemExecutor;
+    fetch_latest_release_info_with_runner(&runner)
+}
+
 /// 현재 실행 바이너리를 다운로드한 새 바이너리로 교체합니다.
-pub fn perform_self_replace(download_url: &str) -> Result<()> {
+pub fn perform_self_replace_with_runner<R: CommandRunner>(download_url: &str, runner: &R) -> Result<()> {
     let current_exe = std::env::current_exe()?;
     let tmp_dir = tempfile::tempdir()?;
     let archive_path = tmp_dir.path().join("backup_update.tar.gz");
+    let archive_path_str = archive_path.to_str().unwrap();
+    let tmp_dir_str = tmp_dir.path().to_str().unwrap();
 
     // 1. 다운로드
-    let status = Command::new("curl")
-        .args(["-fsSL", download_url, "-o", archive_path.to_str().unwrap()])
-        .status()?;
-
-    if !status.success() {
+    let out = runner.run("curl", &["-fsSL", download_url, "-o", archive_path_str])?;
+    if out.status_code != 0 {
         return Err(anyhow!("Failed to download update package from {}", download_url));
     }
 
     // 2. 압축 해제
-    let status = Command::new("tar")
-        .args([
-            "-xzf",
-            archive_path.to_str().unwrap(),
-            "-C",
-            tmp_dir.path().to_str().unwrap(),
-        ])
-        .status()?;
-
-    if !status.success() {
+    let out = runner.run("tar", &["-xzf", archive_path_str, "-C", tmp_dir_str])?;
+    if out.status_code != 0 {
         return Err(anyhow!("Failed to extract update package"));
     }
 
@@ -111,9 +106,9 @@ pub fn perform_self_replace(download_url: &str) -> Result<()> {
     }
 
     // 3. 권한 설정 및 덮어쓰기
-    Command::new("chmod").args(["+x", new_binary.to_str().unwrap()]).status()?;
+    let new_binary_str = new_binary.to_str().unwrap();
+    let _ = runner.run("chmod", &["+x", new_binary_str]);
 
-    // Linux에서 실행 중인 바이너리 덮어쓰기 (rename / replace)
     std::fs::rename(&new_binary, &current_exe).or_else(|_| {
         let backup_exe = current_exe.with_extension("old");
         std::fs::rename(&current_exe, &backup_exe)?;
@@ -125,19 +120,26 @@ pub fn perform_self_replace(download_url: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn perform_self_replace(download_url: &str) -> Result<()> {
+    let runner = SystemExecutor;
+    perform_self_replace_with_runner(download_url, &runner)
+}
+
 /// 자가 업데이트 실행 및 결과 메시지를 반환합니다.
-pub fn execute_update_check(current_version: &str) -> Result<String> {
-    match fetch_latest_release_info() {
+pub fn execute_update_check_with_runner<R: CommandRunner>(current_version: &str, runner: &R) -> Result<String> {
+    match fetch_latest_release_info_with_runner(runner) {
         Ok((latest_tag, download_url)) => {
             if is_newer_version(current_version, &latest_tag) {
-                println!("New version {} found. Updating from {}...", latest_tag, current_version);
-                if let Err(e) = perform_self_replace(&download_url) {
+                if let Err(e) = perform_self_replace_with_runner(&download_url, runner) {
                     Ok(format!(
                         "New version {} available at {}, but auto-update failed: {}",
                         latest_tag, download_url, e
                     ))
                 } else {
-                    Ok(format!("Successfully updated backup to version {}!", latest_tag))
+                    Ok(format!(
+                        "Updating from {} to {}...\nSuccessfully updated backup to version {}!",
+                        current_version, latest_tag, latest_tag
+                    ))
                 }
             } else {
                 Ok(format!("Current version is {}. Already up to date.", current_version))
@@ -148,4 +150,9 @@ pub fn execute_update_check(current_version: &str) -> Result<String> {
             current_version, e
         )),
     }
+}
+
+pub fn execute_update_check(current_version: &str) -> Result<String> {
+    let runner = SystemExecutor;
+    execute_update_check_with_runner(current_version, &runner)
 }
