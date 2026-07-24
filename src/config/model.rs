@@ -84,53 +84,99 @@ impl BackupConfig {
         }
 
         let profiles_yaml_path = config_dir.join("profiles.yaml");
-        let mut existing_content = if profiles_yaml_path.exists() {
-            fs::read_to_string(&profiles_yaml_path).unwrap_or_default()
+        let mut restic_config = if profiles_yaml_path.exists() {
+            ResticProfileConfig::load_from_path(&profiles_yaml_path).unwrap_or_else(|_| ResticProfileConfig {
+                version: "2".into(),
+                global: None,
+                groups: None,
+                default: None,
+                profiles: std::collections::BTreeMap::new(),
+            })
         } else {
-            String::new()
+            ResticProfileConfig {
+                version: "2".into(),
+                global: None,
+                groups: None,
+                default: None,
+                profiles: std::collections::BTreeMap::new(),
+            }
         };
 
-        if existing_content.trim().is_empty() {
-            let mut default_block = format!(
-                "version: \"2\"\ndefault:\n  repository: \"{}\"\n  password: \"{}\"\n",
-                self.storage.primary.repository,
-                self.storage.primary.password.expose_secret()
-            );
-            if let Some(ref s3) = self.storage.primary.s3 {
-                default_block.push_str("  env:\n");
-                default_block.push_str(&format!("    AWS_ACCESS_KEY_ID: \"{}\"\n", s3.access_key_id));
-                default_block.push_str(&format!("    AWS_SECRET_ACCESS_KEY: \"{}\"\n", s3.secret_access_key.expose_secret()));
-            }
-            existing_content = default_block;
+        restic_config.version = "2".into();
+
+        // Populate default profile if not present or update repository/password
+        let mut default_profile = restic_config.default.unwrap_or_default();
+        if default_profile.description.is_none() {
+            default_profile.description = Some("Contains default parameters like repository and password".into());
         }
-
-        let new_profile_block = format!(
-            "{}:\n  inherit: \"default\"\n  backup:\n    source:\n{}\n    schedule: \"*-*-* 03:00:00\"\n  retention:\n    keep-daily: {}\n    keep-weekly: {}\n    keep-monthly: {}\n",
-            self.profile,
-            self.backup.targets.iter().map(|t| format!("      - \"{}\"", t)).collect::<Vec<_>>().join("\n"),
-            self.retention.keep_daily,
-            self.retention.keep_weekly,
-            self.retention.keep_monthly
-        );
-
-        let profile_key = format!("{}:", self.profile);
-        if let Some(pos) = existing_content.find(&profile_key) {
-            // Find end of section (next unindented profile header or EOF)
-            let rest = &existing_content[pos..];
-            let block_end = rest[profile_key.len()..]
-                .find("\n\n")
-                .or_else(|| rest[profile_key.len()..].find("\n[a-zA-Z0-9_]+:"))
-                .map(|p| pos + profile_key.len() + p)
-                .unwrap_or(existing_content.len());
-            existing_content.replace_range(pos..block_end, new_profile_block.trim_end());
-        } else {
-            if !existing_content.ends_with('\n') {
-                existing_content.push('\n');
-            }
-            existing_content.push_str(&new_profile_block);
+        default_profile.repository = Some(self.storage.primary.repository.clone());
+        default_profile.password = Some(self.storage.primary.password.expose_secret().to_string());
+        
+        if let Some(ref s3) = self.storage.primary.s3 {
+            let mut env_map = default_profile.env.unwrap_or_default();
+            env_map.insert("AWS_ACCESS_KEY_ID".into(), s3.access_key_id.clone());
+            env_map.insert("AWS_SECRET_ACCESS_KEY".into(), s3.secret_access_key.expose_secret().to_string());
+            default_profile.env = Some(env_map);
         }
+        restic_config.default = Some(default_profile);
 
-        fs::write(&profiles_yaml_path, existing_content)?;
+        // Build current target profile section
+        let profile_section = ProfileSection {
+            description: Some(format!("Backup profile for {}", self.profile)),
+            inherit: Some("default".into()),
+            initialize: Some(true),
+            backup: Some(BackupCommandSection {
+                source: Some(self.backup.targets.clone()),
+                exclude: if self.backup.excludes.is_empty() { None } else { Some(self.backup.excludes.clone()) },
+                tag: Some(vec![self.profile.clone()]),
+                schedule: Some("*-*-* 03:00:00".into()),
+                schedule_permission: None,
+                schedule_priority: None,
+                schedule_ignore_on_battery_less_than: None,
+                run_before: None,
+                run_finally: None,
+                send_before: None,
+                send_after: None,
+                send_after_fail: None,
+            }),
+            retention: Some(RetentionSection {
+                after_backup: Some(true),
+                before_backup: None,
+                compact: None,
+                prune: Some(false),
+                keep_daily: Some(self.retention.keep_daily),
+                keep_weekly: Some(self.retention.keep_weekly),
+                keep_monthly: Some(self.retention.keep_monthly),
+                keep_yearly: None,
+                keep_hourly: None,
+                keep_last: None,
+                keep_tag: None,
+                tag: Some(vec![self.profile.clone()]),
+            }),
+            forget: Some(ForgetSection {
+                schedule: None,
+                prune: Some(false),
+                keep_daily: Some(self.retention.keep_daily),
+                keep_weekly: Some(self.retention.keep_weekly),
+                keep_monthly: Some(self.retention.keep_monthly),
+                keep_yearly: None,
+                keep_hourly: None,
+                keep_last: None,
+                keep_tag: None,
+                tag: Some(vec![self.profile.clone()]),
+            }),
+            prune: None,
+            check: None,
+            repository: None,
+            password_file: None,
+            password: None,
+            env: None,
+        };
+
+        restic_config.profiles.insert(self.profile.clone(), profile_section);
+
+        let yaml_content = serde_yaml::to_string(&restic_config)?;
+        fs::write(&profiles_yaml_path, yaml_content)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -269,7 +315,11 @@ pub struct S3Config {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ResticProfileConfig {
     pub version: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global: Option<GlobalSection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<std::collections::BTreeMap<String, GroupSection>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<ProfileSection>,
     #[serde(flatten)]
     pub profiles: std::collections::BTreeMap<String, ProfileSection>,
@@ -293,17 +343,51 @@ impl ResticProfileConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "kebab-case")]
+pub struct GlobalSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initialize: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduler: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct GroupSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continue_on_error: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profiles: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
 pub struct ProfileSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password_file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub inherit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initialize: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<std::collections::BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup: Option<BackupCommandSection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention: Option<RetentionSection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forget: Option<ForgetSection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prune: Option<PruneCommandSection>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -317,6 +401,8 @@ pub struct BackupCommandSection {
     pub source: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exclude: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schedule: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -335,6 +421,60 @@ pub struct BackupCommandSection {
     pub send_after: Option<Vec<HttpHook>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub send_after_fail: Option<HttpHook>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct RetentionSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_backup: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_backup: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compact: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prune: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_daily: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_weekly: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_monthly: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_yearly: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_hourly: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_last: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_tag: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct ForgetSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prune: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_daily: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_weekly: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_monthly: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_yearly: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_hourly: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_last: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_tag: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
