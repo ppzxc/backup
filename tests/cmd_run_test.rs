@@ -143,6 +143,43 @@ fn test_execute_status_fallback_on_error() {
 }
 
 #[test]
+fn test_execute_status_from_profiles_config() {
+    use backup::commands::status::execute_status_from_profiles_config;
+    use backup::runner::resticprofile::MockResticProfileRunner;
+    use tempfile::NamedTempFile;
+
+    let yaml_content = r#"version: '2'
+profiles:
+  default:
+    repository: s3:https://59.25.177.53:39000/backup/ns0327/log
+  log:
+    inherit: default
+    backup:
+      source:
+      - /var/log
+"#;
+    let temp_file = NamedTempFile::new().unwrap();
+    std::fs::write(temp_file.path(), yaml_content).unwrap();
+
+    let mock_json = r#"[
+        {
+            "id": "abc12345",
+            "time": "2026-07-24T17:40:00+09:00",
+            "paths": ["/var/log"],
+            "hostname": "funa1"
+        }
+    ]"#;
+
+    let mock_runner = MockResticProfileRunner::new(0, mock_json);
+    let status_res = execute_status_from_profiles_config(temp_file.path(), Some("log"), &mock_runner).unwrap();
+
+    assert!(status_res.contains("Profile: log"));
+    assert!(status_res.contains("Repository: s3:https://59.25.177.53:39000/backup/ns0327/log"));
+    assert!(status_res.contains("Targets: [\"/var/log\"]"));
+    assert!(status_res.contains("Latest Snapshot: abc12345"));
+}
+
+#[test]
 fn test_execute_run_profile() {
     use backup::commands::run::PipelineOptions;
     let mock_runner = MockResticProfileRunner::new(0, "resticprofile backup complete");

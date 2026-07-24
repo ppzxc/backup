@@ -303,8 +303,11 @@ fn main() -> anyhow::Result<()> {
             println!("{}", out);
         }
         Commands::Status { profile } => {
-            let executor = backup::runner::executor::SystemExecutor;
-            let out = backup::commands::status::execute_status_with_runner(&config, &executor, profile.as_deref())?;
+            let out = backup::commands::status::execute_status_from_profiles_config(
+                default_config_path,
+                profile.as_deref(),
+                &resticprofile,
+            )?;
             println!("{}", out);
         }
         Commands::Update => {

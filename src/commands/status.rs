@@ -22,6 +22,69 @@ pub fn execute_status(config: &BackupConfig) -> Result<String> {
     execute_status_with_runner(config, &executor, None)
 }
 
+pub fn execute_status_from_profiles_config<R: crate::runner::resticprofile::ResticProfileRunner>(
+    config_path: &std::path::Path,
+    profile_filter: Option<&str>,
+    runner: &R,
+) -> Result<String> {
+    let restic_config = match crate::config::model::ResticProfileConfig::load_from_path(config_path) {
+        Ok(c) => c,
+        Err(_) => {
+            let default_config = crate::config::model::BackupConfig::default();
+            let executor = crate::runner::executor::SystemExecutor;
+            return execute_status_with_runner(&default_config, &executor, profile_filter);
+        }
+    };
+    let target_profile_name = profile_filter.unwrap_or("default");
+
+    let profile_section = restic_config
+        .profiles
+        .get(target_profile_name)
+        .ok_or_else(|| anyhow::anyhow!("Profile '{}' not found in config", target_profile_name))?;
+
+    let default_section = restic_config.profiles.get("default");
+
+    let repository = profile_section
+        .repository
+        .as_deref()
+        .or_else(|| default_section.and_then(|d| d.repository.as_deref()))
+        .unwrap_or("unknown");
+
+    let targets = profile_section
+        .backup
+        .as_ref()
+        .and_then(|b| b.source.as_ref())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut output_str = format!(
+        "Profile: {}\nRepository: {}\nTargets: {:?}",
+        target_profile_name, repository, targets
+    );
+
+    match runner.list_snapshots(config_path, target_profile_name) {
+        Ok(json_raw) => {
+            if let Ok(snapshots) = serde_json::from_str::<Vec<ResticSnapshotInfo>>(&json_raw) {
+                if let Some(latest) = snapshots.first() {
+                    output_str.push_str(&format!(
+                        "\nLatest Snapshot: {}\nSnapshot Time: {}\nTotal Snapshots: {}",
+                        latest.id, latest.time, snapshots.len()
+                    ));
+                } else {
+                    output_str.push_str("\nSnapshots: None");
+                }
+            } else {
+                output_str.push_str(&format!("\nSnapshots:\n{}", json_raw.trim()));
+            }
+        }
+        Err(err) => {
+            output_str.push_str(&format!("\n[WARN] Failed to fetch snapshots: {}", err));
+        }
+    }
+
+    Ok(output_str)
+}
+
 pub fn execute_status_with_runner<E: CommandRunner>(
     config: &BackupConfig,
     runner: &E,
