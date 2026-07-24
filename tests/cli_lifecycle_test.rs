@@ -6,10 +6,8 @@ fn test_e2e_cli_lifecycle_full_subcommands() {
     Command::cargo_bin("backup").unwrap().arg("--version").assert().success();
     Command::cargo_bin("backup").unwrap().arg("--help").assert().success();
 
-    // 2. Status & Config
+    // 2. Status
     Command::cargo_bin("backup").unwrap().arg("status").assert().success();
-    Command::cargo_bin("backup").unwrap().arg("config").arg("show").assert().success();
-    Command::cargo_bin("backup").unwrap().arg("config").arg("export").assert().success();
 
     // 3. Setup
     Command::cargo_bin("backup").unwrap().args(&["setup", "--non-interactive"]).assert().success();
@@ -36,9 +34,9 @@ fn test_e2e_cli_lifecycle_full_subcommands() {
     assert!(restore_stdout.contains("snap-12345"));
     assert!(restore_stdout.contains("/tmp/restored-data"));
 
-    // 6. Config edit & Backend migrate
-    Command::cargo_bin("backup").unwrap().args(&["config", "edit"]).assert().success();
-    Command::cargo_bin("backup").unwrap().args(&["backend", "migrate"]).assert().success();
+    // 6. Copy (Sync)
+    Command::cargo_bin("backup").unwrap().args(&["copy", "--dry-run"]).assert().success();
+    Command::cargo_bin("backup").unwrap().args(&["sync", "--dry-run"]).assert().success();
 }
 
 

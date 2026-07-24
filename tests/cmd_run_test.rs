@@ -241,11 +241,12 @@ fn test_execute_status() {
 }
 
 #[test]
-fn test_backend_migrate() {
-    use backup::commands::backend::execute_backend_migrate;
-    use backup::runner::rclone::MockRcloneRunner;
-    let mock = MockRcloneRunner::new(0, "sync ok");
-    let res = execute_backend_migrate(&mock, "primary:backup", "secondary:backup").unwrap();
-    assert!(res.contains("Backend snapshot migration completed"));
+fn test_copy() {
+    use backup::commands::copy::execute_copy;
+    use backup::runner::resticprofile::MockResticProfileRunner;
+    use std::path::Path;
+    let mock = MockResticProfileRunner::new(0, "copy ok");
+    let res = execute_copy(&mock, Path::new("/etc/backup/profiles.yaml"), "default", false).unwrap();
+    assert!(res.contains("Snapshot copy completed for profile [default]"));
 }
 

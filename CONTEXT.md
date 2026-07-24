@@ -43,8 +43,8 @@
 * **`backup config edit`**: 설정 파일 직접 편집 및 **Configuration Registry** 유효성 검증
 * **`backup config import-legacy [--file <path>]`**: 구버전 Bash `backup.env` 파일을 현재 규격으로 이관
 
-### 3. `backup backend` (저장소 백엔드 이관)
-* **`backup backend migrate`**: 스냅샷 데이터 2차 복사(`restic copy`), 정합성 검증 및 신규 **Backend Adapter** 저장소로 이관
+### 3. `backup copy` (저장소 간 스냅샷 동기화 및 복사)
+* **`backup copy [--profile <profile_name>] [--dry-run]`**: 1차 **Backend Adapter** 저장소의 스냅샷 데이터를 2차 **Backend Adapter** 저장소로 동기화/복사 (별칭: `backup sync`)
 
 ### 4. `backup run` (백업 파이프라인 실행)
 * **`backup run`**: 전체 백업 파이프라인 수동 즉시 실행 (Database Backup Adapter -> Primary Backend Adapter -> Secondary Backend Adapter -> Retention Rule -> Notification Adapter)

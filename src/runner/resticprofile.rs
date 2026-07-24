@@ -11,6 +11,7 @@ pub trait ResticProfileRunner {
     fn list_snapshots(&self, config_path: &Path, profile: &str) -> Result<String>;
     fn prune(&self, config_path: &Path, profile: &str) -> Result<String>;
     fn check(&self, config_path: &Path, profile: &str) -> Result<String>;
+    fn copy(&self, config_path: &Path, profile: &str, dry_run: bool) -> Result<String>;
 }
 
 pub struct ResticProfileTool<'a, E: CommandRunner> {
@@ -94,6 +95,17 @@ impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {
         let output = self.executor.run("resticprofile", &["--config", &config_str, "--name", profile, "check"])?;
         self.check_output(output)
     }
+
+    fn copy(&self, config_path: &Path, profile: &str, dry_run: bool) -> Result<String> {
+        let config_str = config_path.to_string_lossy();
+        let mut args = vec!["--config", &config_str, "--name", profile];
+        if dry_run {
+            args.push("--dry-run");
+        }
+        args.push("copy");
+        let output = self.executor.run("resticprofile", &args)?;
+        self.check_output(output)
+    }
 }
 
 pub struct MockResticProfileRunner {
@@ -164,6 +176,13 @@ impl ResticProfileRunner for MockResticProfileRunner {
     }
     fn check(&self, config_path: &Path, _profile: &str) -> Result<String> {
         self.calls.lock().unwrap().push(("check".into(), config_path.to_string_lossy().into()));
+        if self.exit_code != 0 {
+            anyhow::bail!("mock error: {}", self.response);
+        }
+        Ok(self.response.clone())
+    }
+    fn copy(&self, config_path: &Path, _profile: &str, _dry_run: bool) -> Result<String> {
+        self.calls.lock().unwrap().push(("copy".into(), config_path.to_string_lossy().into()));
         if self.exit_code != 0 {
             anyhow::bail!("mock error: {}", self.response);
         }

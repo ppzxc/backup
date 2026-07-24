@@ -110,7 +110,7 @@ $ ./scripts/test_coverage.sh
 | **`config`** | 설정값 조회 (비밀값 마스킹), 설정 파일 편집 및 레거시 Bash `backup.env` 이관 | `backup config show`<br>`backup config edit` |
 | **`run`** | 전체 백업 파이프라인 수동/드라이런 실행 (DB -> Primary -> Secondary -> Retention) | `backup run`<br>`backup run --dry-run` |
 | **`doctor`** | 권한, 시각 동기화(NTP), 모의복구 훈련(RTO) 진단 및 ISMS-P HTML 보고서 생성 | `backup doctor`<br>`backup doctor environment --file report.html` |
-| **`backend`** | 저장소 간 2차 복사(`restic copy`) 및 신규 백엔드 마이그레이션 | `backup backend migrate` |
+| **`copy`** | 1차 저장소에서 2차 저장소로 스냅샷 동기화 및 복사 (별칭: `sync`) | `backup copy`<br>`backup sync --dry-run` |
 | **`schedule`**| Systemd Timer 자동 백업 스케줄 등록, 해제 및 현재 상태 조회 | `backup schedule enable`<br>`backup schedule status` |
 | **`restore`** | 스냅샷 복원 및 DB 무결성 복구 실행 | `backup restore --snapshot latest` |
 | **`snapshots`**| 1차/2차 저장소에 보관된 전체 스냅샷 목록 조회 | `backup snapshots` |

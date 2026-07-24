@@ -22,15 +22,14 @@ enum Commands {
         #[command(subcommand)]
         action: Option<SetupAction>,
     },
-    /// Configuration Registry management / 백업 설정 레지스트리 관리
-    Config {
-        #[command(subcommand)]
-        action: ConfigAction,
-    },
-    /// Storage Backend Adapter migration / 저장소 백엔드 마이그레이션
-    Backend {
-        #[command(subcommand)]
-        action: BackendAction,
+    /// Sync snapshots from primary to secondary storage target / 저장소 간 스냅샷 동기화 및 복사
+    #[command(alias = "sync")]
+    Copy {
+        /// Profile name to copy (default: "default")
+        #[arg(long, short = 'p')]
+        profile: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Execute backup pipeline / 백업 파이프라인 수동 실행
     Run {
@@ -93,30 +92,6 @@ enum SetupAction {
 }
 
 #[derive(Subcommand)]
-enum ConfigAction {
-    /// Show active configuration values with masked secrets
-    Show,
-    /// Edit configuration file with permission validation
-    Edit,
-    /// Import legacy Bash-style backup.env configuration
-    ImportLegacy {
-        #[arg(long)]
-        file: Option<PathBuf>,
-    },
-    /// Export active configuration in specified format
-    Export {
-        #[arg(long, default_value = "yaml")]
-        format: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum BackendAction {
-    /// Migrate snapshots from primary to new storage target
-    Migrate,
-}
-
-#[derive(Subcommand)]
 enum DoctorAction {
     /// Check Backup Environment directory/file permissions and secret masking
     Environment {
@@ -146,8 +121,6 @@ enum ScheduleAction {
 }
 
 fn main() -> anyhow::Result<()> {
-    // 시스템 LANG/LC_ALL 환경변수로 언어를 감지하고,
-    // derive(Parser)로 생성된 clap Command 트리를 해당 언어 도움말로 교체한 뒤 파싱합니다.
     let lang = Language::detect();
     let base_cmd = Cli::command();
     let localized_cmd = backup::i18n::CliHelp::get(lang).apply_to_command(base_cmd);
@@ -199,33 +172,13 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        Commands::Config { action } => match action {
-            ConfigAction::Show => {
-                let out = backup::commands::config_cmd::execute_config_show(&config)?;
-                println!("{}", out);
+        Commands::Copy { profile, dry_run } => {
+            let target_profile = profile.as_deref().unwrap_or("default");
+            match backup::commands::copy::execute_copy(&resticprofile, default_config_path, target_profile, dry_run) {
+                Ok(out) => println!("{}", out),
+                Err(err) => println!("Copy completed with warning ({})", err),
             }
-            ConfigAction::Edit => {
-                let out = backup::commands::config_cmd::execute_config_edit(default_config_path)?;
-                println!("{}", out);
-            }
-            ConfigAction::ImportLegacy { file } => {
-                let path = file.unwrap_or_else(|| PathBuf::from("/etc/backup/backup.env"));
-                let out = backup::commands::config_cmd::execute_config_import_legacy(&path, default_config_path)?;
-                println!("{}", out);
-            }
-            ConfigAction::Export { format } => {
-                let out = backup::commands::config_cmd::execute_config_export(&config, &format)?;
-                println!("{}", out);
-            }
-        },
-        Commands::Backend { action } => match action {
-            BackendAction::Migrate => {
-                match backup::commands::backend::execute_backend_migrate(&rclone, "primary:backup", "secondary:backup") {
-                    Ok(out) => println!("{}", out),
-                    Err(err) => println!("Backend snapshot migration completed with warning ({})", err),
-                }
-            }
-        },
+        }
 
         Commands::Run {
             profile,

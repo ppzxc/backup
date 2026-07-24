@@ -57,7 +57,6 @@ fn test_language_detect_from_both_absent() {
 fn test_cli_help_korean_contains_only_korean() {
     let h = CliHelp::get(Language::Ko);
     assert!(h.cmd_setup.contains("마법사"), "setup 도움말이 한국어여야 합니다");
-    assert!(h.cmd_config.contains("레지스트리"), "config 도움말이 한국어여야 합니다");
     assert!(h.cmd_run.contains("파이프라인"), "run 도움말이 한국어여야 합니다");
     assert!(h.cmd_doctor.contains("진단"), "doctor 도움말이 한국어여야 합니다");
     assert!(h.cmd_schedule.contains("타이머"), "schedule 도움말이 한국어여야 합니다");
@@ -73,7 +72,6 @@ fn test_cli_help_korean_contains_only_korean() {
 fn test_cli_help_english_contains_only_english() {
     let h = CliHelp::get(Language::En);
     assert!(h.cmd_setup.contains("wizard"), "setup help must be English");
-    assert!(h.cmd_config.contains("registry"), "config help must be English");
     assert!(h.cmd_run.contains("pipeline"), "run help must be English");
     assert!(h.cmd_doctor.contains("diagnostics"), "doctor help must be English");
     assert!(h.cmd_schedule.contains("scheduler"), "schedule help must be English");
@@ -101,8 +99,7 @@ fn test_cli_help_no_korean_mode_with_english_keywords_all_fields() {
     let fields: &[(&str, &str)] = &[
         ("about",                  h.about),
         ("cmd_setup",              h.cmd_setup),
-        ("cmd_config",             h.cmd_config),
-        ("cmd_backend",            h.cmd_backend),
+        ("cmd_copy",               h.cmd_copy),
         ("cmd_run",                h.cmd_run),
         ("cmd_doctor",             h.cmd_doctor),
         ("cmd_schedule",           h.cmd_schedule),
@@ -116,13 +113,8 @@ fn test_cli_help_no_korean_mode_with_english_keywords_all_fields() {
         ("cmd_setup_backend_init", h.cmd_setup_backend_init),
         ("opt_setup_lang",         h.opt_setup_lang),
         ("opt_setup_non_interactive", h.opt_setup_non_interactive),
-        ("cmd_config_show",        h.cmd_config_show),
-        ("cmd_config_edit",        h.cmd_config_edit),
-        ("cmd_config_import_legacy", h.cmd_config_import_legacy),
-        ("cmd_config_export",      h.cmd_config_export),
-        ("opt_config_import_file", h.opt_config_import_file),
-        ("opt_config_export_format", h.opt_config_export_format),
-        ("cmd_backend_migrate",    h.cmd_backend_migrate),
+        ("opt_copy_profile",       h.opt_copy_profile),
+        ("opt_copy_dry_run",       h.opt_copy_dry_run),
         ("opt_run_skip_database",  h.opt_run_skip_database),
         ("opt_run_skip_secondary_sync", h.opt_run_skip_secondary_sync),
         ("opt_run_skip_retention", h.opt_run_skip_retention),
@@ -159,8 +151,7 @@ fn test_cli_help_no_english_mode_with_korean_chars_all_fields() {
     let fields: &[(&str, &str)] = &[
         ("about",                  h.about),
         ("cmd_setup",              h.cmd_setup),
-        ("cmd_config",             h.cmd_config),
-        ("cmd_backend",            h.cmd_backend),
+        ("cmd_copy",               h.cmd_copy),
         ("cmd_run",                h.cmd_run),
         ("cmd_doctor",             h.cmd_doctor),
         ("cmd_schedule",           h.cmd_schedule),
@@ -174,13 +165,9 @@ fn test_cli_help_no_english_mode_with_korean_chars_all_fields() {
         ("cmd_setup_backend_init", h.cmd_setup_backend_init),
         ("opt_setup_lang",         h.opt_setup_lang),
         ("opt_setup_non_interactive", h.opt_setup_non_interactive),
-        ("cmd_config_show",        h.cmd_config_show),
-        ("cmd_config_edit",        h.cmd_config_edit),
-        ("cmd_config_import_legacy", h.cmd_config_import_legacy),
-        ("cmd_config_export",      h.cmd_config_export),
-        ("opt_config_import_file", h.opt_config_import_file),
-        ("opt_config_export_format", h.opt_config_export_format),
-        ("cmd_backend_migrate",    h.cmd_backend_migrate),
+        ("opt_copy_profile",       h.opt_copy_profile),
+        ("opt_copy_dry_run",       h.opt_copy_dry_run),
+
         ("opt_run_skip_database",  h.opt_run_skip_database),
         ("opt_run_skip_secondary_sync", h.opt_run_skip_secondary_sync),
         ("opt_run_skip_retention", h.opt_run_skip_retention),

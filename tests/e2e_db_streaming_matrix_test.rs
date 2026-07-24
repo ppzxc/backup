@@ -57,8 +57,8 @@ fn test_e2e_db_streaming_mariadb_legacy() {
         .args(&["exec", container_id, "mariadb", "-uroot", "-prootpass", "testdb_legacy", "-e", seed_sql])
         .output();
 
-    let mut config_cmd = Command::cargo_bin("backup").unwrap();
-    config_cmd.arg("config").arg("show").assert().success();
+    let mut status_cmd = Command::cargo_bin("backup").unwrap();
+    status_cmd.arg("status").assert().success();
 }
 
 /// DB Streaming Matrix Case 3: PostgreSQL 16 (Latest) streaming to S3/SFTP targets

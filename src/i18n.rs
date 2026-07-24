@@ -184,8 +184,7 @@ pub struct CliHelp {
     pub about: &'static str,
     // subcommands
     pub cmd_setup: &'static str,
-    pub cmd_config: &'static str,
-    pub cmd_backend: &'static str,
+    pub cmd_copy: &'static str,
     pub cmd_run: &'static str,
     pub cmd_doctor: &'static str,
     pub cmd_schedule: &'static str,
@@ -201,15 +200,9 @@ pub struct CliHelp {
     // setup options
     pub opt_setup_lang: &'static str,
     pub opt_setup_non_interactive: &'static str,
-    // config sub-subcommands
-    pub cmd_config_show: &'static str,
-    pub cmd_config_edit: &'static str,
-    pub cmd_config_import_legacy: &'static str,
-    pub cmd_config_export: &'static str,
-    pub opt_config_import_file: &'static str,
-    pub opt_config_export_format: &'static str,
-    // backend sub-subcommands
-    pub cmd_backend_migrate: &'static str,
+    // copy options
+    pub opt_copy_profile: &'static str,
+    pub opt_copy_dry_run: &'static str,
     // run options
     pub opt_run_skip_database: &'static str,
     pub opt_run_skip_secondary_sync: &'static str,
@@ -238,8 +231,7 @@ impl CliHelp {
             Language::Ko => Self {
                 about: "백업 CLI — restic/rclone 기반 백업 자동화 도구",
                 cmd_setup: "백업 환경 및 백업 프로필 설정 마법사",
-                cmd_config: "백업 설정 레지스트리 관리",
-                cmd_backend: "저장소 백엔드 어댑터 마이그레이션",
+                cmd_copy: "1차 저장소에서 2차 저장소로 스냅샷 동기화 및 복사",
                 cmd_run: "백업 파이프라인 수동 실행",
                 cmd_doctor: "시스템, 보안 및 ISMS-P 진단 보고서",
                 cmd_schedule: "Systemd 타이머 / Cron 스케줄러 관리",
@@ -253,13 +245,8 @@ impl CliHelp {
                 cmd_setup_backend_init: "1차·2차 백엔드 어댑터 저장소 초기화",
                 opt_setup_lang: "언어 선택 (ko/en)",
                 opt_setup_non_interactive: "비대화형(자동화) 모드로 실행",
-                cmd_config_show: "마스킹 처리된 비밀값으로 현재 설정 값 표시",
-                cmd_config_edit: "권한 검증과 함께 설정 파일 편집",
-                cmd_config_import_legacy: "기존 Bash 스타일 backup.env 설정 가져오기",
-                cmd_config_export: "지정한 형식으로 현재 설정 내보내기",
-                opt_config_import_file: "가져올 레거시 설정 파일 경로",
-                opt_config_export_format: "내보내기 형식 (기본값: yaml)",
-                cmd_backend_migrate: "1차 저장소에서 새 저장소 대상으로 스냅샷 마이그레이션",
+                opt_copy_profile: "동기화할 프로필 이름 (기본값: default)",
+                opt_copy_dry_run: "실제 복사 없이 시뮬레이션",
                 opt_run_skip_database: "데이터베이스 백업 단계 건너뜀",
                 opt_run_skip_secondary_sync: "2차 저장소 동기화 단계 건너뜀",
                 opt_run_skip_retention: "보존 정책 적용 단계 건너뜀",
@@ -279,8 +266,7 @@ impl CliHelp {
             Language::En => Self {
                 about: "Backup CLI — restic/rclone based backup automation tool",
                 cmd_setup: "Backup environment and profile setup wizard",
-                cmd_config: "Configuration registry management",
-                cmd_backend: "Storage backend adapter migration",
+                cmd_copy: "Sync snapshots from primary to secondary storage target",
                 cmd_run: "Execute backup pipeline manually",
                 cmd_doctor: "System, security, and audit report diagnostics",
                 cmd_schedule: "Systemd timer / Cron scheduler management",
@@ -294,13 +280,8 @@ impl CliHelp {
                 cmd_setup_backend_init: "Initialize primary and secondary backend adapter repositories",
                 opt_setup_lang: "Select language (ko/en)",
                 opt_setup_non_interactive: "Run in non-interactive (automation) mode",
-                cmd_config_show: "Show active configuration values with masked secrets",
-                cmd_config_edit: "Edit configuration file with permission validation",
-                cmd_config_import_legacy: "Import legacy Bash-style backup.env configuration",
-                cmd_config_export: "Export active configuration in specified format",
-                opt_config_import_file: "Path to the legacy config file to import",
-                opt_config_export_format: "Export format (default: yaml)",
-                cmd_backend_migrate: "Migrate snapshots from primary to new storage target",
+                opt_copy_profile: "Profile name to copy (default: default)",
+                opt_copy_dry_run: "Simulate copy without executing",
                 opt_run_skip_database: "Skip the database backup step",
                 opt_run_skip_secondary_sync: "Skip the secondary storage sync step",
                 opt_run_skip_retention: "Skip the retention policy enforcement step",
@@ -339,24 +320,12 @@ impl CliHelp {
                 .mut_subcommand("backend-init", |s| s.about(self.cmd_setup_backend_init))
         });
 
-        cmd = cmd.mut_subcommand("config", |c| {
-            c.about(self.cmd_config)
-                .mut_subcommand("show", |s| s.about(self.cmd_config_show))
-                .mut_subcommand("edit", |s| s.about(self.cmd_config_edit))
-                .mut_subcommand("import-legacy", |s| {
-                    s.about(self.cmd_config_import_legacy)
-                        .mut_arg("file", |a| a.help(self.opt_config_import_file))
-                })
-                .mut_subcommand("export", |s| {
-                    s.about(self.cmd_config_export)
-                        .mut_arg("format", |a| a.help(self.opt_config_export_format))
-                })
+        cmd = cmd.mut_subcommand("copy", |c| {
+            c.about(self.cmd_copy)
+                .mut_arg("profile", |a| a.help(self.opt_copy_profile))
+                .mut_arg("dry_run", |a| a.help(self.opt_copy_dry_run))
         });
 
-        cmd = cmd.mut_subcommand("backend", |c| {
-            c.about(self.cmd_backend)
-                .mut_subcommand("migrate", |s| s.about(self.cmd_backend_migrate))
-        });
 
         cmd = cmd.mut_subcommand("run", |c| {
             c.about(self.cmd_run)

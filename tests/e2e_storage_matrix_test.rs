@@ -50,12 +50,9 @@ fn test_e2e_s3_primary_sftp_secondary_backup_copy_restore() {
     assert_eq!(orig_bytes, restored_bytes, "Restored file content must match original byte-for-byte!");
     assert_eq!(orig_checksum, restored_checksum, "Restored file checksum must match original 100%!");
 
-    // 4. Verify CLI executable interacts with status and config
+    // 4. Verify CLI executable interacts with status
     let mut status_cmd = Command::cargo_bin("backup").unwrap();
     status_cmd.arg("status").assert().success();
-
-    let mut config_cmd = Command::cargo_bin("backup").unwrap();
-    config_cmd.arg("config").arg("show").assert().success();
 }
 
 /// Case 2: SFTP (Primary) Backup & S3 (Secondary MinIO) Copy and Migration Test

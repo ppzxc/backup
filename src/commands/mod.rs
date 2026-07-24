@@ -5,10 +5,10 @@ pub mod doctor;
 pub mod snapshots;
 pub mod restore;
 pub mod setup;
-pub mod config_cmd;
 pub mod update;
 pub mod uninstall;
-pub mod backend;
+pub mod copy;
+
 
 
 
