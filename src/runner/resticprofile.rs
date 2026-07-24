@@ -79,7 +79,7 @@ impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {
 
     fn list_snapshots(&self, config_path: &Path, profile: &str) -> Result<String> {
         let config_str = config_path.to_string_lossy();
-        let output = self.executor.run("resticprofile", &["--config", &config_str, "--name", profile, "snapshots"])?;
+        let output = self.executor.run("resticprofile", &["--config", &config_str, "--name", profile, "snapshots", "--json"])?;
         self.check_output(output)
     }
 
