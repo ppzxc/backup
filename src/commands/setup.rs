@@ -23,7 +23,12 @@ pub trait SetupPrompter {
 pub struct InquirePrompter;
 
 fn prompt_text_with_default(msg: &str, default_val: &str) -> Result<String> {
-    let input = inquire::Text::new(msg)
+    let prompt_msg = if default_val.is_empty() {
+        msg.to_string()
+    } else {
+        format!("{} [default: {}]", msg, default_val)
+    };
+    let input = inquire::Text::new(&prompt_msg)
         .with_placeholder(default_val)
         .prompt()?;
     let trimmed = input.trim();
