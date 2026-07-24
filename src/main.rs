@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
-use backup::i18n::{CliHelp, Language};
+use backup::i18n::Language;
 
 #[derive(Parser)]
 #[command(name = "backup", version = "0.1.3")]
@@ -140,7 +140,7 @@ fn main() -> anyhow::Result<()> {
     // derive(Parser)로 생성된 clap Command 트리를 해당 언어 도움말로 교체한 뒤 파싱합니다.
     let lang = Language::detect();
     let base_cmd = Cli::command();
-    let localized_cmd = CliHelp::apply_to_command(lang, base_cmd);
+    let localized_cmd = backup::i18n::CliHelp::get(lang).apply_to_command(base_cmd);
     let matches = localized_cmd.get_matches();
     let cli = Cli::from_arg_matches(&matches)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;

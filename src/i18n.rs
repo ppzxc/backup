@@ -5,11 +5,22 @@ pub enum Language {
 }
 
 impl Language {
+    /// POSIX 표준 우선순위(개리`LC_ALL > LANG`):
+    /// LC_ALL이 설정되어 있으면 언제나 우선하고, 그 다음에 LANG을 확인합니다.
     pub fn detect() -> Self {
-        let lang = std::env::var("LANG")
-            .or_else(|_| std::env::var("LC_ALL"))
-            .unwrap_or_default();
-        if lang.to_lowercase().contains("ko") {
+        let lc_all = std::env::var("LC_ALL").ok();
+        let lang = std::env::var("LANG").ok();
+        Self::detect_from(lang.as_deref(), lc_all.as_deref())
+    }
+
+    /// 환경변수 접근 없이 순수 인자로 언어를 감지합니다. 테스트 우호적 설계.
+    /// POSIX 표준: LC_ALL이 설정되어 있으면 LANG보다 우선합니다.
+    pub fn detect_from(lang: Option<&str>, lc_all: Option<&str>) -> Self {
+        let effective = lc_all
+            .filter(|s| !s.is_empty())
+            .or_else(|| lang.filter(|s| !s.is_empty()))
+            .unwrap_or("");
+        if effective.to_lowercase().contains("ko") {
             Language::Ko
         } else {
             Language::En
@@ -266,87 +277,92 @@ impl CliHelp {
         }
     }
 
-    /// `clap::Command` 트리를 감지된 언어의 도움말 텍스트로 수정(mutate)합니다.
+    /// `clap::Command` 트리를 이 CliHelp의 도움말 텍스트로 수정(mutate)합니다.
     /// derive(Parser)로 생성된 command 구조를 유지하면서 about/help 문자열만 교체합니다.
-    pub fn apply_to_command(lang: Language, mut cmd: clap::Command) -> clap::Command {
-        let h = Self::get(lang);
-
-        cmd = cmd.about(h.about);
+    ///
+    /// # 사용 예시
+    /// ```ignore
+    /// let lang = Language::detect();
+    /// let cmd = CliHelp::get(lang).apply_to_command(Cli::command());
+    /// ```
+    pub fn apply_to_command(&self, mut cmd: clap::Command) -> clap::Command {
+        cmd = cmd.about(self.about);
 
         cmd = cmd.mut_subcommand("setup", |c| {
-            c.about(h.cmd_setup)
-                .mut_arg("lang", |a| a.help(h.opt_setup_lang))
-                .mut_arg("non_interactive", |a| a.help(h.opt_setup_non_interactive))
-                .mut_subcommand("dependencies", |s| s.about(h.cmd_setup_dependencies))
-                .mut_subcommand("backend-init", |s| s.about(h.cmd_setup_backend_init))
+            c.about(self.cmd_setup)
+                .mut_arg("lang", |a| a.help(self.opt_setup_lang))
+                .mut_arg("non_interactive", |a| a.help(self.opt_setup_non_interactive))
+                .mut_subcommand("dependencies", |s| s.about(self.cmd_setup_dependencies))
+                .mut_subcommand("backend-init", |s| s.about(self.cmd_setup_backend_init))
         });
 
         cmd = cmd.mut_subcommand("config", |c| {
-            c.about(h.cmd_config)
-                .mut_subcommand("show", |s| s.about(h.cmd_config_show))
-                .mut_subcommand("edit", |s| s.about(h.cmd_config_edit))
+            c.about(self.cmd_config)
+                .mut_subcommand("show", |s| s.about(self.cmd_config_show))
+                .mut_subcommand("edit", |s| s.about(self.cmd_config_edit))
                 .mut_subcommand("import-legacy", |s| {
-                    s.about(h.cmd_config_import_legacy)
-                        .mut_arg("file", |a| a.help(h.opt_config_import_file))
+                    s.about(self.cmd_config_import_legacy)
+                        .mut_arg("file", |a| a.help(self.opt_config_import_file))
                 })
                 .mut_subcommand("export", |s| {
-                    s.about(h.cmd_config_export)
-                        .mut_arg("format", |a| a.help(h.opt_config_export_format))
+                    s.about(self.cmd_config_export)
+                        .mut_arg("format", |a| a.help(self.opt_config_export_format))
                 })
         });
 
         cmd = cmd.mut_subcommand("backend", |c| {
-            c.about(h.cmd_backend)
-                .mut_subcommand("migrate", |s| s.about(h.cmd_backend_migrate))
+            c.about(self.cmd_backend)
+                .mut_subcommand("migrate", |s| s.about(self.cmd_backend_migrate))
         });
 
         cmd = cmd.mut_subcommand("run", |c| {
-            c.about(h.cmd_run)
-                .mut_arg("skip_database", |a| a.help(h.opt_run_skip_database))
-                .mut_arg("skip_secondary_sync", |a| a.help(h.opt_run_skip_secondary_sync))
-                .mut_arg("skip_retention", |a| a.help(h.opt_run_skip_retention))
-                .mut_arg("dry_run", |a| a.help(h.opt_run_dry_run))
+            c.about(self.cmd_run)
+                .mut_arg("skip_database", |a| a.help(self.opt_run_skip_database))
+                .mut_arg("skip_secondary_sync", |a| a.help(self.opt_run_skip_secondary_sync))
+                .mut_arg("skip_retention", |a| a.help(self.opt_run_skip_retention))
+                .mut_arg("dry_run", |a| a.help(self.opt_run_dry_run))
         });
 
         cmd = cmd.mut_subcommand("doctor", |c| {
-            c.about(h.cmd_doctor)
+            c.about(self.cmd_doctor)
                 .mut_subcommand("environment", |s| {
-                    s.about(h.cmd_doctor_environment)
-                        .mut_arg("file", |a| a.help(h.opt_doctor_file))
+                    s.about(self.cmd_doctor_environment)
+                        .mut_arg("file", |a| a.help(self.opt_doctor_file))
                 })
                 .mut_subcommand("time-sync", |s| {
-                    s.about(h.cmd_doctor_time_sync)
-                        .mut_arg("file", |a| a.help(h.opt_doctor_file))
+                    s.about(self.cmd_doctor_time_sync)
+                        .mut_arg("file", |a| a.help(self.opt_doctor_file))
                 })
                 .mut_subcommand("restore-drill", |s| {
-                    s.about(h.cmd_doctor_restore_drill)
-                        .mut_arg("file", |a| a.help(h.opt_doctor_file))
+                    s.about(self.cmd_doctor_restore_drill)
+                        .mut_arg("file", |a| a.help(self.opt_doctor_file))
                 })
         });
 
         cmd = cmd.mut_subcommand("schedule", |c| {
-            c.about(h.cmd_schedule)
-                .mut_subcommand("enable", |s| s.about(h.cmd_schedule_enable))
-                .mut_subcommand("disable", |s| s.about(h.cmd_schedule_disable))
-                .mut_subcommand("status", |s| s.about(h.cmd_schedule_status))
+            c.about(self.cmd_schedule)
+                .mut_subcommand("enable", |s| s.about(self.cmd_schedule_enable))
+                .mut_subcommand("disable", |s| s.about(self.cmd_schedule_disable))
+                .mut_subcommand("status", |s| s.about(self.cmd_schedule_status))
         });
 
         cmd = cmd.mut_subcommand("restore", |c| {
-            c.about(h.cmd_restore)
-                .mut_arg("snapshot", |a| a.help(h.opt_restore_snapshot))
-                .mut_arg("target", |a| a.help(h.opt_restore_target))
+            c.about(self.cmd_restore)
+                .mut_arg("snapshot", |a| a.help(self.opt_restore_snapshot))
+                .mut_arg("target", |a| a.help(self.opt_restore_target))
         });
 
-        cmd = cmd.mut_subcommand("snapshots", |c| c.about(h.cmd_snapshots));
-        cmd = cmd.mut_subcommand("status", |c| c.about(h.cmd_status));
-        cmd = cmd.mut_subcommand("update", |c| c.about(h.cmd_update));
+        cmd = cmd.mut_subcommand("snapshots", |c| c.about(self.cmd_snapshots));
+        cmd = cmd.mut_subcommand("status", |c| c.about(self.cmd_status));
+        cmd = cmd.mut_subcommand("update", |c| c.about(self.cmd_update));
 
         cmd = cmd.mut_subcommand("uninstall", |c| {
-            c.about(h.cmd_uninstall)
-                .mut_arg("yes", |a| a.help(h.opt_uninstall_yes))
-                .mut_arg("purge", |a| a.help(h.opt_uninstall_purge))
+            c.about(self.cmd_uninstall)
+                .mut_arg("yes", |a| a.help(self.opt_uninstall_yes))
+                .mut_arg("purge", |a| a.help(self.opt_uninstall_purge))
         });
 
         cmd
     }
 }
+
