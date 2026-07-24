@@ -22,8 +22,16 @@ pub trait SetupPrompter {
 
 pub struct InquirePrompter;
 
-fn prompt_text_with_default(msg: &str, default_val: &str) -> Result<String> {
-    let input = inquire::Text::new(msg).prompt()?;
+fn prompt_text_with_default(msg: &str, default_val: &str, lang: Language) -> Result<String> {
+    let prompt_msg = if default_val.is_empty() {
+        msg.to_string()
+    } else {
+        match lang {
+            Language::Ko => format!("{} (기본값: {})", msg, default_val),
+            Language::En => format!("{} (default: {})", msg, default_val),
+        }
+    };
+    let input = inquire::Text::new(&prompt_msg).prompt()?;
     let trimmed = input.trim();
     if trimmed.is_empty() {
         Ok(default_val.to_string())
@@ -40,7 +48,7 @@ impl SetupPrompter for InquirePrompter {
 
         let msg = I18nMessages::get(lang);
 
-        let profile = prompt_text_with_default(msg.enter_profile_name, "default")?;
+        let profile = prompt_text_with_default(msg.enter_profile_name, "default", lang)?;
 
         let backup_type_choice = inquire::Select::new(
             msg.select_backup_type,
@@ -48,7 +56,7 @@ impl SetupPrompter for InquirePrompter {
         ).prompt()?;
 
         let (backup_type, targets) = if backup_type_choice.starts_with("[1]") {
-            let t = prompt_text_with_default(msg.enter_target_dir, "/var/log")?;
+            let t = prompt_text_with_default(msg.enter_target_dir, "/var/log", lang)?;
             let target_list: Vec<String> = t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
             (BackupType::Directory, target_list)
         } else {
@@ -64,7 +72,7 @@ impl SetupPrompter for InquirePrompter {
             )
         };
 
-        let excludes_str = prompt_text_with_default(msg.enter_exclude_patterns, "")?;
+        let excludes_str = prompt_text_with_default(msg.enter_exclude_patterns, "", lang)?;
         let excludes: Vec<String> = excludes_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
 
         // Retention defaults depending on type
@@ -88,10 +96,10 @@ impl SetupPrompter for InquirePrompter {
             .prompt()?;
 
         let (repository, sftp_config) = if backend == "sftp" {
-            let host = prompt_text_with_default(msg.sftp_host, "192.168.1.100")?;
+            let host = prompt_text_with_default(msg.sftp_host, "192.168.1.100", lang)?;
             let port = inquire::CustomType::<u16>::new(msg.sftp_port).with_default(22).prompt()?;
-            let user = prompt_text_with_default(msg.sftp_user, "backup")?;
-            let path = prompt_text_with_default(msg.sftp_path, "/backup")?;
+            let user = prompt_text_with_default(msg.sftp_user, "backup", lang)?;
+            let path = prompt_text_with_default(msg.sftp_path, "/backup", lang)?;
 
             let gen_key = inquire::Confirm::new(msg.sftp_auto_gen_key).with_default(true).prompt()?;
             let key_file = if gen_key {
@@ -109,7 +117,7 @@ impl SetupPrompter for InquirePrompter {
                 }
                 key_path.to_string()
             } else {
-                let k = prompt_text_with_default(msg.sftp_key_file, "/etc/backup/id_rsa")?;
+                let k = prompt_text_with_default(msg.sftp_key_file, "/etc/backup/id_rsa", lang)?;
                 if k.trim().is_empty() {
                     anyhow::bail!(msg.isms_sftp_key_error);
                 }
@@ -127,10 +135,11 @@ impl SetupPrompter for InquirePrompter {
             let repo_uri = prompt_text_with_default(
                 msg.primary_repo_uri,
                 "s3:https://s3.amazonaws.com/my-backup-bucket",
+                lang,
             )?;
             (repo_uri, None)
         } else {
-            let repo_uri = prompt_text_with_default(msg.primary_repo_uri, "/data/backup")?;
+            let repo_uri = prompt_text_with_default(msg.primary_repo_uri, "/data/backup", lang)?;
             (repo_uri, None)
         };
 
@@ -198,7 +207,7 @@ impl SetupPrompter for InquirePrompter {
 
         let report_dir_path = "/data/backup/reports";
         let reports = if enable_reports {
-            let output_dir = prompt_text_with_default(msg.report_export_dir, report_dir_path)?;
+            let output_dir = prompt_text_with_default(msg.report_export_dir, report_dir_path, lang)?;
             let _ = std::fs::create_dir_all(&output_dir);
             ReportsConfig {
                 output_dir,
