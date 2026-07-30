@@ -192,10 +192,24 @@ impl BackupConfig {
 
         // 4. Build target profile section
         let copy_section = if self.storage.secondary.as_ref().map_or(false, |s| s.enabled) {
+            let sec = self.storage.secondary.as_ref().unwrap();
+            let (password_file, password) = if Path::new("/etc/backup/enc").is_file() {
+                (Some("/etc/backup/enc".into()), None)
+            } else {
+                let pwd = sec.password.expose_secret();
+                if !pwd.trim().is_empty() {
+                    (None, Some(pwd.to_string()))
+                } else {
+                    (None, None)
+                }
+            };
             Some(CopyCommandSection {
                 profile: Some("secondary".into()),
+                repository: Some(sec.repository.clone()),
+                password_file,
+                password,
                 initialize: Some(true),
-                schedule: Some("*-*-* 04:00:00".into()),
+                schedule: None,
                 ..Default::default()
             })
         } else {

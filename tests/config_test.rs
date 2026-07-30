@@ -374,7 +374,10 @@ storage:
 
     let web_prof = restic_config.profiles.get("web-data").unwrap();
     assert_eq!(web_prof.inherit.as_deref(), Some("primary"));
-    assert_eq!(web_prof.copy.as_ref().unwrap().profile.as_deref(), Some("secondary"));
+    let copy_sec = web_prof.copy.as_ref().unwrap();
+    assert_eq!(copy_sec.profile.as_deref(), Some("secondary"));
+    assert_eq!(copy_sec.repository.as_deref(), Some("s3:https://s3.amazonaws.com/secondary-bucket"));
+    assert_eq!(copy_sec.password.as_deref(), Some("secondary_password_123"));
 }
 
 #[test]

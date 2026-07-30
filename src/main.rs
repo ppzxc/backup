@@ -142,6 +142,7 @@ fn main() -> anyhow::Result<()> {
                                 Err(err) => println!("Repository initialization note ({})", err),
                             }
                         }
+                        init_secondary_backend_if_present(default_config_path, &resticprofile, true);
                     } else {
                         println!("Backend storage repository initialization initiated.");
                     }
@@ -157,6 +158,7 @@ fn main() -> anyhow::Result<()> {
                             for name in parsed.profile_names() {
                                 let _ = resticprofile.init(default_config_path, &name);
                             }
+                            init_secondary_backend_if_present(default_config_path, &resticprofile, false);
                         }
                     }
                 }
@@ -263,6 +265,24 @@ fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn init_secondary_backend_if_present<R: ResticProfileRunner>(config_path: &std::path::Path, resticprofile: &R, verbose: bool) {
+    if let Ok(parsed) = backup::config::model::ResticProfileConfig::load_from_path(config_path) {
+        if parsed.profiles.contains_key("secondary") {
+            if verbose {
+                println!("=== Initializing Secondary Backend Storage for Profile: [secondary] ===");
+            }
+            match resticprofile.init(config_path, "secondary") {
+                Ok(res) => {
+                    if verbose && !res.trim().is_empty() {
+                        println!("{}", res.trim_end());
+                    }
+                }
+                Err(err) => println!("[Warning] Secondary storage repository initialization failed ({})", err),
+            }
+        }
+    }
 }
 
 
