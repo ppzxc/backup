@@ -27,14 +27,8 @@ pub fn execute_status_from_profiles_config<R: crate::runner::resticprofile::Rest
     profile_filter: Option<&str>,
     runner: &R,
 ) -> Result<String> {
-    let restic_config = match crate::config::model::ResticProfileConfig::load_from_path(config_path) {
-        Ok(c) => c,
-        Err(_) => {
-            let default_config = crate::config::model::BackupConfig::default();
-            let executor = crate::runner::executor::SystemExecutor;
-            return execute_status_with_runner(&default_config, &executor, profile_filter);
-        }
-    };
+    let restic_config = crate::config::model::ResticProfileConfig::load_from_path(config_path)
+        .map_err(|e| anyhow::anyhow!("Configuration not found at {}: {}", config_path.display(), e))?;
 
     let resolved_profiles = crate::config::profile_resolver::ProfileResolver::resolve_all_or_filtered(
         &restic_config,

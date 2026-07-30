@@ -207,5 +207,13 @@ fn test_html_report_contains_custom_audit_names_and_os() {
     assert!(html.contains("Ubuntu 22.04 LTS"), "HTML must contain dynamic OS info");
 }
 
+#[test]
+fn test_report_command_fails_on_missing_config() {
+    let non_existent_path = std::path::Path::new("/tmp/non_existent_config_12345.yaml");
+    let res = backup::commands::report::run_report(non_existent_path, None, None, None);
+    assert!(res.is_err());
+}
+
+
 
 

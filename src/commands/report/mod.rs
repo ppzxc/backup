@@ -604,4 +604,15 @@ pub fn execute_report_file_export(report_type: ReportType, file: Option<&Path>) 
     execute_report_file_export_with_type(report_type, file, &meta)
 }
 
+pub fn run_report(
+    config_path: &Path,
+    action: Option<ReportAction>,
+    file: Option<PathBuf>,
+    format: Option<ReportFormat>,
+) -> Result<String> {
+    let config = crate::config::model::BackupConfig::load_from_path(config_path)
+        .map_err(|e| anyhow::anyhow!("Configuration load error at {}: {}", config_path.display(), e))?;
+    ReportCommand::run(action, file, format, &config)
+}
+
 
