@@ -75,7 +75,7 @@ impl BackupConfig {
             anyhow::bail!("Primary storage password cannot be empty");
         }
         if let Some(ref sec) = self.storage.secondary {
-            if sec.enabled && sec.password.expose_secret().trim().is_empty() {
+            if sec.enabled && sec.backend != "sftp" && sec.password.expose_secret().trim().is_empty() {
                 anyhow::bail!("Secondary storage password cannot be empty");
             }
         }
