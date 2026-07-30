@@ -33,6 +33,7 @@ fn test_execute_run() {
             secondary: None,
         },
         reports: ReportsConfig::default(),
+        audit: AuditConfig::default(),
     };
     let result = execute_run(&config, &mock_runner).unwrap();
     assert!(result.contains("backup complete"));
@@ -67,6 +68,7 @@ fn test_execute_status_dynamic() {
             secondary: None,
         },
         reports: ReportsConfig::default(),
+        audit: AuditConfig::default(),
     };
 
     let mock_executor = MockExecutor::new();
@@ -125,6 +127,7 @@ fn test_execute_status_fallback_on_error() {
             secondary: None,
         },
         reports: ReportsConfig::default(),
+        audit: AuditConfig::default(),
     };
 
     let mock_executor = MockExecutor::new();
@@ -285,6 +288,7 @@ fn test_execute_status() {
             secondary: None,
         },
         reports: ReportsConfig::default(),
+        audit: AuditConfig::default(),
     };
     let result = execute_status(&config).unwrap();
     assert!(result.contains("Profile: test"));

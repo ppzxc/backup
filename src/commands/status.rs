@@ -27,9 +27,11 @@ pub fn execute_status_from_profiles_config<R: crate::runner::resticprofile::Rest
     profile_filter: Option<&str>,
     runner: &R,
 ) -> Result<String> {
-    let restic_config = crate::config::model::ResticProfileConfig::load_from_path(config_path)
-        .map_err(|e| anyhow::anyhow!("Configuration not found at {}: {}", config_path.display(), e))?;
+    if !config_path.exists() {
+        return Ok(format!("Configuration file not found at {}", config_path.display()));
+    }
 
+    let restic_config = crate::config::model::ResticProfileConfig::load_from_path(config_path)?;
     let resolved_profiles = crate::config::profile_resolver::ProfileResolver::resolve_all_or_filtered(
         &restic_config,
         profile_filter,

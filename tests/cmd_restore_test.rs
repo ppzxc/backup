@@ -27,6 +27,7 @@ fn test_execute_snapshots() {
             secondary: None,
         },
         reports: ReportsConfig::default(),
+        audit: AuditConfig::default(),
     };
     let result = execute_snapshots(&config, &mock_runner).unwrap();
     assert!(result.contains("12345678"));

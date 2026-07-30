@@ -6,11 +6,11 @@ fn test_e2e_cli_lifecycle_full_subcommands() {
     Command::cargo_bin("backup").unwrap().arg("--version").assert().success();
     Command::cargo_bin("backup").unwrap().arg("--help").assert().success();
 
-    // 2. Status
-    Command::cargo_bin("backup").unwrap().arg("status").assert().success();
-
-    // 3. Setup
+    // 2. Setup
     Command::cargo_bin("backup").unwrap().args(&["setup", "--non-interactive"]).assert().success();
+
+    // 3. Status
+    Command::cargo_bin("backup").unwrap().arg("status").assert().success();
 
     // 4. Schedule & Doctor
     Command::cargo_bin("backup").unwrap().arg("schedule").arg("status").assert().success();
