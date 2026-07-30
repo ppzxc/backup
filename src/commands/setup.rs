@@ -488,38 +488,15 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
     loop {
         // Perform SFTP connection test
         println!("{}", msg.sftp_testing_connection);
-        let port_str = port.to_string();
-        let remote_target = format!("{}@{}", user, host);
-        let test_output = runner.run("ssh", &[
-            "-i",
-            &key_path_str,
-            "-p",
-            &port_str,
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
-            &remote_target,
-            "exit",
-        ]);
+        let test_result = verify_sftp_connection(&user, &host, port, &key_path_str, runner);
 
-        let success = match test_output {
-            Ok(ref out) if out.status_code == 0 => {
+        let success = match test_result {
+            Ok(()) => {
                 println!("{}", msg.sftp_test_success);
                 true
             }
-            Ok(ref out) => {
-                let trimmed_err = out.stderr.trim();
-                let reason = if trimmed_err.is_empty() {
-                    format!("exit code: {}", out.status_code)
-                } else {
-                    trimmed_err.to_string()
-                };
-                println!("{}", msg.sftp_test_failed.replace("{}", &reason));
-                false
-            }
-            Err(ref e) => {
-                println!("{}", msg.sftp_test_failed.replace("{}", &e.to_string()));
+            Err(ref reason) => {
+                println!("{}", msg.sftp_test_failed.replace("{}", reason));
                 false
             }
         };
@@ -562,6 +539,45 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
             key_file: Some(key_path_str),
         },
     ))
+}
+
+pub fn verify_sftp_connection<R: crate::runner::executor::CommandRunner>(
+    user: &str,
+    host: &str,
+    port: u16,
+    key_path: &str,
+    runner: &R,
+) -> Result<(), String> {
+    let port_str = port.to_string();
+    let remote_target = format!("{}@{}", user, host);
+    let test_output = runner.run(
+        "ssh",
+        &[
+            "-i",
+            key_path,
+            "-p",
+            &port_str,
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            &remote_target,
+            "exit",
+        ],
+    );
+
+    match test_output {
+        Ok(out) if out.status_code == 0 => Ok(()),
+        Ok(out) => {
+            let trimmed_err = out.stderr.trim();
+            if trimmed_err.is_empty() {
+                Err(format!("exit code: {}", out.status_code))
+            } else {
+                Err(trimmed_err.to_string())
+            }
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 pub fn format_sftp_repository_url(user: &str, host: &str, port: u16, path: &str) -> String {

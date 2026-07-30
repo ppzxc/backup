@@ -380,3 +380,27 @@ fn test_format_sftp_repository_url() {
     );
 }
 
+#[test]
+fn test_verify_sftp_connection_success_and_failure() {
+    use backup::commands::setup::verify_sftp_connection;
+    use backup::runner::executor::{CommandOutput, MockExecutor};
+
+    let mock_success = MockExecutor::new();
+    mock_success.push_output("ssh", CommandOutput {
+        status_code: 0,
+        stdout: "".into(),
+        stderr: "".into(),
+    });
+    assert!(verify_sftp_connection("backup_restic", "59.25.177.53", 49382, "/etc/backup/id_ed25519", &mock_success).is_ok());
+
+    let mock_failure = MockExecutor::new();
+    mock_failure.push_output("ssh", CommandOutput {
+        status_code: 255,
+        stdout: "".into(),
+        stderr: "Permission denied (publickey,password).".into(),
+    });
+    let res = verify_sftp_connection("backup_restic", "59.25.177.53", 49382, "/etc/backup/id_ed25519", &mock_failure);
+    assert!(res.is_err());
+    assert!(res.unwrap_err().contains("Permission denied"));
+}
+

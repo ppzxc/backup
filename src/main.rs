@@ -142,7 +142,7 @@ fn main() -> anyhow::Result<()> {
                                 Err(err) => println!("Repository initialization note ({})", err),
                             }
                         }
-                        init_secondary_backend_if_present(default_config_path, &resticprofile, true);
+                        init_secondary_backend_if_present(default_config_path, &resticprofile, &executor, true);
                     } else {
                         println!("Backend storage repository initialization initiated.");
                     }
@@ -158,7 +158,7 @@ fn main() -> anyhow::Result<()> {
                             for name in parsed.profile_names() {
                                 let _ = resticprofile.init(default_config_path, &name);
                             }
-                            init_secondary_backend_if_present(default_config_path, &resticprofile, false);
+                            init_secondary_backend_if_present(default_config_path, &resticprofile, &executor, false);
                         }
                     }
                 }
@@ -267,9 +267,32 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_secondary_backend_if_present<R: ResticProfileRunner>(config_path: &std::path::Path, resticprofile: &R, verbose: bool) {
+fn init_secondary_backend_if_present<R: ResticProfileRunner, E: backup::runner::executor::CommandRunner>(
+    config_path: &std::path::Path,
+    resticprofile: &R,
+    executor: &E,
+    verbose: bool,
+) {
     if let Ok(parsed) = backup::config::model::ResticProfileConfig::load_from_path(config_path) {
-        if parsed.profiles.contains_key("secondary") {
+        if let Some(sec_profile) = parsed.profiles.get("secondary") {
+            let repo = sec_profile.repository.as_deref().unwrap_or("");
+            if repo.starts_with("sftp:") {
+                let config_dir = config_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+                let backup_config = backup::config::model::BackupConfig::load_from_path(config_path).ok();
+                let sftp_conf = backup_config.as_ref().and_then(|c| c.storage.secondary.as_ref()).and_then(|s| s.sftp.as_ref());
+                
+                if let Some(sftp) = sftp_conf {
+                    let key_path = sftp.key_file.as_deref().unwrap_or("");
+                    if !key_path.is_empty() {
+                        if let Err(reason) = backup::commands::setup::verify_sftp_connection(&sftp.user, &sftp.host, sftp.port, key_path, executor) {
+                            println!("[Notice] Secondary SFTP storage connection verification skipped init: {}", reason);
+                            println!("[Notice] Register public key ({}.pub) in {}@{}:~/.ssh/authorized_keys and run 'backup setup backend-init'", key_path, sftp.user, sftp.host);
+                            return;
+                        }
+                    }
+                }
+            }
+
             if verbose {
                 println!("=== Initializing Secondary Backend Storage for Profile: [secondary] ===");
             }
