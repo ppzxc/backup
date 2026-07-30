@@ -263,6 +263,54 @@ storage:
 }
 
 #[test]
+fn test_sftp_option_command_generation() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("etc_backup");
+
+    let yaml = r#"
+version: "1.0"
+profile: "sftp-test"
+backup:
+  targets: ["/var/log"]
+  excludes: []
+retention:
+  keepDaily: 7
+  keepWeekly: 4
+  keepMonthly: 12
+storage:
+  primary:
+    backend: "sftp"
+    repository: "sftp://backup_restic@59.25.177.53:49382/backup/ns0327/log"
+    password: "secret_pass_123"
+    sftp:
+      host: "59.25.177.53"
+      port: 49382
+      user: "backup_restic"
+      keyFile: "/etc/backup/id_ed25519"
+  secondary:
+    enabled: true
+    backend: "sftp"
+    repository: "sftp://backup_restic@59.25.177.53:49382/backup/ns0327/sec"
+    password: "secret_pass_123"
+    sftp:
+      host: "59.25.177.53"
+      port: 49382
+      user: "backup_restic"
+      keyFile: "/etc/backup/id_ed25519_secondary"
+"#;
+    let config: BackupConfig = serde_yaml::from_str(yaml).unwrap();
+    config.save_and_sync(&config_dir).unwrap();
+
+    let profiles_file = config_dir.join("profiles.yaml");
+    assert!(profiles_file.exists());
+
+    let content = fs::read_to_string(&profiles_file).unwrap();
+    assert!(content.contains("option:"));
+    assert!(content.contains("sftp.command: ssh -o StrictHostKeyChecking=no -i /etc/backup/id_ed25519 -p 49382 backup_restic@59.25.177.53 -s sftp"));
+    assert!(content.contains("sftp.command: ssh -o StrictHostKeyChecking=no -i /etc/backup/id_ed25519_secondary -p 49382 backup_restic@59.25.177.53 -s sftp"));
+}
+
+#[test]
 fn test_profiles_yaml_single_file_unification_and_merge() {
     let dir = tempdir().unwrap();
     let config_dir = dir.path().join("etc_backup");

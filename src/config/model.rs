@@ -185,6 +185,13 @@ impl BackupConfig {
             env_map.insert("AWS_SECRET_ACCESS_KEY".into(), s3.secret_access_key.expose_secret().to_string());
             primary_profile.env = Some(env_map);
         }
+        if let Some(ref sftp) = self.storage.primary.sftp {
+            if let Some(sftp_cmd) = sftp.sftp_command() {
+                let mut opt_map = primary_profile.option.unwrap_or_default();
+                opt_map.insert("sftp.command".into(), sftp_cmd);
+                primary_profile.option = Some(opt_map);
+            }
+        }
         restic_config.profiles.insert("primary".into(), primary_profile);
 
         // 3. Populate secondary profile (if enabled)
@@ -204,6 +211,13 @@ impl BackupConfig {
                     env_map.insert("AWS_ACCESS_KEY_ID".into(), s3.access_key_id.clone());
                     env_map.insert("AWS_SECRET_ACCESS_KEY".into(), s3.secret_access_key.expose_secret().to_string());
                     secondary_profile.env = Some(env_map);
+                }
+                if let Some(ref sftp) = sec.sftp {
+                    if let Some(sftp_cmd) = sftp.sftp_command() {
+                        let mut opt_map = secondary_profile.option.unwrap_or_default();
+                        opt_map.insert("sftp.command".into(), sftp_cmd);
+                        secondary_profile.option = Some(opt_map);
+                    }
                 }
                 restic_config.profiles.insert("secondary".into(), secondary_profile);
             }
@@ -277,6 +291,7 @@ impl BackupConfig {
             password_file: None,
             password: None,
             env: None,
+            option: None,
             copy: copy_section,
         };
 
@@ -454,6 +469,19 @@ pub struct SftpConfig {
     pub key_file: Option<String>,
 }
 
+impl SftpConfig {
+    pub fn sftp_command(&self) -> Option<String> {
+        let key_file = self.key_file.as_ref()?;
+        if key_file.trim().is_empty() {
+            return None;
+        }
+        Some(format!(
+            "ssh -o StrictHostKeyChecking=no -i {} -p {} {}@{} -s sftp",
+            key_file, self.port, self.user, self.host
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct S3Config {
@@ -564,6 +592,8 @@ pub struct ProfileSection {
     pub prune: Option<PruneCommandSection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub check: Option<CheckCommandSection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub option: Option<std::collections::BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub copy: Option<CopyCommandSection>,
 }
