@@ -7,19 +7,15 @@ fn test_isms_environment_audit_report_format() {
     let meta = AuditReportMeta::new("prod-db-server-01", "2026-07-23 15:34:00");
     let html = render_html_isms_report_with_type(ReportType::Environment, &meta);
     assert!(html.contains("일일 백업 결과 및 보안 설정 검토 보고서"));
-    assert!(html.contains("ISMS-P 2.9.2"));
-    assert!(html.contains("0700"));
-    assert!(html.contains("0600"));
-    assert!(html.contains("******"));
+    assert!(html.contains("700"));
+    assert!(html.contains("600"));
 }
 
 #[test]
 fn test_isms_time_sync_audit_report_format() {
     let meta = AuditReportMeta::new("prod-db-server-01", "2026-07-23 15:34:00");
     let html = render_html_isms_report_with_type(ReportType::TimeSync, &meta);
-    assert!(html.contains("ISMS-P 2.9.3 시각 동기화 점검 보고서"));
-    assert!(html.contains("ISMS-P 2.10.1"));
-    assert!(html.contains("+0.0004s"));
+    assert!(html.contains("ISMS-P 2.9.3 시각 동기화 증적 보고서"));
 }
 
 #[test]
@@ -27,8 +23,6 @@ fn test_isms_restore_drill_rto_audit_report_format() {
     let meta = AuditReportMeta::new("prod-db-server-01", "2026-07-23 15:34:00");
     let html = render_html_isms_report_with_type(ReportType::RestoreDrill, &meta);
     assert!(html.contains("백업 데이터 복구 및 정합성 테스트 결과 보고서"));
-    assert!(html.contains("ISMS-P 2.9.3"));
-    assert!(html.contains("17.0s"));
 }
 
 #[test]

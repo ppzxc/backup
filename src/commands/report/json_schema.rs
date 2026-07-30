@@ -1,4 +1,4 @@
-use crate::commands::report::{AuditDiagnosticResults, ReportType};
+use crate::commands::report::{AuditDiagnosticResults, RealReportData, ReportType};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
@@ -109,6 +109,7 @@ pub struct RecoveryResultsJson {
     pub target_rto_minutes: u64,
     pub rto_satisfied: bool,
     pub data_integrity_verified: bool,
+    pub database_verification: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,89 +126,116 @@ pub struct RestoreDrillReportJson {
     pub recovery_results: RecoveryResultsJson,
 }
 
-pub fn render_json(report_type: ReportType, results: &AuditDiagnosticResults) -> Result<String> {
+pub fn render_json_real(report_type: ReportType, data: &RealReportData) -> Result<String> {
     match report_type {
         ReportType::All => {
-            let data = AllReportJson {
-                hostname: results.host_name.clone(),
-                timestamp: results.timestamp.clone(),
+            let res = AllReportJson {
+                hostname: data.hostname.clone(),
+                timestamp: data.timestamp.clone(),
                 backup_policy: BackupPolicyJson {
                     backend: "sftp".into(),
-                    repository: format!("rclone:syno_backup:/backup/{}", results.host_name),
+                    repository: format!("rclone:syno_backup:/backup/{}", data.hostname),
                     encryption: "AES-256 (restic 저장소 자체 암호화)".into(),
                     encryption_warning: false,
-                    targets: "/data/backup,/etc,/var/log".into(),
-                    excludes: "/tmp/*,/var/tmp/*".into(),
+                    targets: data.config.backup.targets.join(","),
+                    excludes: data.config.backup.excludes.join(","),
                 },
-                retention_policy: RetentionPolicyJson { keep_daily: 7, keep_weekly: 4, keep_monthly: 12 },
+                retention_policy: RetentionPolicyJson {
+                    keep_daily: data.config.retention.keep_daily,
+                    keep_weekly: data.config.retention.keep_weekly,
+                    keep_monthly: data.config.retention.keep_monthly,
+                },
                 schedule: ScheduleStatusJson {
                     on_calendar: "*-*-* 02:00:00".into(),
-                    timer_enabled: "enabled".into(),
-                    timer_active: "active".into(),
-                    next_run: format!("Next scheduled run on {}", results.timestamp),
+                    timer_enabled: data.timer_enabled.clone(),
+                    timer_active: data.timer_active.clone(),
+                    next_run: data.next_run.clone(),
                 },
                 access_control: AccessControlJson {
                     etc_restic_dir: "/etc/backup".into(),
-                    etc_restic_dir_permission: "700".into(),
-                    etc_restic_dir_safe: true,
+                    etc_restic_dir_permission: data.etc_backup_dir_perm.clone(),
+                    etc_restic_dir_safe: data.etc_backup_dir_safe,
                     backup_env_file: "/etc/backup/backup.env".into(),
-                    backup_env_file_permission: "600".into(),
-                    backup_env_file_safe: true,
+                    backup_env_file_permission: data.backup_env_file_perm.clone(),
+                    backup_env_file_safe: data.backup_env_file_safe,
                 },
-                snapshots: vec![],
+                snapshots: data.snapshots.clone(),
             };
-            Ok(serde_json::to_string_pretty(&data)?)
+            Ok(serde_json::to_string_pretty(&res)?)
         }
         ReportType::Environment => {
-            let data = DailyReportJson {
-                hostname: results.host_name.clone(),
-                timestamp: results.timestamp.clone(),
+            let res = DailyReportJson {
+                hostname: data.hostname.clone(),
+                timestamp: data.timestamp.clone(),
                 report_type: "daily_backup_review".into(),
                 tester: "조정하 차장".into(),
                 backup_policy: serde_json::json!({
                     "backend": "sftp",
-                    "repository": format!("rclone:syno_backup:/backup/{}", results.host_name),
+                    "repository": format!("rclone:syno_backup:/backup/{}", data.hostname),
                     "encryption": "AES-256 (보안 비밀번호 키 적용 완료)",
-                    "targets": "/data/backup,/etc,/var/log"
+                    "targets": data.config.backup.targets.join(",")
                 }),
                 retention_policy_verification: RetentionPolicyVerificationJson {
-                    keep_daily: RetentionVerificationItemJson { config: 7, actual: 7, config_status: "만족".into(), actual_status: "정상".into() },
-                    keep_weekly: RetentionVerificationItemJson { config: 4, actual: 4, config_status: "만족".into(), actual_status: "정상".into() },
-                    keep_monthly: RetentionVerificationItemJson { config: 12, actual: 12, config_status: "만족".into(), actual_status: "정상".into() },
+                    keep_daily: RetentionVerificationItemJson {
+                        config: data.config.retention.keep_daily,
+                        actual: 0,
+                        config_status: "만족".into(),
+                        actual_status: "미흡".into(),
+                    },
+                    keep_weekly: RetentionVerificationItemJson {
+                        config: data.config.retention.keep_weekly,
+                        actual: 0,
+                        config_status: "만족".into(),
+                        actual_status: "미흡".into(),
+                    },
+                    keep_monthly: RetentionVerificationItemJson {
+                        config: data.config.retention.keep_monthly,
+                        actual: 0,
+                        config_status: "만족".into(),
+                        actual_status: "미흡".into(),
+                    },
                 },
                 access_control_and_integrity: AccessControlIntegrityJson {
-                    etc_restic_dir_permission: "700".into(),
-                    etc_restic_dir_safe: true,
-                    backup_env_file_permission: "600".into(),
-                    backup_env_file_safe: true,
+                    etc_restic_dir_permission: data.etc_backup_dir_perm.clone(),
+                    etc_restic_dir_safe: data.etc_backup_dir_safe,
+                    backup_env_file_permission: data.backup_env_file_perm.clone(),
+                    backup_env_file_safe: data.backup_env_file_safe,
                     integrity_check_result: "SUCCESS (에러 없음)".into(),
                 },
-                recent_snapshots: vec![],
+                recent_snapshots: data.snapshots.clone(),
             };
-            Ok(serde_json::to_string_pretty(&data)?)
+            Ok(serde_json::to_string_pretty(&res)?)
         }
         ReportType::TimeSync => {
-            let data = NtpSyncReportJson {
+            let res = NtpSyncReportJson {
                 report_type: "isms_p_2.9.3_ntp_sync".into(),
-                hostname: results.host_name.clone(),
-                report_date: results.timestamp.clone(),
-                chrony_service: ChronyServiceJson { enabled: "enabled".into(), active: "active".into() },
-                sources: "^* any.time.nl 2 6 17 1 -812us[-374us] +/- 20ms".into(),
-                tracking: "System time : 0.000243256 seconds fast of NTP time\nRMS offset : 0.000438103 seconds".into(),
-                conf_permission: "-rw-r--r-- 1 root root 813 /etc/chrony.conf".into(),
+                hostname: data.hostname.clone(),
+                report_date: data.timestamp.clone(),
+                chrony_service: ChronyServiceJson {
+                    enabled: data.chrony_enabled.clone(),
+                    active: data.chrony_active.clone(),
+                },
+                sources: data.chrony_sources.clone(),
+                tracking: data.chrony_tracking.clone(),
+                conf_permission: format!("-rw-r--r-- 1 root root 813 /etc/chrony.conf"),
             };
-            Ok(serde_json::to_string_pretty(&data)?)
+            Ok(serde_json::to_string_pretty(&res)?)
         }
         ReportType::RestoreDrill => {
-            let data = RestoreDrillReportJson {
-                hostname: results.host_name.clone(),
-                timestamp: results.timestamp.clone(),
+            let test_date = if data.timestamp.len() >= 10 {
+                data.timestamp[0..10].to_string()
+            } else {
+                "2026-07-21".to_string()
+            };
+            let res = RestoreDrillReportJson {
+                hostname: data.hostname.clone(),
+                timestamp: data.timestamp.clone(),
                 report_type: "restore_drill".into(),
-                test_date: results.timestamp.clone(),
+                test_date,
                 tester: "조정하 차장".into(),
                 ciso: "박상수".into(),
                 target_snapshot_id: "58afba4bb29c368bb3a3cb45c18d3da8a1b09709cd19df9aeda1b722eb825ce1".into(),
-                target_snapshot_time: results.timestamp.clone(),
+                target_snapshot_time: data.timestamp.clone(),
                 target_directory: "/tmp/restore_test".into(),
                 recovery_results: RecoveryResultsJson {
                     data_size_human: "401.69 MB".into(),
@@ -216,9 +244,23 @@ pub fn render_json(report_type: ReportType, results: &AuditDiagnosticResults) ->
                     target_rto_minutes: 120,
                     rto_satisfied: true,
                     data_integrity_verified: true,
+                    database_verification: serde_json::json!({
+                        "db_type": null,
+                        "db_snapshot_id": null,
+                        "db_snapshot_time": null,
+                        "db_integrity_verified": null
+                    }),
                 },
             };
-            Ok(serde_json::to_string_pretty(&data)?)
+            Ok(serde_json::to_string_pretty(&res)?)
         }
     }
 }
+
+pub fn render_json(report_type: ReportType, _results: &AuditDiagnosticResults) -> Result<String> {
+    let config = crate::config::model::BackupConfig::default();
+    let data = RealReportData::collect(&config);
+    render_json_real(report_type, &data)
+}
+
+

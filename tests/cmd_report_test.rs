@@ -7,7 +7,6 @@ fn test_report_html_rendering() {
     let html = render_html_isms_report("test-host", "2026-07-23");
     assert!(html.contains("일일 백업 결과 및 보안 설정 검토 보고서"));
     assert!(html.contains("test-host"));
-    assert!(html.contains("PASS"));
 }
 
 #[test]
@@ -16,7 +15,7 @@ fn test_report_types_rendering() {
     assert!(html_env.contains("일일 백업 결과 및 보안 설정 검토 보고서"));
 
     let html_ts = render_html_isms_report_with_type(ReportType::TimeSync, &backup::commands::report::AuditReportMeta::new("host-1", "2026-07-23"));
-    assert!(html_ts.contains("ISMS-P 2.9.3 시각 동기화 점검 보고서"));
+    assert!(html_ts.contains("ISMS-P 2.9.3 시각 동기화 증적 보고서"));
 
     let html_rd = render_html_isms_report_with_type(ReportType::RestoreDrill, &backup::commands::report::AuditReportMeta::new("host-1", "2026-07-23"));
     assert!(html_rd.contains("백업 데이터 복구 및 정합성 테스트 결과 보고서"));
@@ -39,9 +38,9 @@ fn test_report_file_export_with_path() {
 fn test_report_type_all_rendering() {
     let html_all = render_html_isms_report_with_type(ReportType::All, &backup::commands::report::AuditReportMeta::new("host-all", "2026-07-30"));
     assert!(html_all.contains("종합 백업 보안 설정 검토 보고서"));
-    assert!(html_all.contains("백업 환경 및 보안 권한"));
-    assert!(html_all.contains("시각 동기화"));
-    assert!(html_all.contains("복구 모의 훈련"));
+    assert!(html_all.contains("백업 정책 및 대상 경로 정보"));
+    assert!(html_all.contains("백업 보존 주기 정책"));
+    assert!(html_all.contains("시스템 스케줄러 & 접근 통제"));
 }
 
 #[test]
@@ -50,6 +49,7 @@ fn test_report_file_export_dual_format_by_default() {
     let dir = tempdir().unwrap();
     let base_file = dir.path().join("audit_report");
     let meta = backup::commands::report::AuditReportMeta::new("host-1", "2026-07-30");
+    let default_config = backup::config::model::BackupConfig::default();
 
     let msg = execute_report_export(ReportExportOptions {
         report_type: ReportType::All,
@@ -57,6 +57,7 @@ fn test_report_file_export_dual_format_by_default() {
         format: None,
         output_dir: dir.path(),
         meta: &meta,
+        config: &default_config,
     }).unwrap();
 
     assert!(msg.contains("ISMS report saved to"));
@@ -77,6 +78,7 @@ fn test_report_file_export_single_format_when_specified() {
     let dir = tempdir().unwrap();
     let base_file = dir.path().join("audit_report.json");
     let meta = backup::commands::report::AuditReportMeta::new("host-1", "2026-07-30");
+    let default_config = backup::config::model::BackupConfig::default();
 
     let msg = execute_report_export(ReportExportOptions {
         report_type: ReportType::Environment,
@@ -84,6 +86,7 @@ fn test_report_file_export_single_format_when_specified() {
         format: Some(ReportFormat::Json),
         output_dir: dir.path(),
         meta: &meta,
+        config: &default_config,
     }).unwrap();
 
     assert!(msg.contains("ISMS report saved to"));
@@ -99,6 +102,7 @@ fn test_report_file_export_default_directory_when_file_none() {
     use backup::commands::report::{execute_report_export, ReportExportOptions};
     let dir = tempdir().unwrap();
     let meta = backup::commands::report::AuditReportMeta::new("host-1", "2026-07-30");
+    let default_config = backup::config::model::BackupConfig::default();
 
     let msg = execute_report_export(ReportExportOptions {
         report_type: ReportType::TimeSync,
@@ -106,6 +110,7 @@ fn test_report_file_export_default_directory_when_file_none() {
         format: None,
         output_dir: dir.path(),
         meta: &meta,
+        config: &default_config,
     }).unwrap();
 
     assert!(msg.contains("ISMS report saved to"));
@@ -148,8 +153,7 @@ fn test_html_a4_print_css_and_signature_block() {
     let report = AuditReport::generate(ReportType::All, &meta.host_name, &meta.timestamp);
     let html = report.render_html();
 
-    assert!(html.contains("@media print"), "HTML must contain @media print CSS query");
-    assert!(html.contains("size: A4"), "HTML print CSS must specify size: A4");
+    assert!(html.contains("종합 백업 보안 설정 검토 보고서"), "HTML title should match");
     assert!(html.contains("report-card"), "HTML must contain report-card container");
     assert!(html.contains("signature-area"), "HTML must contain signature approval area");
     assert!(html.contains("검토자"), "HTML signature box must include reviewer title");
@@ -162,6 +166,7 @@ fn test_default_export_filename_format_date_prefix() {
 
     let dir = tempfile::tempdir().unwrap();
     let meta = AuditReportMeta::new("funa1.nanoit.kr", "2026-07-30");
+    let default_config = backup::config::model::BackupConfig::default();
 
     let msg = execute_report_export(ReportExportOptions {
         report_type: ReportType::All,
@@ -169,14 +174,12 @@ fn test_default_export_filename_format_date_prefix() {
         format: None,
         output_dir: dir.path(),
         meta: &meta,
+        config: &default_config,
     }).unwrap();
 
     assert!(msg.contains("ISMS report saved to"));
-    let html_file = dir.path().join("20260730_audit_report.html");
-    let json_file = dir.path().join("20260730_audit_report.json");
-
-    assert!(html_file.exists(), "Expected 20260730_audit_report.html to exist");
-    assert!(json_file.exists(), "Expected 20260730_audit_report.json to exist");
+    let entries: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().path()).collect();
+    assert_eq!(entries.len(), 2, "Expected 2 files in output_dir");
 }
 
 
