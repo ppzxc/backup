@@ -211,7 +211,7 @@ profiles:
         Some("s3:https://s3.amazonaws.com/mybucket")
     );
     let self_prof = config.profiles.get("self").unwrap();
-    assert_eq!(self_prof.inherit.as_deref(), Some(["default".to_string()].as_slice()));
+    assert_eq!(self_prof.inherit.as_deref(), Some("default"));
 
     let backup_sec = self_prof.backup.as_ref().unwrap();
     assert_eq!(backup_sec.source.as_ref().unwrap(), &vec!["/var/www".to_string()]);
@@ -366,12 +366,14 @@ storage:
 
     let primary_prof = restic_config.profiles.get("primary").unwrap();
     assert_eq!(primary_prof.repository.as_deref(), Some("s3:https://s3.amazonaws.com/primary-bucket"));
+    assert_eq!(primary_prof.inherit.as_deref(), Some("default"));
 
     let secondary_prof = restic_config.profiles.get("secondary").unwrap();
     assert_eq!(secondary_prof.repository.as_deref(), Some("s3:https://s3.amazonaws.com/secondary-bucket"));
+    assert_eq!(secondary_prof.inherit.as_deref(), Some("default"));
 
     let web_prof = restic_config.profiles.get("web-data").unwrap();
-    assert_eq!(web_prof.inherit.as_deref(), Some(["default".to_string(), "primary".to_string()].as_slice()));
+    assert_eq!(web_prof.inherit.as_deref(), Some("primary"));
     assert_eq!(web_prof.copy.as_ref().unwrap().profile.as_deref(), Some("secondary"));
 }
 

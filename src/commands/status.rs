@@ -46,9 +46,7 @@ pub fn execute_status_from_profiles_config<R: crate::runner::resticprofile::Rest
         .repository
         .as_deref()
         .or_else(|| {
-            profile_section.inherit.as_ref().and_then(|parents| {
-                parents.iter().find_map(|p| restic_config.profiles.get(p).and_then(|sec| sec.repository.as_deref()))
-            })
+            profile_section.inherit.as_ref().and_then(|p| restic_config.profiles.get(p).and_then(|sec| sec.repository.as_deref()))
         })
         .or_else(|| restic_config.profiles.get("primary").and_then(|p| p.repository.as_deref()))
         .or_else(|| restic_config.profiles.get("default").and_then(|p| p.repository.as_deref()))
@@ -69,9 +67,7 @@ pub fn execute_status_from_profiles_config<R: crate::runner::resticprofile::Rest
         .as_ref()
         .and_then(|b| b.source.as_ref())
         .or_else(|| {
-            profile_section.inherit.as_ref().and_then(|parents| {
-                parents.iter().find_map(|p| restic_config.profiles.get(p).and_then(|sec| sec.backup.as_ref().and_then(|b| b.source.as_ref())))
-            })
+            profile_section.inherit.as_ref().and_then(|p| restic_config.profiles.get(p).and_then(|sec| sec.backup.as_ref().and_then(|b| b.source.as_ref())))
         })
         .or_else(|| restic_config.profiles.get("default").and_then(|p| p.backup.as_ref().and_then(|b| b.source.as_ref())))
         .cloned()

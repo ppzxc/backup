@@ -115,6 +115,7 @@ impl BackupConfig {
         if primary_profile.description.is_none() {
             primary_profile.description = Some("Primary Storage configuration".into());
         }
+        primary_profile.inherit = Some("default".into());
         primary_profile.repository = Some(self.storage.primary.repository.clone());
         let enc_path = config_dir.join("enc");
         if enc_path.is_file() {
@@ -146,6 +147,7 @@ impl BackupConfig {
                 if secondary_profile.description.is_none() {
                     secondary_profile.description = Some("Secondary Storage configuration".into());
                 }
+                secondary_profile.inherit = Some("default".into());
                 secondary_profile.repository = Some(sec.repository.clone());
                 let pwd = sec.password.expose_secret();
                 if !pwd.trim().is_empty() {
@@ -169,7 +171,7 @@ impl BackupConfig {
 
         let profile_section = ProfileSection {
             description: Some(format!("Backup profile for {}", self.profile)),
-            inherit: Some(vec!["default".into(), "primary".into()]),
+            inherit: Some("primary".into()),
             initialize: Some(true),
             insecure_tls: None,
             backup: Some(BackupCommandSection {
@@ -424,9 +426,8 @@ pub struct ProfileSection {
     pub password: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub insecure_tls: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(with = "inherit_serde")]
-    pub inherit: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inherit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initialize: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -443,45 +444,6 @@ pub struct ProfileSection {
     pub check: Option<CheckCommandSection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub copy: Option<CopyCommandSection>,
-}
-
-pub mod inherit_serde {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    #[derive(Deserialize, Serialize)]
-    #[serde(untagged)]
-    enum StringOrVec {
-        Single(String),
-        Multiple(Vec<String>),
-    }
-
-    pub fn serialize<S>(val: &Option<Vec<String>>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match val {
-            Some(v) => {
-                if v.len() == 1 {
-                    serializer.serialize_str(&v[0])
-                } else {
-                    v.serialize(serializer)
-                }
-            }
-            None => serializer.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let opt: Option<StringOrVec> = Option::deserialize(deserializer)?;
-        match opt {
-            Some(StringOrVec::Single(s)) => Ok(Some(vec![s])),
-            Some(StringOrVec::Multiple(v)) => Ok(Some(v)),
-            None => Ok(None),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
