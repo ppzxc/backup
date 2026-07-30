@@ -52,6 +52,34 @@ fn test_report_subcommands_output() {
 }
 
 #[test]
+fn test_report_cli_standalone_execution() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let out_file = temp_dir.path().join("report_out");
+
+    let mut cmd = Command::cargo_bin("backup").unwrap();
+    let assert = cmd.args(&["report", "--file", out_file.to_str().unwrap()]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("ISMS report saved to"));
+    assert!(temp_dir.path().join("report_out.html").exists());
+    assert!(temp_dir.path().join("report_out.json").exists());
+}
+
+#[test]
+fn test_report_cli_format_json_execution() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let out_file = temp_dir.path().join("report_env.json");
+
+    let mut cmd = Command::cargo_bin("backup").unwrap();
+    let assert = cmd.args(&["report", "environment", "--file", out_file.to_str().unwrap(), "--format", "json"]).assert().success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(stdout.contains("ISMS report saved to"));
+    assert!(temp_dir.path().join("report_env.json").exists());
+    assert!(!temp_dir.path().join("report_env.html").exists());
+}
+
+#[test]
 fn test_schedule_subcommands_output() {
     let mut cmd = Command::cargo_bin("backup").unwrap();
     let assert = cmd.args(&["schedule", "status"]).assert().success();

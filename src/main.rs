@@ -50,7 +50,13 @@ enum Commands {
     /// ISMS-P audit evidence and report generation / ISMS-P 감사 증적 및 레포트 생성
     Report {
         #[command(subcommand)]
-        action: ReportAction,
+        action: Option<ReportAction>,
+        /// Report file path / 보고서 파일 저장 경로
+        #[arg(long, short = 'f')]
+        file: Option<PathBuf>,
+        /// Report format (html, json) / 보고서 포맷
+        #[arg(long)]
+        format: Option<backup::commands::report::ReportFormat>,
     },
     /// Systemd timer / Cron scheduler management / 스케줄러 타이머 관리
     Schedule {
@@ -97,18 +103,24 @@ enum SetupAction {
 enum ReportAction {
     /// Check Backup Environment directory/file permissions and secret masking
     Environment {
-        #[arg(long)]
+        #[arg(long, short = 'f')]
         file: Option<PathBuf>,
+        #[arg(long)]
+        format: Option<backup::commands::report::ReportFormat>,
     },
     /// Inspect NTP/Chrony time synchronization status
     TimeSync {
-        #[arg(long)]
+        #[arg(long, short = 'f')]
         file: Option<PathBuf>,
+        #[arg(long)]
+        format: Option<backup::commands::report::ReportFormat>,
     },
     /// Execute restore drill, measure RTO, and check database header integrity
     RestoreDrill {
-        #[arg(long)]
+        #[arg(long, short = 'f')]
         file: Option<PathBuf>,
+        #[arg(long)]
+        format: Option<backup::commands::report::ReportFormat>,
     },
 }
 
@@ -227,13 +239,43 @@ fn main() -> anyhow::Result<()> {
             let out = backup::commands::doctor::run_doctor_checks(&rclone, Some(default_config_path))?;
             println!("{}", out);
         }
-        Commands::Report { action } => {
-            let (report_type, file) = match action {
-                ReportAction::Environment { file } => (backup::commands::report::ReportType::Environment, file),
-                ReportAction::TimeSync { file } => (backup::commands::report::ReportType::TimeSync, file),
-                ReportAction::RestoreDrill { file } => (backup::commands::report::ReportType::RestoreDrill, file),
+        Commands::Report { action, file, format } => {
+            let (report_type, sub_file, sub_format) = match action {
+                Some(ReportAction::Environment { file, format }) => (
+                    backup::commands::report::ReportType::Environment,
+                    file,
+                    format,
+                ),
+                Some(ReportAction::TimeSync { file, format }) => (
+                    backup::commands::report::ReportType::TimeSync,
+                    file,
+                    format,
+                ),
+                Some(ReportAction::RestoreDrill { file, format }) => (
+                    backup::commands::report::ReportType::RestoreDrill,
+                    file,
+                    format,
+                ),
+                None => (
+                    backup::commands::report::ReportType::All,
+                    None,
+                    None,
+                ),
             };
-            let out = backup::commands::report::execute_report_file_export(report_type, file.as_deref())?;
+
+            let final_file = sub_file.or(file);
+            let final_format = sub_format.or(format);
+
+            let meta = backup::commands::report::AuditReportMeta::current();
+            let output_dir = std::path::Path::new(&config.reports.output_dir);
+
+            let out = backup::commands::report::execute_report_export(
+                report_type,
+                final_file.as_deref(),
+                final_format,
+                output_dir,
+                &meta,
+            )?;
             println!("{}", out);
         }
         Commands::Schedule { action } => match action {

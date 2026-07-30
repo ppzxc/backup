@@ -1,4 +1,4 @@
-use backup::commands::report::{execute_report_file_export, render_html_isms_report, render_html_isms_report_with_type, AuditReport, ReportType};
+use backup::commands::report::{execute_report_file_export, render_html_isms_report, render_html_isms_report_with_type, ReportType};
 use tempfile::tempdir;
 use std::fs;
 
@@ -34,3 +34,81 @@ fn test_report_file_export_with_path() {
     let content = fs::read_to_string(&file_path).unwrap();
     assert!(content.contains("ISMS-P 백업 환경 및 보안 권한 점검 보고서"));
 }
+
+#[test]
+fn test_report_type_all_rendering() {
+    let html_all = render_html_isms_report_with_type(ReportType::All, &backup::commands::report::AuditReportMeta::new("host-all", "2026-07-30"));
+    assert!(html_all.contains("ISMS-P 종합 감사 보고서"));
+    assert!(html_all.contains("백업 환경 및 보안 권한"));
+    assert!(html_all.contains("시각 동기화"));
+    assert!(html_all.contains("복구 모의 훈련"));
+}
+
+#[test]
+fn test_report_file_export_dual_format_by_default() {
+    use backup::commands::report::execute_report_export;
+    let dir = tempdir().unwrap();
+    let base_file = dir.path().join("audit_report");
+
+    let msg = execute_report_export(
+        ReportType::All,
+        Some(&base_file),
+        None,
+        dir.path(),
+        &backup::commands::report::AuditReportMeta::new("host-1", "2026-07-30"),
+    ).unwrap();
+
+    assert!(msg.contains("ISMS report saved to"));
+    let html_file = dir.path().join("audit_report.html");
+    let json_file = dir.path().join("audit_report.json");
+
+    assert!(html_file.exists(), "HTML report should be generated");
+    assert!(json_file.exists(), "JSON report should be generated");
+
+    let json_str = fs::read_to_string(&json_file).unwrap();
+    assert!(json_str.contains("report_type"));
+    assert!(json_str.contains("all"));
+}
+
+#[test]
+fn test_report_file_export_single_format_when_specified() {
+    use backup::commands::report::{execute_report_export, ReportFormat};
+    let dir = tempdir().unwrap();
+    let base_file = dir.path().join("audit_report.json");
+
+    let msg = execute_report_export(
+        ReportType::Environment,
+        Some(&base_file),
+        Some(ReportFormat::Json),
+        dir.path(),
+        &backup::commands::report::AuditReportMeta::new("host-1", "2026-07-30"),
+    ).unwrap();
+
+    assert!(msg.contains("ISMS report saved to"));
+    let json_file = dir.path().join("audit_report.json");
+    let html_file = dir.path().join("audit_report.html");
+
+    assert!(json_file.exists(), "JSON report should be generated");
+    assert!(!html_file.exists(), "HTML report should NOT be generated when format=json");
+}
+
+#[test]
+fn test_report_file_export_default_directory_when_file_none() {
+    use backup::commands::report::execute_report_export;
+    let dir = tempdir().unwrap();
+
+    let msg = execute_report_export(
+        ReportType::TimeSync,
+        None,
+        None,
+        dir.path(),
+        &backup::commands::report::AuditReportMeta::new("host-1", "2026-07-30"),
+    ).unwrap();
+
+    assert!(msg.contains("ISMS report saved to"));
+    let entries: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().path()).collect();
+    assert_eq!(entries.len(), 2, "Expected 2 files (html & json) in output_dir");
+    assert!(entries.iter().any(|p| p.extension().map_or(false, |ext| ext == "html")));
+    assert!(entries.iter().any(|p| p.extension().map_or(false, |ext| ext == "json")));
+}
+

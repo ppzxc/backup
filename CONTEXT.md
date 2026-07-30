@@ -72,9 +72,10 @@
 * **`backup doctor`**: 백업 바이너리, 설정파일/보안 권한(`700`/`600`), 저장소 네트워크 연결성, NTP 시각 동기화, 타이머 스케줄러 헬스체크 종합 진단 및 문제 조치 가이드 제공
 
 ### 6. `backup report` (ISMS-P 감사 증적 및 레포트 생성)
-* **`backup report environment [--file <path>]`**: **Backup Environment** 권한 및 보안 규정 검증 보고서 생성
-* **`backup report time-sync [--file <path>]`**: NTP/Chrony 시각 동기화 검증 및 ISMS 증적 보고서 생성
-* **`backup report restore-drill [--file <path>]`**: 스냅샷 복구 모의훈련 실행, RTO 측정 및 DB 무결성 검증 보고서 생성
+* **`backup report [subcommand] [--file <path>] [--format <html|json>]`**: 서브 커맨드 미지정 시 전체 검사 항목(`environment`, `time-sync`, `restore-drill`)을 순환 실행하여 통합 보고서를 생성하며, `--file` 미지정 시 `BackupConfig.reports.output_dir` (기본값: `/data/backup/reports`) 내 타임스탬프 파일로 기록됨. `--format` 미지정 시 HTML 및 JSON 포맷 보고서 2종을 모두 생성하며, 지정 시 해당 포맷 파일만 단독 생성됨.
+* **`backup report environment [--file <path>] [--format <html|json>]`**: **Backup Environment** 권한 및 보안 규정 검증 보고서 생성
+* **`backup report time-sync [--file <path>] [--format <html|json>]`**: NTP/Chrony 시각 동기화 검증 및 ISMS 증적 보고서 생성
+* **`backup report restore-drill [--file <path>] [--format <html|json>]`**: 스냅샷 복구 모의훈련 실행, RTO 측정 및 DB 무결성 검증 보고서 생성
 
 ### 7. `backup schedule` (스케줄러 관리)
 * **`backup schedule enable`**: Systemd Timer (또는 Cron Fallback) 자동 백업 스케줄 등록
