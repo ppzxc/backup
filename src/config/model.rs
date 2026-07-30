@@ -176,9 +176,23 @@ impl BackupConfig {
                 }
                 secondary_profile.inherit = Some("default".into());
                 secondary_profile.repository = Some(sec.repository.clone());
-                let pwd = sec.password.expose_secret();
-                if !pwd.trim().is_empty() {
-                    secondary_profile.password = Some(pwd.to_string());
+                let enc_path = config_dir.join("enc");
+                if enc_path.is_file() {
+                    secondary_profile.password_file = Some(enc_path.to_string_lossy().to_string());
+                    secondary_profile.password = None;
+                } else if Path::new("/etc/backup/enc").is_file() {
+                    secondary_profile.password_file = Some("/etc/backup/enc".into());
+                    secondary_profile.password = None;
+                } else {
+                    let pwd = sec.password.expose_secret();
+                    if !pwd.trim().is_empty() {
+                        secondary_profile.password = Some(pwd.to_string());
+                    } else {
+                        let primary_pwd = self.storage.primary.password.expose_secret();
+                        if !primary_pwd.trim().is_empty() {
+                            secondary_profile.password = Some(primary_pwd.to_string());
+                        }
+                    }
                 }
                 if let Some(ref s3) = sec.s3 {
                     let mut env_map = secondary_profile.env.unwrap_or_default();

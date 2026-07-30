@@ -421,3 +421,44 @@ fn test_empty_password_validation_error() {
     config.storage.primary.password = secrecy::SecretString::new("".into());
     assert!(config.validate().is_err());
 }
+
+#[test]
+fn test_secondary_profile_password_file_or_password_fallback() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("etc_backup");
+
+    let yaml = r#"
+version: "1.0"
+profile: "sftp_sec_test"
+backup:
+  targets: ["/var/log"]
+  excludes: []
+retention:
+  keepDaily: 7
+  keepWeekly: 4
+  keepMonthly: 12
+storage:
+  primary:
+    backend: "s3"
+    repository: "s3:https://59.25.177.53:39000/backup/ns0327/log"
+    password: "primary_secret_123"
+  secondary:
+    enabled: true
+    backend: "sftp"
+    repository: "sftp:backup_restic@59.25.177.53:49382/backup/nbs0327/log"
+    password: ""
+"#;
+    let config: BackupConfig = serde_yaml::from_str(yaml).unwrap();
+    config.save_and_sync(&config_dir).unwrap();
+
+    let profiles_file = config_dir.join("profiles.yaml");
+    assert!(profiles_file.exists());
+
+    let content = fs::read_to_string(&profiles_file).unwrap();
+    let parsed: backup::config::model::ResticProfileConfig = serde_yaml::from_str(&content).unwrap();
+    let sec_prof = parsed.profiles.get("secondary").expect("secondary profile should exist");
+    assert!(
+        sec_prof.password_file.is_some() || sec_prof.password.as_deref() == Some("primary_secret_123"),
+        "secondary profile must have password_file or fallback password"
+    );
+}
