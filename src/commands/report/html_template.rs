@@ -286,11 +286,11 @@ fn render_all_html(data: &RealReportData) -> String {
   <div class="signature-area">
     <div class="signature-box">
       <div class="title">검토자</div>
-      <div class="sign">시스템 운영팀 (인)</div>
+      <div class="sign">{} (인)</div>
     </div>
     <div class="signature-box">
       <div class="title">승인자</div>
-      <div class="sign">정보보안책임자 (서명생략)</div>
+      <div class="sign">{} (인)</div>
     </div>
   </div>
 </div>
@@ -312,6 +312,8 @@ fn render_all_html(data: &RealReportData) -> String {
         data.timer_active,
         data.etc_backup_dir_perm,
         data.backup_env_file_perm,
+        data.audit.system_manager.as_deref().unwrap_or("시스템 운영팀"),
+        data.audit.security_officer.as_deref().unwrap_or("정보보안책임자"),
     )
 }
 
@@ -342,7 +344,7 @@ fn render_environment_html(data: &RealReportData) -> String {
     </tr>
     <tr>
       <td class="label">백업 담당부서</td>
-      <td>조정하 차장</td>
+      <td>{}</td>
       <td class="label">데이터 암호화 방식</td>
       <td>AES-256 (보안 비밀번호 키 적용)</td>
     </tr>
@@ -450,11 +452,11 @@ fn render_environment_html(data: &RealReportData) -> String {
   <div class="signature-area">
     <div class="signature-box">
       <div class="title">검토자</div>
-      <div class="sign">시스템 운영팀 (인)</div>
+      <div class="sign">{} (인)</div>
     </div>
     <div class="signature-box">
       <div class="title">승인자</div>
-      <div class="sign">정보보안책임자 (서명생략)</div>
+      <div class="sign">{} (인)</div>
     </div>
   </div>
 </div>
@@ -464,6 +466,7 @@ fn render_environment_html(data: &RealReportData) -> String {
         COMMON_REPORT_CSS,
         data.timestamp,
         data.hostname,
+        data.audit.system_manager.as_deref().unwrap_or("시스템 운영팀"),
         data.hostname,
         data.config.backup.targets.join(","),
         data.config.retention.keep_daily,
@@ -471,6 +474,8 @@ fn render_environment_html(data: &RealReportData) -> String {
         data.config.retention.keep_monthly,
         data.etc_backup_dir_perm,
         data.backup_env_file_perm,
+        data.audit.system_manager.as_deref().unwrap_or("시스템 운영팀"),
+        data.audit.security_officer.as_deref().unwrap_or("정보보안책임자"),
     )
 }
 
@@ -538,8 +543,8 @@ fn render_time_sync_html(data: &RealReportData) -> String {
     </tbody>
   </table>
   <div class="signature-area">
-    <div class="signature-box"><div class="title">점검자</div><div class="sign">시스템 운영팀 (인)</div></div>
-    <div class="signature-box"><div class="title">승인자</div><div class="sign">(서명생략)</div></div>
+    <div class="signature-box"><div class="title">점검자</div><div class="sign">{} (인)</div></div>
+    <div class="signature-box"><div class="title">승인자</div><div class="sign">{} (인)</div></div>
   </div>
 </div>
 </body>
@@ -552,7 +557,9 @@ fn render_time_sync_html(data: &RealReportData) -> String {
         data.chrony_active,
         data.chrony_sources,
         data.chrony_tracking,
-        chrony_conf_perm_display
+        chrony_conf_perm_display,
+        data.audit.system_manager.as_deref().unwrap_or("시스템 운영팀"),
+        data.audit.security_officer.as_deref().unwrap_or("정보보안책임자"),
     )
 }
 
@@ -579,11 +586,11 @@ fn render_restore_drill_html(data: &RealReportData) -> String {
       <td class="label">훈련일시</td>
       <td>{}</td>
       <td class="label">훈련 담당</td>
-      <td>조정하 차장</td>
+      <td>{}</td>
     </tr>
     <tr>
       <td class="label">대상 OS</td>
-      <td>Rocky Linux 9.8 (Blue Onyx)</td>
+      <td>{}</td>
       <td class="label">복원 경로</td>
       <td>/tmp/restore_test</td>
     </tr>
@@ -591,7 +598,7 @@ fn render_restore_drill_html(data: &RealReportData) -> String {
       <td class="label">대상 스냅샷</td>
       <td>latest</td>
       <td class="label">승인자</td>
-      <td>박상수 (인)</td>
+      <td>{}</td>
     </tr>
   </table>
 
@@ -641,11 +648,11 @@ fn render_restore_drill_html(data: &RealReportData) -> String {
   <div class="signature-area">
     <div class="signature-box">
       <div class="title">작성자</div>
-      <div class="sign">조정하 차장 (인)</div>
+      <div class="sign">{} (인)</div>
     </div>
     <div class="signature-box">
       <div class="title">승인자</div>
-      <div class="sign">박상수 (인)</div>
+      <div class="sign">{} (인)</div>
     </div>
   </div>
 </div>
@@ -654,6 +661,11 @@ fn render_restore_drill_html(data: &RealReportData) -> String {
 </html>"#,
         COMMON_REPORT_CSS,
         data.timestamp,
+        data.audit.system_manager.as_deref().unwrap_or("시스템 운영팀"),
+        data.os_info,
+        data.audit.security_officer.as_deref().unwrap_or("정보보안책임자"),
+        data.audit.system_manager.as_deref().unwrap_or("시스템 운영팀"),
+        data.audit.security_officer.as_deref().unwrap_or("정보보안책임자"),
     )
 }
 

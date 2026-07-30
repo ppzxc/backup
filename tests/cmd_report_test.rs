@@ -182,4 +182,30 @@ fn test_default_export_filename_format_date_prefix() {
     assert_eq!(entries.len(), 2, "Expected 2 files in output_dir");
 }
 
+#[test]
+fn test_real_report_data_collects_os_and_audit() {
+    let config = backup::config::model::BackupConfig::default();
+    let data = backup::commands::report::RealReportData::collect(&config);
+    assert!(!data.os_info.is_empty(), "os_info should be populated");
+}
+
+#[test]
+fn test_html_report_contains_custom_audit_names_and_os() {
+    let config = backup::config::model::BackupConfig::default();
+    let mut data = backup::commands::report::RealReportData::collect(&config);
+    data.audit.system_manager = Some("홍길동 차장".into());
+    data.audit.security_officer = Some("김보안 이사".into());
+    data.os_info = "Ubuntu 22.04 LTS".into();
+
+    let html = backup::commands::report::html_template::render_html_real(
+        backup::commands::report::ReportType::RestoreDrill,
+        &data,
+    );
+
+    assert!(html.contains("홍길동 차장"), "HTML must contain custom system manager name");
+    assert!(html.contains("김보안 이사"), "HTML must contain custom security officer name");
+    assert!(html.contains("Ubuntu 22.04 LTS"), "HTML must contain dynamic OS info");
+}
+
+
 

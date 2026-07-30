@@ -60,6 +60,8 @@ pub struct RealReportData {
     pub timer_active: String,
     pub next_run: String,
     pub snapshots: Vec<serde_json::Value>,
+    pub audit: crate::config::model::AuditConfig,
+    pub os_info: String,
 }
 
 pub fn get_formatted_time() -> (String, String) {
@@ -132,6 +134,17 @@ impl RealReportData {
         let (chrony_conf_perm, _) = get_file_perm_and_safety(Path::new("/etc/chrony.conf"), 0o644);
 
         let (timer_enabled, timer_active, next_run) = check_systemd_timer_status();
+        let os_info = collect_os_info();
+
+        let mut audit = config.audit.clone();
+        if audit.system_manager.is_none() && audit.security_officer.is_none() {
+            let profiles_yaml_path = Path::new("/etc/backup/profiles.yaml");
+            if let Ok(profile_cfg) = crate::config::model::ResticProfileConfig::load_from_path(profiles_yaml_path) {
+                if let Some(loaded_audit) = profile_cfg.audit {
+                    audit = loaded_audit;
+                }
+            }
+        }
 
         Self {
             hostname,
@@ -152,6 +165,8 @@ impl RealReportData {
             timer_active,
             next_run,
             snapshots: vec![],
+            audit,
+            os_info,
         }
     }
 
@@ -240,6 +255,26 @@ fn check_systemd_timer_status() -> (String, String, String) {
     };
 
     (enabled, active, next_run)
+}
+
+fn collect_os_info() -> String {
+    if let Ok(content) = fs::read_to_string("/etc/os-release") {
+        for line in content.lines() {
+            if line.starts_with("PRETTY_NAME=") {
+                let val = line.trim_start_matches("PRETTY_NAME=").trim_matches('"');
+                return val.to_string();
+            }
+        }
+    }
+    if let Ok(output) = Command::new("uname").arg("-sr").output() {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !s.is_empty() {
+                return s;
+            }
+        }
+    }
+    "Linux System".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
