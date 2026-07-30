@@ -457,8 +457,12 @@ storage:
     let content = fs::read_to_string(&profiles_file).unwrap();
     let parsed: backup::config::model::ResticProfileConfig = serde_yaml::from_str(&content).unwrap();
     let sec_prof = parsed.profiles.get("secondary").expect("secondary profile should exist");
-    assert!(
-        sec_prof.password_file.is_some() || sec_prof.password.as_deref() == Some("primary_secret_123"),
-        "secondary profile must have password_file or fallback password"
-    );
+    
+    // Deterministic check: when no enc keyfile exists in temp dir, secondary falls back to primary.password
+    if !config_dir.join("enc").is_file() && !std::path::Path::new("/etc/backup/enc").is_file() {
+        assert_eq!(sec_prof.password.as_deref(), Some("primary_secret_123"));
+        assert_eq!(sec_prof.password_file, None);
+    } else {
+        assert!(sec_prof.password_file.is_some());
+    }
 }

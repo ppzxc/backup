@@ -101,6 +101,38 @@ impl BackupConfig {
         Ok(())
     }
 
+    pub fn resolve_storage_password(&self, config_dir: &Path, is_secondary: bool) -> Result<(Option<String>, Option<String>)> {
+        let enc_path = config_dir.join("enc");
+        if enc_path.is_file() {
+            return Ok((Some(enc_path.to_string_lossy().to_string()), None));
+        }
+        let fallback_enc = Path::new("/etc/backup/enc");
+        if fallback_enc.is_file() {
+            return Ok((Some(fallback_enc.to_string_lossy().to_string()), None));
+        }
+
+        if is_secondary {
+            if let Some(ref sec) = self.storage.secondary {
+                let sec_pwd = sec.password.expose_secret();
+                if !sec_pwd.trim().is_empty() {
+                    return Ok((None, Some(sec_pwd.to_string())));
+                }
+            }
+            let primary_pwd = self.storage.primary.password.expose_secret();
+            if !primary_pwd.trim().is_empty() {
+                return Ok((None, Some(primary_pwd.to_string())));
+            }
+            anyhow::bail!("Secondary storage password cannot be resolved");
+        } else {
+            let pwd = self.storage.primary.password.expose_secret();
+            if !pwd.trim().is_empty() {
+                Ok((None, Some(pwd.to_string())))
+            } else {
+                anyhow::bail!("Primary storage password cannot be empty");
+            }
+        }
+    }
+
     pub fn save_and_sync(&self, config_dir: &Path) -> Result<()> {
         self.validate()?;
         if !config_dir.exists() {
@@ -144,21 +176,9 @@ impl BackupConfig {
         }
         primary_profile.inherit = Some("default".into());
         primary_profile.repository = Some(self.storage.primary.repository.clone());
-        let enc_path = config_dir.join("enc");
-        if enc_path.is_file() {
-            primary_profile.password_file = Some(enc_path.to_string_lossy().to_string());
-            primary_profile.password = None;
-        } else if Path::new("/etc/backup/enc").is_file() {
-            primary_profile.password_file = Some("/etc/backup/enc".into());
-            primary_profile.password = None;
-        } else {
-            let pwd = self.storage.primary.password.expose_secret();
-            if !pwd.trim().is_empty() {
-                primary_profile.password = Some(pwd.to_string());
-            } else {
-                anyhow::bail!("Primary storage password cannot be empty");
-            }
-        }
+        let (primary_pass_file, primary_pass) = self.resolve_storage_password(config_dir, false)?;
+        primary_profile.password_file = primary_pass_file;
+        primary_profile.password = primary_pass;
         if let Some(ref s3) = self.storage.primary.s3 {
             let mut env_map = primary_profile.env.unwrap_or_default();
             env_map.insert("AWS_ACCESS_KEY_ID".into(), s3.access_key_id.clone());
@@ -176,24 +196,9 @@ impl BackupConfig {
                 }
                 secondary_profile.inherit = Some("default".into());
                 secondary_profile.repository = Some(sec.repository.clone());
-                let enc_path = config_dir.join("enc");
-                if enc_path.is_file() {
-                    secondary_profile.password_file = Some(enc_path.to_string_lossy().to_string());
-                    secondary_profile.password = None;
-                } else if Path::new("/etc/backup/enc").is_file() {
-                    secondary_profile.password_file = Some("/etc/backup/enc".into());
-                    secondary_profile.password = None;
-                } else {
-                    let pwd = sec.password.expose_secret();
-                    if !pwd.trim().is_empty() {
-                        secondary_profile.password = Some(pwd.to_string());
-                    } else {
-                        let primary_pwd = self.storage.primary.password.expose_secret();
-                        if !primary_pwd.trim().is_empty() {
-                            secondary_profile.password = Some(primary_pwd.to_string());
-                        }
-                    }
-                }
+                let (sec_pass_file, sec_pass) = self.resolve_storage_password(config_dir, true)?;
+                secondary_profile.password_file = sec_pass_file;
+                secondary_profile.password = sec_pass;
                 if let Some(ref s3) = sec.s3 {
                     let mut env_map = secondary_profile.env.unwrap_or_default();
                     env_map.insert("AWS_ACCESS_KEY_ID".into(), s3.access_key_id.clone());
@@ -207,16 +212,7 @@ impl BackupConfig {
         // 4. Build target profile section
         let copy_section = if self.storage.secondary.as_ref().map_or(false, |s| s.enabled) {
             let sec = self.storage.secondary.as_ref().unwrap();
-            let (password_file, password) = if Path::new("/etc/backup/enc").is_file() {
-                (Some("/etc/backup/enc".into()), None)
-            } else {
-                let pwd = sec.password.expose_secret();
-                if !pwd.trim().is_empty() {
-                    (None, Some(pwd.to_string()))
-                } else {
-                    (None, None)
-                }
-            };
+            let (password_file, password) = self.resolve_storage_password(config_dir, true)?;
             Some(CopyCommandSection {
                 profile: Some("secondary".into()),
                 repository: Some(sec.repository.clone()),
