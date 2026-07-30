@@ -45,10 +45,12 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// System, security, and audit report diagnostics / 시스템, 보안 및 ISMS-P 진단 보고서
-    Doctor {
+    /// Comprehensive system settings, dependencies, and health check diagnostics / 시스템 설정, 의존성 및 헬스체크 종합 진단
+    Doctor,
+    /// ISMS-P audit evidence and report generation / ISMS-P 감사 증적 및 레포트 생성
+    Report {
         #[command(subcommand)]
-        action: Option<DoctorAction>,
+        action: ReportAction,
     },
     /// Systemd timer / Cron scheduler management / 스케줄러 타이머 관리
     Schedule {
@@ -92,7 +94,7 @@ enum SetupAction {
 }
 
 #[derive(Subcommand)]
-enum DoctorAction {
+enum ReportAction {
     /// Check Backup Environment directory/file permissions and secret masking
     Environment {
         #[arg(long)]
@@ -221,18 +223,19 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        Commands::Doctor { action } => match action {
-            Some(DoctorAction::Environment { file })
-            | Some(DoctorAction::TimeSync { file })
-            | Some(DoctorAction::RestoreDrill { file }) => {
-                let out = backup::commands::doctor::execute_doctor_file_export(file.as_deref())?;
-                println!("{}", out);
-            }
-            None => {
-                let out = backup::commands::doctor::run_doctor_checks(&rclone)?;
-                println!("{}", out);
-            }
-        },
+        Commands::Doctor => {
+            let out = backup::commands::doctor::run_doctor_checks(&rclone, Some(default_config_path))?;
+            println!("{}", out);
+        }
+        Commands::Report { action } => {
+            let (report_type, file) = match action {
+                ReportAction::Environment { file } => (backup::commands::report::ReportType::Environment, file),
+                ReportAction::TimeSync { file } => (backup::commands::report::ReportType::TimeSync, file),
+                ReportAction::RestoreDrill { file } => (backup::commands::report::ReportType::RestoreDrill, file),
+            };
+            let out = backup::commands::report::execute_report_file_export(report_type, file.as_deref())?;
+            println!("{}", out);
+        }
         Commands::Schedule { action } => match action {
             ScheduleAction::Enable => {
                 let out = backup::commands::schedule::execute_schedule_enable(default_config_path, &resticprofile)?;

@@ -36,62 +36,24 @@ pub fn execute_status_from_profiles_config<R: crate::runner::resticprofile::Rest
         }
     };
 
-    let target_profiles: Vec<String> = if let Some(p) = profile_filter {
-        vec![p.to_string()]
-    } else {
-        let names = restic_config.profile_names();
-        if names.is_empty() {
-            return Ok("No active backup profiles found in configuration.".to_string());
-        } else {
-            names
-        }
-    };
+    let resolved_profiles = crate::config::profile_resolver::ProfileResolver::resolve_all_or_filtered(
+        &restic_config,
+        profile_filter,
+    );
+
+    if resolved_profiles.is_empty() {
+        return Ok("No active backup profiles found in configuration.".to_string());
+    }
 
     let mut full_output = Vec::new();
 
-    for target_profile_name in &target_profiles {
-        let profile_section = match restic_config.profiles.get(target_profile_name) {
-            Some(sec) => sec,
-            None => continue,
-        };
-
-        let repository = profile_section
-            .repository
-            .as_deref()
-            .or_else(|| {
-                profile_section.inherit.as_ref().and_then(|p| restic_config.profiles.get(p).and_then(|sec| sec.repository.as_deref()))
-            })
-            .or_else(|| restic_config.profiles.get("primary").and_then(|p| p.repository.as_deref()))
-            .or_else(|| restic_config.profiles.get("default").and_then(|p| p.repository.as_deref()))
-            .unwrap_or("unknown");
-
-        let backend = if repository.starts_with("s3:") {
-            "s3"
-        } else if repository.starts_with("rclone:") {
-            "rclone"
-        } else if repository.starts_with("sftp:") {
-            "sftp"
-        } else {
-            "local"
-        };
-
-        let targets = profile_section
-            .backup
-            .as_ref()
-            .and_then(|b| b.source.as_ref())
-            .or_else(|| {
-                profile_section.inherit.as_ref().and_then(|p| restic_config.profiles.get(p).and_then(|sec| sec.backup.as_ref().and_then(|b| b.source.as_ref())))
-            })
-            .or_else(|| restic_config.profiles.get("default").and_then(|p| p.backup.as_ref().and_then(|b| b.source.as_ref())))
-            .cloned()
-            .unwrap_or_default();
-
+    for profile in &resolved_profiles {
         let mut output_str = format!(
             "Profile: {}\nBackend: {}\nRepository: {}\nTargets: {:?}",
-            target_profile_name, backend, repository, targets
+            profile.name, profile.backend, profile.repository, profile.targets
         );
 
-        match runner.list_snapshots(config_path, target_profile_name) {
+        match runner.list_snapshots(config_path, &profile.name) {
             Ok(raw_output) => {
                 let trimmed = raw_output.trim();
                 if trimmed.is_empty() {

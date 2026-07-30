@@ -8,6 +8,7 @@ pub mod setup;
 pub mod update;
 pub mod uninstall;
 pub mod copy;
+pub mod report;
 
 
 

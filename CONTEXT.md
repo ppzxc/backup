@@ -16,6 +16,11 @@
 * **설명**: 백업 설정을 관리하는 심층 아키텍처 모듈.
 * **비고**: 메모리에 설정을 로드하고 유효성 검증을 거치는 행위(`load_and_validate_config`), 설정을 파일에 쓰고 파생 산출물(profiles.yaml, systemd 타이머 등)을 동기화하는 행위(`save_profile_config`)를 제공하여 호출자와 시스템 간의 세임(Seam) 역할을 수행합니다.
 
+### 3-1. Profile Resolver (프로필 해결기 / ProfileManager)
+* **설명**: 3계층 백업 프로필 상속 체인(`inherit`) 순회, `primary`/`default` 폴백 처리, 백엔드 프로토콜 타입 추론을 전담하는 심층 도메인 모듈.
+* **비고**: `ResolvedProfile` 구조체를 반환하며, CLI 명령어 층이 복잡한 프로필 상속 트리나 내열성(fallback) 규칙을 직접 처리하지 않도록 도메인 세임(Seam)을 제공합니다.
+
+
 ### 4. Backend Adapter (백엔드 어댑터)
 * **설명**: 다양한 저장 대상(S3, SFTP 등)에 따라 다르게 요구되는 필드 검증, 환경 변수 렌더링, 공지 사항 생성, 연결 테스트 등의 행위를 추상화한 다형성 모듈.
 * **비고**: `backend_${backend}_${action}` 형태로 함수가 명명되며, 1차 및 2차 저장소 여부에 따른 동적 접두사 처리를 내부에서 캡슐화합니다.
@@ -27,6 +32,16 @@
 ### 6. Database Backup Adapter (데이터베이스 백업 어댑터)
 * **설명**: MySQL, MariaDB, PostgreSQL, Custom 등 각 데이터베이스 엔진에 알맞은 기본 백업(dump) 명령어 제공, 설정 검증, 복원 시 백업본의 무결성(헤더 검사 등)을 추상화한 다형성 모듈.
 * **비고**: `database_${db_type}_${action}` 형태로 함수가 명명되며, 백업 실행기 및 복원 훈련 단계의 핵심 세임(Seam) 역할을 수행합니다.
+
+### 7. BackupEngine Interface (통합 백업 엔진 실행기)
+* **설명**: 외부 바이너리(`restic`, `resticprofile`, `rclone`) 프로세스 호출, 명령줄 플래그 생성, 임시 파일 관리, 출력 파싱을 모두 심하게 은닉하는 Trait 세임(Seam).
+* **비고**: `SystemBackupEngine` 및 `MockBackupEngine`으로 구성되며, CLI 명령어가 문자열 옵션이나 raw JSON이 아닌 고수준 도메인 객체(`ResolvedProfile`, `SnapshotInfo` 등)만을 주고받도록 보장합니다.
+
+
+### 8. Security Permission Enforcer (보안 권한 강제)
+* **설명**: `/etc/backup` 디렉터리(`700`) 및 설정 파일(`600`)의 POSIX 권한을 생성/수정 시 명시적이고 엄격하게 강제하는 도메인 정책.
+* **비고**: 권한 설정 중 오류 발생 시 경고에 그치지 않고 즉시 반환 에러(`Result::Err`)로 처리하여 권한이 보장되지 않은 상태에서의 프로세스 진행을 차단합니다.
+
 
 ## CLI 서브커맨드 구조 명세 (Command Architecture Spec)
 
@@ -53,13 +68,15 @@
 * **`--skip-retention`**: Retention/Prune 정리 단계 건너뛰기
 * **`--dry-run`**: 실제 실행 없는 명령어 및 대상 시뮬레이션
 
-### 5. `backup doctor` (진단, 검증 및 감사 증적 생성)
-* **`backup doctor`**: 전체 시스템, 바이너리, 저장소 종합 진단
-* **`backup doctor environment [--file <path>]`**: **Backup Environment** 권한(`700`/`600`) 및 보안 규정 검증 보고서 생성
-* **`backup doctor time-sync [--file <path>]`**: NTP/Chrony 시각 동기화 검증 및 ISMS 증적 보고서 생성
-* **`backup doctor restore-drill [--file <path>]`**: 스냅샷 복구 모의훈련 실행, RTO 측정 및 DB 무결성 검증 보고서 생성
+### 5. `backup doctor` (시스템 및 백업 종합 진단)
+* **`backup doctor`**: 백업 바이너리, 설정파일/보안 권한(`700`/`600`), 저장소 네트워크 연결성, NTP 시각 동기화, 타이머 스케줄러 헬스체크 종합 진단 및 문제 조치 가이드 제공
 
-### 6. `backup schedule` (스케줄러 관리)
+### 6. `backup report` (ISMS-P 감사 증적 및 레포트 생성)
+* **`backup report environment [--file <path>]`**: **Backup Environment** 권한 및 보안 규정 검증 보고서 생성
+* **`backup report time-sync [--file <path>]`**: NTP/Chrony 시각 동기화 검증 및 ISMS 증적 보고서 생성
+* **`backup report restore-drill [--file <path>]`**: 스냅샷 복구 모의훈련 실행, RTO 측정 및 DB 무결성 검증 보고서 생성
+
+### 7. `backup schedule` (스케줄러 관리)
 * **`backup schedule enable`**: Systemd Timer (또는 Cron Fallback) 자동 백업 스케줄 등록
 * **`backup schedule disable`**: 자동 백업 스케줄 해제
 * **`backup schedule status`**: 타이머/스케줄러 현재 동작 상태 조회

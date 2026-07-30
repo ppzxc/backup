@@ -14,7 +14,7 @@ fn test_subcommands_help() {
     assert!(stdout.contains("마법사"), "Missing Korean setup docstring in help output");
     assert!(stdout.contains("동기화"), "Missing Korean copy docstring in help output");
     assert!(stdout.contains("파이프라인"), "Missing Korean run docstring in help output");
-    assert!(stdout.contains("ISMS-P 진단"), "Missing Korean doctor docstring in help output");
+    assert!(stdout.contains("진단"), "Missing Korean doctor docstring in help output");
 }
 
 #[test]
@@ -39,6 +39,16 @@ fn test_doctor_subcommands_output() {
     let assert = cmd.args(&["doctor"]).assert().success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("Checking dependencies"), "Expected doctor check output");
+}
+
+#[test]
+fn test_report_subcommands_output() {
+    let lang = backup::i18n::Language::Ko;
+    let help = backup::i18n::CliHelp::get(lang);
+    assert_eq!(help.cmd_report, "ISMS-P 감사 증적 및 레포트 생성");
+    assert_eq!(help.cmd_report_environment, "백업 환경 디렉터리/파일 권한 및 비밀값 마스킹 검사 보고서 생성");
+    assert_eq!(help.cmd_report_time_sync, "NTP/Chrony 시간 동기화 상태 점검 보고서 생성");
+    assert_eq!(help.cmd_report_restore_drill, "복구 드릴 실행, RTO 측정 및 DB 헤더 무결성 확인 보고서 생성");
 }
 
 #[test]

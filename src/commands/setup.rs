@@ -190,6 +190,16 @@ impl SetupPrompter for InquirePrompter {
                         .args(["-t", "ed25519", "-N", "", "-f", key_path.to_str().unwrap_or("/etc/backup/id_ed25519")])
                         .output();
                 }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if key_path.exists() {
+                        let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+                    }
+                    if pub_path.exists() {
+                        let _ = std::fs::set_permissions(&pub_path, std::fs::Permissions::from_mode(0o600));
+                    }
+                }
                 if let Ok(pub_key) = std::fs::read_to_string(&pub_path) {
                     println!("\n================================================================================");
                     println!("{}", msg.sftp_pubkey_notice);

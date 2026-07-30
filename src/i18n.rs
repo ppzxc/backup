@@ -209,6 +209,7 @@ pub struct CliHelp {
     pub cmd_copy: &'static str,
     pub cmd_run: &'static str,
     pub cmd_doctor: &'static str,
+    pub cmd_report: &'static str,
     pub cmd_schedule: &'static str,
     pub cmd_restore: &'static str,
     pub cmd_snapshots: &'static str,
@@ -230,11 +231,11 @@ pub struct CliHelp {
     pub opt_run_skip_secondary_sync: &'static str,
     pub opt_run_skip_retention: &'static str,
     pub opt_run_dry_run: &'static str,
-    // doctor sub-subcommands
-    pub cmd_doctor_environment: &'static str,
-    pub cmd_doctor_time_sync: &'static str,
-    pub cmd_doctor_restore_drill: &'static str,
-    pub opt_doctor_file: &'static str,
+    // report sub-subcommands
+    pub cmd_report_environment: &'static str,
+    pub cmd_report_time_sync: &'static str,
+    pub cmd_report_restore_drill: &'static str,
+    pub opt_report_file: &'static str,
     // schedule sub-subcommands
     pub cmd_schedule_enable: &'static str,
     pub cmd_schedule_disable: &'static str,
@@ -255,7 +256,8 @@ impl CliHelp {
                 cmd_setup: "백업 환경 및 백업 프로필 설정 마법사",
                 cmd_copy: "1차 저장소에서 2차 저장소로 스냅샷 동기화 및 복사",
                 cmd_run: "백업 파이프라인 수동 실행",
-                cmd_doctor: "시스템, 보안 및 ISMS-P 진단 보고서",
+                cmd_doctor: "시스템 설정, 의존성 및 헬스체크 종합 진단",
+                cmd_report: "ISMS-P 감사 증적 및 레포트 생성",
                 cmd_schedule: "Systemd 타이머 / Cron 스케줄러 관리",
                 cmd_restore: "스냅샷 기반 파일 및 DB 복구",
                 cmd_snapshots: "1차·2차 저장소의 스냅샷 목록 조회",
@@ -273,10 +275,10 @@ impl CliHelp {
                 opt_run_skip_secondary_sync: "2차 저장소 동기화 단계 건너뜀",
                 opt_run_skip_retention: "보존 정책 적용 단계 건너뜀",
                 opt_run_dry_run: "실제 실행 없이 파이프라인 시뮬레이션",
-                cmd_doctor_environment: "백업 환경 디렉터리/파일 권한 및 비밀값 마스킹 검사",
-                cmd_doctor_time_sync: "NTP/Chrony 시간 동기화 상태 점검",
-                cmd_doctor_restore_drill: "복구 드릴 실행, RTO 측정 및 DB 헤더 무결성 확인",
-                opt_doctor_file: "진단 결과를 내보낼 파일 경로",
+                cmd_report_environment: "백업 환경 디렉터리/파일 권한 및 비밀값 마스킹 검사 보고서 생성",
+                cmd_report_time_sync: "NTP/Chrony 시간 동기화 상태 점검 보고서 생성",
+                cmd_report_restore_drill: "복구 드릴 실행, RTO 측정 및 DB 헤더 무결성 확인 보고서 생성",
+                opt_report_file: "진단 결과를 내보낼 파일 경로",
                 cmd_schedule_enable: "Systemd 타이머 / Cron 폴백 활성화",
                 cmd_schedule_disable: "예약 타이머 비활성화",
                 cmd_schedule_status: "타이머/스케줄러 상태 표시",
@@ -290,7 +292,8 @@ impl CliHelp {
                 cmd_setup: "Backup environment and profile setup wizard",
                 cmd_copy: "Sync snapshots from primary to secondary storage target",
                 cmd_run: "Execute backup pipeline manually",
-                cmd_doctor: "System, security, and audit report diagnostics",
+                cmd_doctor: "Comprehensive system settings, dependencies, and health check diagnostics",
+                cmd_report: "Generate ISMS-P audit evidence and reports",
                 cmd_schedule: "Systemd timer / Cron scheduler management",
                 cmd_restore: "Restore files or database dumps from snapshot",
                 cmd_snapshots: "List snapshots across primary and secondary storage targets",
@@ -308,10 +311,10 @@ impl CliHelp {
                 opt_run_skip_secondary_sync: "Skip the secondary storage sync step",
                 opt_run_skip_retention: "Skip the retention policy enforcement step",
                 opt_run_dry_run: "Simulate the pipeline without executing",
-                cmd_doctor_environment: "Check backup environment directory/file permissions and secret masking",
-                cmd_doctor_time_sync: "Inspect NTP/Chrony time synchronization status",
-                cmd_doctor_restore_drill: "Execute restore drill, measure RTO, and check database header integrity",
-                opt_doctor_file: "File path to export diagnostic results",
+                cmd_report_environment: "Generate backup environment directory/file permissions and secret masking report",
+                cmd_report_time_sync: "Generate NTP/Chrony time synchronization status report",
+                cmd_report_restore_drill: "Execute restore drill, measure RTO, and check database header integrity report",
+                opt_report_file: "File path to export report results",
                 cmd_schedule_enable: "Enable systemd timers / cron fallback",
                 cmd_schedule_disable: "Disable scheduled timers",
                 cmd_schedule_status: "Display timer/scheduler status",
@@ -359,17 +362,21 @@ impl CliHelp {
 
         cmd = cmd.mut_subcommand("doctor", |c| {
             c.about(self.cmd_doctor)
+        });
+
+        cmd = cmd.mut_subcommand("report", |c| {
+            c.about(self.cmd_report)
                 .mut_subcommand("environment", |s| {
-                    s.about(self.cmd_doctor_environment)
-                        .mut_arg("file", |a| a.help(self.opt_doctor_file))
+                    s.about(self.cmd_report_environment)
+                        .mut_arg("file", |a| a.help(self.opt_report_file))
                 })
                 .mut_subcommand("time-sync", |s| {
-                    s.about(self.cmd_doctor_time_sync)
-                        .mut_arg("file", |a| a.help(self.opt_doctor_file))
+                    s.about(self.cmd_report_time_sync)
+                        .mut_arg("file", |a| a.help(self.opt_report_file))
                 })
                 .mut_subcommand("restore-drill", |s| {
-                    s.about(self.cmd_doctor_restore_drill)
-                        .mut_arg("file", |a| a.help(self.opt_doctor_file))
+                    s.about(self.cmd_report_restore_drill)
+                        .mut_arg("file", |a| a.help(self.opt_report_file))
                 })
         });
 
