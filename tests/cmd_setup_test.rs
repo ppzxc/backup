@@ -1,4 +1,4 @@
-use backup::commands::setup::{create_default_config_file, run_setup_with_prompter, SetupParams, SetupPrompter};
+use backup::commands::setup::{create_default_config_file, run_setup_with_prompter, SetupEngine, SetupParams, SetupPrompter};
 use backup::config::model::*;
 use backup::i18n::Language;
 use secrecy::SecretString;
@@ -313,5 +313,45 @@ fn test_database_type_enum() {
     assert_eq!(DatabaseType::from_str("mysql").unwrap(), DatabaseType::Mysql);
     assert_eq!(DatabaseType::from_str("postgres").unwrap(), DatabaseType::Postgres);
     assert!(DatabaseType::from_str("invalid").is_err());
+}
+
+#[test]
+fn test_sftp_params_key_path_validation() {
+    let params = SetupParams {
+        profile: "sftp-test".into(),
+        backup_type: BackupType::Directory,
+        targets: vec!["/var/log".into()],
+        excludes: vec![],
+        retention: RetentionPolicy::standard_defaults(),
+        primary_storage: StorageTarget {
+            backend: "sftp".into(),
+            repository: "sftp:backup@192.168.1.100:/backup".into(),
+            password: SecretString::new("password_123456789".into()),
+            sftp: Some(SftpConfig {
+                host: "192.168.1.100".into(),
+                port: 22,
+                user: "backup".into(),
+                key_file: Some("/etc/backup/id_ed25519".into()),
+            }),
+            s3: None,
+        },
+        secondary_storage: None,
+        reports: ReportsConfig {
+            output_dir: "/data/backup/reports".into(),
+            enable_daily_reports: true,
+            enable_annual_dr_drill_report: true,
+        },
+        audit: AuditConfig {
+            system_manager: Some("Admin".into()),
+            security_officer: Some("CISO".into()),
+        },
+    };
+
+    let config = SetupEngine::validate_and_build(params).expect("Validation should pass");
+    assert_eq!(config.storage.primary.backend, "sftp");
+    assert_eq!(
+        config.storage.primary.sftp.unwrap().key_file.unwrap(),
+        "/etc/backup/id_ed25519"
+    );
 }
 
