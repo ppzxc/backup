@@ -16,7 +16,9 @@ impl ConfigurationRegistry {
     }
 
     pub fn load_and_validate_config(path: &Path) -> Result<BackupConfig> {
-        Self::load(path)
+        let config = Self::load(path)?;
+        config.validate()?;
+        Ok(config)
     }
 
     pub fn save_profile_config(config: &BackupConfig, config_dir: &Path) -> Result<()> {

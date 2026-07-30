@@ -43,7 +43,42 @@ pub struct BackupConfig {
     pub audit: AuditConfig,
 }
 
+pub fn create_secure_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+pub fn save_secure_file(path: &Path, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        create_secure_dir(parent)?;
+    }
+    fs::write(path, content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 impl BackupConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.storage.primary.password.expose_secret().trim().is_empty() {
+            anyhow::bail!("Primary storage password cannot be empty");
+        }
+        if let Some(ref sec) = self.storage.secondary {
+            if sec.enabled && sec.password.expose_secret().trim().is_empty() {
+                anyhow::bail!("Secondary storage password cannot be empty");
+            }
+        }
+        Ok(())
+    }
+
     pub fn redacted(&self) -> Self {
         let mut masked = self.clone();
         masked.storage.primary.password = SecretString::new("******".into());
@@ -57,32 +92,16 @@ impl BackupConfig {
     }
 
     pub fn save_to_path(&self, path: &Path) -> Result<()> {
+        self.validate()?;
         let yaml = serde_yaml::to_string(self)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-            }
-        }
-        fs::write(path, yaml)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-        }
+        save_secure_file(path, &yaml)?;
         Ok(())
     }
 
     pub fn save_and_sync(&self, config_dir: &Path) -> Result<()> {
+        self.validate()?;
         if !config_dir.exists() {
-            fs::create_dir_all(config_dir)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(config_dir, fs::Permissions::from_mode(0o700))?;
-            }
+            create_secure_dir(config_dir)?;
         }
 
         let profiles_yaml_path = config_dir.join("profiles.yaml");
@@ -134,7 +153,7 @@ impl BackupConfig {
             if !pwd.trim().is_empty() {
                 primary_profile.password = Some(pwd.to_string());
             } else {
-                primary_profile.password = Some("default_secret_pass123".into());
+                anyhow::bail!("Primary storage password cannot be empty");
             }
         }
         if let Some(ref s3) = self.storage.primary.s3 {
@@ -231,12 +250,7 @@ impl BackupConfig {
         restic_config.profiles.insert(self.profile.clone(), profile_section);
 
         let yaml_content = serde_yaml::to_string(&restic_config)?;
-        fs::write(&profiles_yaml_path, yaml_content)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&profiles_yaml_path, fs::Permissions::from_mode(0o600))?;
-        }
+        save_secure_file(&profiles_yaml_path, &yaml_content)?;
         Ok(())
     }
 

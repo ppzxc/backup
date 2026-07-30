@@ -119,7 +119,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::from_arg_matches(&matches)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let default_config_path = std::path::Path::new("/etc/backup/profiles.yaml");
-    let config = backup::config::model::BackupConfig::load_from_path(default_config_path).unwrap_or_default();
+    let config_res = backup::config::model::BackupConfig::load_from_path(default_config_path);
     let executor = backup::runner::executor::SystemExecutor;
     let rclone = backup::runner::rclone::RcloneTool::new(&executor);
     let resticprofile = backup::runner::resticprofile::ResticProfileTool::new(&executor);
@@ -194,8 +194,8 @@ fn main() -> anyhow::Result<()> {
                 } else {
                     names
                 }
-            } else if !config.profile.is_empty() {
-                vec![config.profile.clone()]
+            } else if let Ok(ref cfg) = config_res {
+                vec![cfg.profile.clone()]
             } else {
                 vec!["default".to_string()]
             };
@@ -217,7 +217,8 @@ fn main() -> anyhow::Result<()> {
             println!("{}", out);
         }
         Commands::Report { action, file, format } => {
-            let out = backup::commands::report::ReportCommand::run(action, file, format, &config)?;
+            let config = config_res.as_ref().map_err(|e| anyhow::anyhow!("Configuration load error: {}", e))?;
+            let out = backup::commands::report::ReportCommand::run(action, file, format, config)?;
             println!("{}", out);
         }
         Commands::Schedule { action } => match action {
@@ -239,7 +240,8 @@ fn main() -> anyhow::Result<()> {
             println!("{}", out);
         }
         Commands::Snapshots => {
-            let out = backup::commands::snapshots::execute_snapshots(&config, &restic)?;
+            let config = config_res.as_ref().map_err(|e| anyhow::anyhow!("Configuration load error: {}", e))?;
+            let out = backup::commands::snapshots::execute_snapshots(config, &restic)?;
             println!("{}", out);
         }
         Commands::Status { profile } => {

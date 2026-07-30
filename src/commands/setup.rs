@@ -142,7 +142,7 @@ impl SetupPrompter for InquirePrompter {
                 "local"
             };
 
-            let pwd = p.password.clone().unwrap_or_else(|| "default_secret_pass123".to_string());
+            let pwd = p.password.clone().unwrap_or_else(generate_secure_password);
             let primary = StorageTarget {
                 backend: backend.to_string(),
                 repository: repo,
@@ -485,7 +485,7 @@ impl SetupEngine {
             let config = Self::validate_and_build(params)?;
             crate::config::registry::ConfigurationRegistry::save_profile_config(&config, config_dir)?;
         } else {
-            create_default_config_file(config_path, "default", "/var/log", "sftp:backup@192.168.1.100:/backup", "default_secret_pass123")?;
+            create_default_config_file(config_path, "default", "/var/log", "sftp:backup@192.168.1.100:/backup", &generate_secure_password())?;
         }
 
         let profiles_yaml_path = if config_path.ends_with("profiles.yaml") {

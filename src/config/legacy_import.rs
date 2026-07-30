@@ -78,7 +78,7 @@ pub fn parse_legacy_env(content: &str) -> Result<BackupConfig> {
     let targets_str = env_map.get_or_default(LegacyEnvKey::BackupTargetsKey, "");
     let targets = targets_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
 
-    Ok(BackupConfig {
+    let config = BackupConfig {
         version: "1.0".to_string(),
         profile,
         backup: BackupTargets {
@@ -108,5 +108,7 @@ pub fn parse_legacy_env(content: &str) -> Result<BackupConfig> {
         },
         reports: ReportsConfig::default(),
         audit: AuditConfig::default(),
-    })
+    };
+    config.validate()?;
+    Ok(config)
 }

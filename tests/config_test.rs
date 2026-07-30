@@ -396,5 +396,25 @@ profiles: {}
     assert_eq!(audit.security_officer, Some("김보안 이사".to_string()));
 }
 
+#[test]
+fn test_save_secure_file_permissions() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_file = temp_dir.path().join("secure.yaml");
+    let mut config = BackupConfig::default();
+    config.storage.primary.password = secrecy::SecretString::new("valid_secret_pass".into());
+    config.save_to_path(&config_file).unwrap();
 
+    let metadata = std::fs::metadata(&config_file).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    }
+}
 
+#[test]
+fn test_empty_password_validation_error() {
+    let mut config = BackupConfig::default();
+    config.storage.primary.password = secrecy::SecretString::new("".into());
+    assert!(config.validate().is_err());
+}
