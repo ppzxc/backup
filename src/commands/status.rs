@@ -35,64 +35,80 @@ pub fn execute_status_from_profiles_config<R: crate::runner::resticprofile::Rest
             return execute_status_with_runner(&default_config, &executor, profile_filter);
         }
     };
-    let target_profile_name = profile_filter.unwrap_or("default");
 
-    let profile_section = restic_config
-        .profiles
-        .get(target_profile_name)
-        .ok_or_else(|| anyhow::anyhow!("Profile '{}' not found in config", target_profile_name))?;
-
-    let repository = profile_section
-        .repository
-        .as_deref()
-        .or_else(|| {
-            profile_section.inherit.as_ref().and_then(|p| restic_config.profiles.get(p).and_then(|sec| sec.repository.as_deref()))
-        })
-        .or_else(|| restic_config.profiles.get("primary").and_then(|p| p.repository.as_deref()))
-        .or_else(|| restic_config.profiles.get("default").and_then(|p| p.repository.as_deref()))
-        .unwrap_or("unknown");
-
-    let backend = if repository.starts_with("s3:") {
-        "s3"
-    } else if repository.starts_with("rclone:") {
-        "rclone"
-    } else if repository.starts_with("sftp:") {
-        "sftp"
+    let target_profiles: Vec<String> = if let Some(p) = profile_filter {
+        vec![p.to_string()]
     } else {
-        "local"
+        let names = restic_config.profile_names();
+        if names.is_empty() {
+            return Ok("No active backup profiles found in configuration.".to_string());
+        } else {
+            names
+        }
     };
 
-    let targets = profile_section
-        .backup
-        .as_ref()
-        .and_then(|b| b.source.as_ref())
-        .or_else(|| {
-            profile_section.inherit.as_ref().and_then(|p| restic_config.profiles.get(p).and_then(|sec| sec.backup.as_ref().and_then(|b| b.source.as_ref())))
-        })
-        .or_else(|| restic_config.profiles.get("default").and_then(|p| p.backup.as_ref().and_then(|b| b.source.as_ref())))
-        .cloned()
-        .unwrap_or_default();
+    let mut full_output = Vec::new();
 
-    let mut output_str = format!(
-        "Profile: {}\nBackend: {}\nRepository: {}\nTargets: {:?}",
-        target_profile_name, backend, repository, targets
-    );
+    for target_profile_name in &target_profiles {
+        let profile_section = match restic_config.profiles.get(target_profile_name) {
+            Some(sec) => sec,
+            None => continue,
+        };
 
-    match runner.list_snapshots(config_path, target_profile_name) {
-        Ok(raw_output) => {
-            let trimmed = raw_output.trim();
-            if trimmed.is_empty() {
-                output_str.push_str("\nSnapshots: None");
-            } else {
-                output_str.push_str(&format!("\nSnapshots:\n{}", trimmed));
+        let repository = profile_section
+            .repository
+            .as_deref()
+            .or_else(|| {
+                profile_section.inherit.as_ref().and_then(|p| restic_config.profiles.get(p).and_then(|sec| sec.repository.as_deref()))
+            })
+            .or_else(|| restic_config.profiles.get("primary").and_then(|p| p.repository.as_deref()))
+            .or_else(|| restic_config.profiles.get("default").and_then(|p| p.repository.as_deref()))
+            .unwrap_or("unknown");
+
+        let backend = if repository.starts_with("s3:") {
+            "s3"
+        } else if repository.starts_with("rclone:") {
+            "rclone"
+        } else if repository.starts_with("sftp:") {
+            "sftp"
+        } else {
+            "local"
+        };
+
+        let targets = profile_section
+            .backup
+            .as_ref()
+            .and_then(|b| b.source.as_ref())
+            .or_else(|| {
+                profile_section.inherit.as_ref().and_then(|p| restic_config.profiles.get(p).and_then(|sec| sec.backup.as_ref().and_then(|b| b.source.as_ref())))
+            })
+            .or_else(|| restic_config.profiles.get("default").and_then(|p| p.backup.as_ref().and_then(|b| b.source.as_ref())))
+            .cloned()
+            .unwrap_or_default();
+
+        let mut output_str = format!(
+            "Profile: {}\nBackend: {}\nRepository: {}\nTargets: {:?}",
+            target_profile_name, backend, repository, targets
+        );
+
+        match runner.list_snapshots(config_path, target_profile_name) {
+            Ok(raw_output) => {
+                let trimmed = raw_output.trim();
+                if trimmed.is_empty() {
+                    output_str.push_str("\nSnapshots: None");
+                } else {
+                    output_str.push_str(&format!("\nSnapshots:\n{}", trimmed));
+                }
+            }
+            Err(err) => {
+                output_str.push_str(&format!("\n[WARN] Failed to fetch snapshots: {}", err));
             }
         }
-        Err(err) => {
-            output_str.push_str(&format!("\n[WARN] Failed to fetch snapshots: {}", err));
-        }
+
+        full_output.push(output_str);
     }
 
-    Ok(output_str)
+    Ok(full_output.join("\n\n"))
 }
 
 pub fn execute_status_with_runner<E: CommandRunner>(

@@ -173,6 +173,58 @@ profiles:
 }
 
 #[test]
+fn test_execute_status_from_profiles_config_all_profiles() {
+    use backup::commands::status::execute_status_from_profiles_config;
+    use backup::runner::resticprofile::MockResticProfileRunner;
+    use tempfile::NamedTempFile;
+
+    let yaml_content = r#"version: '2'
+profiles:
+  default:
+    insecure-tls: true
+  primary:
+    repository: s3:https://59.25.177.53:39000/backup/ns0327/log
+  log:
+    inherit: primary
+    backup:
+      source:
+      - /var/log
+"#;
+    let temp_file = NamedTempFile::new().unwrap();
+    std::fs::write(temp_file.path(), yaml_content).unwrap();
+
+    let mock_runner = MockResticProfileRunner::new(0, "mock snapshot output");
+    let status_res = execute_status_from_profiles_config(temp_file.path(), None, &mock_runner).unwrap();
+
+    assert!(!status_res.contains("Profile: default"));
+    assert!(!status_res.contains("Profile: primary"));
+    assert!(status_res.contains("Profile: log"));
+    assert!(status_res.contains("Repository: s3:https://59.25.177.53:39000/backup/ns0327/log"));
+}
+
+#[test]
+fn test_execute_status_from_profiles_config_no_active_profiles() {
+    use backup::commands::status::execute_status_from_profiles_config;
+    use backup::runner::resticprofile::MockResticProfileRunner;
+    use tempfile::NamedTempFile;
+
+    let yaml_content = r#"version: '2'
+profiles:
+  default:
+    insecure-tls: true
+  primary:
+    repository: s3:https://59.25.177.53:39000/backup/ns0327/log
+"#;
+    let temp_file = NamedTempFile::new().unwrap();
+    std::fs::write(temp_file.path(), yaml_content).unwrap();
+
+    let mock_runner = MockResticProfileRunner::new(0, "mock snapshot output");
+    let status_res = execute_status_from_profiles_config(temp_file.path(), None, &mock_runner).unwrap();
+
+    assert_eq!(status_res, "No active backup profiles found in configuration.");
+}
+
+#[test]
 fn test_execute_run_profile() {
     use backup::commands::run::PipelineOptions;
     let mock_runner = MockResticProfileRunner::new(0, "resticprofile backup complete");
