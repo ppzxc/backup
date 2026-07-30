@@ -175,7 +175,8 @@ impl SetupPrompter for InquirePrompter {
                 .prompt()?;
 
             let (repository, sftp_config, s3_config) = if backend == "sftp" {
-                let (repo_uri, conf) = prompt_sftp_storage(msg, lang, config_dir)?;
+                let runner = SystemExecutor;
+                let (repo_uri, conf) = prompt_sftp_storage(msg, lang, config_dir, "id_ed25519", &runner)?;
                 (repo_uri, Some(conf), None)
             } else if backend == "s3" {
                 let mode_choice = inquire::Select::new(
@@ -266,9 +267,9 @@ impl SetupPrompter for InquirePrompter {
             let secondary = if enable_sec {
                 let sec_backend = inquire::Select::new(msg.secondary_backend, vec!["sftp", "s3", "local"]).prompt()?;
                 let (sec_repo, sec_pass) = if sec_backend == "sftp" {
-                    let (repo_uri, _) = prompt_sftp_storage(msg, lang, config_dir)?;
-                    let sec_p = inquire::Password::new(msg.secondary_password).without_confirmation().prompt()?;
-                    (repo_uri, sec_p)
+                    let runner = SystemExecutor;
+                    let (repo_uri, _sec_sftp) = prompt_sftp_storage(msg, lang, config_dir, "id_ed25519_secondary", &runner)?;
+                    (repo_uri, String::new())
                 } else {
                     let sec_r = inquire::Text::new(msg.secondary_repo_uri).prompt()?;
                     let sec_p = inquire::Password::new(msg.secondary_password).without_confirmation().prompt()?;
@@ -379,14 +380,17 @@ pub fn create_default_config_file(path: &Path, profile: &str, target: &str, repo
     config.save_and_sync(config_dir)
 }
 
-fn prompt_sftp_storage(
+fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
     msg: I18nMessages,
     lang: Language,
     config_dir: &Path,
+    key_name: &str,
+    runner: &R,
 ) -> Result<(String, SftpConfig)> {
     let key_dir = config_dir;
-    let key_path = key_dir.join("id_ed25519");
-    let pub_path = key_dir.join("id_ed25519.pub");
+    let key_path = key_dir.join(key_name);
+    let pub_path = key_dir.join(format!("{}.pub", key_name));
+    let key_path_str = key_path.to_string_lossy().to_string();
 
     if let Err(e) = std::fs::create_dir_all(key_dir) {
         eprintln!("Warning: Failed to create directory {:?}: {}", key_dir, e);
@@ -398,11 +402,11 @@ fn prompt_sftp_storage(
     }
 
     let generate_key = if key_path.exists() {
-        let key_choice = inquire::Select::new(
-            msg.sftp_key_choice_prompt,
-            vec![msg.sftp_key_choice_use_existing, msg.sftp_key_choice_generate_new],
-        ).prompt()?;
-        key_choice.starts_with("[2]")
+        let options = vec![msg.sftp_key_choice_use_existing, msg.sftp_key_choice_generate_new];
+        let selection_idx = inquire::Select::new(msg.sftp_key_choice_prompt, options.clone())
+            .raw_prompt()?
+            .index;
+        selection_idx == 1
     } else {
         true
     };
@@ -410,9 +414,7 @@ fn prompt_sftp_storage(
     if generate_key {
         let _ = std::fs::remove_file(&key_path);
         let _ = std::fs::remove_file(&pub_path);
-        let _ = std::process::Command::new("ssh-keygen")
-            .args(["-t", "ed25519", "-N", "", "-f", key_path.to_str().unwrap_or("/etc/backup/id_ed25519")])
-            .output();
+        let _ = runner.run("ssh-keygen", &["-t", "ed25519", "-N", "", "-f", &key_path_str]);
     }
 
     #[cfg(unix)]
@@ -442,32 +444,29 @@ fn prompt_sftp_storage(
 
     // Perform SFTP connection test
     println!("{}", msg.sftp_testing_connection);
-    let test_output = std::process::Command::new("ssh")
-        .args([
-            "-i",
-            key_path.to_str().unwrap_or("/etc/backup/id_ed25519"),
-            "-p",
-            &port.to_string(),
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            &format!("{}@{}", user, host),
-            "exit",
-        ])
-        .output();
+    let port_str = port.to_string();
+    let remote_target = format!("{}@{}", user, host);
+    let test_output = runner.run("ssh", &[
+        "-i",
+        &key_path_str,
+        "-p",
+        &port_str,
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        &remote_target,
+        "exit",
+    ]);
 
     match test_output {
-        Ok(out) if out.status.success() => {
+        Ok(out) if out.status_code == 0 => {
             println!("{}", msg.sftp_test_success);
         }
         Ok(out) => {
-            let err_msg = String::from_utf8_lossy(&out.stderr);
-            let trimmed_err = err_msg.trim();
+            let trimmed_err = out.stderr.trim();
             let reason = if trimmed_err.is_empty() {
-                format!("exit code: {}", out.status.code().unwrap_or(-1))
+                format!("exit code: {}", out.status_code)
             } else {
                 trimmed_err.to_string()
             };
@@ -485,7 +484,7 @@ fn prompt_sftp_storage(
             host,
             port,
             user,
-            key_file: Some(key_path.to_string_lossy().to_string()),
+            key_file: Some(key_path_str),
         },
     ))
 }
