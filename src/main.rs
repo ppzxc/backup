@@ -118,7 +118,7 @@ fn main() -> anyhow::Result<()> {
     let matches = localized_cmd.get_matches();
     let cli = Cli::from_arg_matches(&matches)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    let default_config_path = std::path::Path::new("/etc/backup/profiles.yaml");
+    let default_config_path = std::path::Path::new(backup::config::model::DEFAULT_PROFILES_PATH);
     let config = backup::config::model::BackupConfig::load_from_path(default_config_path).unwrap_or_default();
     let executor = backup::runner::executor::SystemExecutor;
     let rclone = backup::runner::rclone::RcloneTool::new(&executor);

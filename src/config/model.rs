@@ -4,6 +4,9 @@ use std::path::Path;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize, Serializer};
 
+pub const DEFAULT_PROFILES_FILENAME: &str = "profiles.yaml";
+pub const DEFAULT_PROFILES_PATH: &str = "/etc/backup/profiles.yaml";
+
 fn serialize_secret_string<S>(secret: &SecretString, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -104,7 +107,7 @@ impl BackupConfig {
             create_secure_dir(config_dir)?;
         }
 
-        let profiles_yaml_path = config_dir.join("profiles.yaml");
+        let profiles_yaml_path = config_dir.join(DEFAULT_PROFILES_FILENAME);
         let mut restic_config = if profiles_yaml_path.exists() {
             ResticProfileConfig::load_from_path(&profiles_yaml_path).unwrap_or_else(|_| ResticProfileConfig {
                 version: "2".into(),

@@ -93,8 +93,8 @@ impl SetupPrompter for InquirePrompter {
             .prompt()?;
 
         // Primary & Secondary Storage Setup
-        let target_profiles_path = config_dir.join("profiles.yaml");
-        let default_yaml_path = Path::new("/etc/backup/profiles.yaml");
+        let target_profiles_path = config_dir.join(crate::config::model::DEFAULT_PROFILES_FILENAME);
+        let default_yaml_path = Path::new(crate::config::model::DEFAULT_PROFILES_PATH);
         let profiles_yaml_path = if target_profiles_path.exists() {
             target_profiles_path.as_path()
         } else {
@@ -488,10 +488,10 @@ impl SetupEngine {
             create_default_config_file(config_path, "default", DEFAULT_BACKUP_TARGET, "sftp:backup@192.168.1.100:/backup", &generate_secure_password())?;
         }
 
-        let profiles_yaml_path = if config_path.ends_with("profiles.yaml") {
+        let profiles_yaml_path = if config_path.ends_with(crate::config::model::DEFAULT_PROFILES_FILENAME) {
             config_path.to_path_buf()
         } else {
-            config_dir.join("profiles.yaml")
+            config_dir.join(crate::config::model::DEFAULT_PROFILES_FILENAME)
         };
 
         if profiles_yaml_path.exists() {

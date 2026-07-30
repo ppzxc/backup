@@ -52,7 +52,7 @@ impl SystemHealthDiagnoser {
             .unwrap_or_else(|_| "localhost".into());
         let timestamp = format!("{:?}", std::time::SystemTime::now());
 
-        let target_config = config_path.unwrap_or_else(|| Path::new("/etc/backup/profiles.yaml"));
+        let target_config = config_path.unwrap_or_else(|| Path::new(crate::config::model::DEFAULT_PROFILES_PATH));
         
         let mut items = Vec::new();
 
