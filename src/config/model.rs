@@ -302,6 +302,34 @@ impl Default for BackupConfig {
 }
 
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DatabaseType {
+    Mysql,
+    Postgres,
+}
+
+impl std::str::FromStr for DatabaseType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "mysql" | "mariadb" => Ok(DatabaseType::Mysql),
+            "postgres" | "postgresql" => Ok(DatabaseType::Postgres),
+            _ => anyhow::bail!("Invalid database type: {}", s),
+        }
+    }
+}
+
+impl std::fmt::Display for DatabaseType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DatabaseType::Mysql => write!(f, "mysql"),
+            DatabaseType::Postgres => write!(f, "postgres"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum BackupType {
@@ -334,6 +362,24 @@ pub struct RetentionPolicy {
     pub keep_daily: u32,
     pub keep_weekly: u32,
     pub keep_monthly: u32,
+}
+
+impl RetentionPolicy {
+    pub fn standard_defaults() -> Self {
+        Self {
+            keep_daily: 7,
+            keep_weekly: 4,
+            keep_monthly: 12,
+        }
+    }
+
+    pub fn long_term_defaults() -> Self {
+        Self {
+            keep_daily: 180,
+            keep_weekly: 12,
+            keep_monthly: 24,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

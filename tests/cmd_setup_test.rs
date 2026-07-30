@@ -304,3 +304,14 @@ fn test_setup_auto_enables_schedule() {
     assert_eq!(mock_calls.len(), 1);
     assert_eq!(mock_calls[0].0, "schedule_enable");
 }
+
+#[test]
+fn test_database_type_enum() {
+    use backup::config::model::DatabaseType;
+    use std::str::FromStr;
+
+    assert_eq!(DatabaseType::from_str("mysql").unwrap(), DatabaseType::Mysql);
+    assert_eq!(DatabaseType::from_str("postgres").unwrap(), DatabaseType::Postgres);
+    assert!(DatabaseType::from_str("invalid").is_err());
+}
+

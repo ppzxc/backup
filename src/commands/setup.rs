@@ -41,12 +41,11 @@ fn prompt_text_with_default(msg: &str, default_val: &str, lang: Language) -> Res
     }
 }
 
+pub const DEFAULT_BACKUP_TARGET: &str = "/var/log";
+
 impl SetupPrompter for InquirePrompter {
     fn prompt_setup_params(&self, lang_opt: Option<Language>, config_dir: &Path) -> Result<SetupParams> {
-        // lang_opt은 항상 Some(..)으로 전달됩니다 (호출자가 detect()로 채워줌).
-        // 만약을 위해 None이면 detect()로 fallback합니다.
-        let lang = lang_opt.unwrap_or_else(Language::detect);
-
+        let lang = lang_opt.unwrap_or(Language::En);
         let msg = I18nMessages::get(lang);
 
         let profile = prompt_text_with_default(msg.enter_profile_name, "default", lang)?;
@@ -57,19 +56,20 @@ impl SetupPrompter for InquirePrompter {
         ).prompt()?;
 
         let (backup_type, targets) = if backup_type_choice.starts_with("[1]") {
-            let t = prompt_text_with_default(msg.enter_target_dir, "/var/log", lang)?;
+            let t = prompt_text_with_default(msg.enter_target_dir, DEFAULT_BACKUP_TARGET, lang)?;
             let target_list: Vec<String> = t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
             (BackupType::Directory, target_list)
         } else {
             let db_kind = inquire::Select::new(msg.select_db_type, vec!["mysql", "postgres"]).prompt()?;
+            let db_type: DatabaseType = db_kind.parse()?;
             let conn = inquire::Text::new(msg.enter_conn_url).prompt_skippable()?;
             (
                 BackupType::DbStream {
-                    db_type: db_kind.to_string(),
+                    db_type: db_type.to_string(),
                     connection_url: conn.filter(|s| !s.is_empty()),
                     dump_command: None,
                 },
-                vec![format!("db-stream:{}", db_kind)],
+                vec![format!("db-stream:{}", db_type)],
             )
         };
 
@@ -77,19 +77,19 @@ impl SetupPrompter for InquirePrompter {
         let excludes: Vec<String> = excludes_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
 
         // Retention defaults depending on type
-        let (default_daily, default_weekly, default_monthly) = match backup_type {
-            BackupType::Directory => (7, 4, 12),
-            BackupType::DbStream { .. } => (180, 12, 24),
+        let retention_defaults = match backup_type {
+            BackupType::Directory => RetentionPolicy::standard_defaults(),
+            BackupType::DbStream { .. } => RetentionPolicy::long_term_defaults(),
         };
 
         let keep_daily = inquire::CustomType::<u32>::new(msg.retention_keep_daily)
-            .with_default(default_daily)
+            .with_default(retention_defaults.keep_daily)
             .prompt()?;
         let keep_weekly = inquire::CustomType::<u32>::new(msg.retention_keep_weekly)
-            .with_default(default_weekly)
+            .with_default(retention_defaults.keep_weekly)
             .prompt()?;
         let keep_monthly = inquire::CustomType::<u32>::new(msg.retention_keep_monthly)
-            .with_default(default_monthly)
+            .with_default(retention_defaults.keep_monthly)
             .prompt()?;
 
         // Primary & Secondary Storage Setup
@@ -485,7 +485,7 @@ impl SetupEngine {
             let config = Self::validate_and_build(params)?;
             crate::config::registry::ConfigurationRegistry::save_profile_config(&config, config_dir)?;
         } else {
-            create_default_config_file(config_path, "default", "/var/log", "sftp:backup@192.168.1.100:/backup", &generate_secure_password())?;
+            create_default_config_file(config_path, "default", DEFAULT_BACKUP_TARGET, "sftp:backup@192.168.1.100:/backup", &generate_secure_password())?;
         }
 
         let profiles_yaml_path = if config_path.ends_with("profiles.yaml") {
