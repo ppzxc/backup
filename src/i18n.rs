@@ -90,6 +90,12 @@ pub struct I18nMessages {
     pub reuse_secondary_label: &'static str,
     pub sftp_pubkey_notice: &'static str,
     pub sftp_press_enter: &'static str,
+    pub sftp_key_choice_prompt: &'static str,
+    pub sftp_key_choice_use_existing: &'static str,
+    pub sftp_key_choice_generate_new: &'static str,
+    pub sftp_testing_connection: &'static str,
+    pub sftp_test_success: &'static str,
+    pub sftp_test_failed: &'static str,
 }
 
 impl I18nMessages {
@@ -147,6 +153,12 @@ impl I18nMessages {
                 reuse_secondary_label: "2차",
                 sftp_pubkey_notice: "SFTP 원격 서버의 ~/.ssh/authorized_keys 파일에 아래 공개키를 등록하세요:",
                 sftp_press_enter: "원격 서버 설정 완료 후 [Enter]를 누르면 다음으로 진행합니다...",
+                sftp_key_choice_prompt: "SSH Key 사용 방식을 선택하세요:",
+                sftp_key_choice_use_existing: "[1] 기존 SSH Key 사용",
+                sftp_key_choice_generate_new: "[2] 새로 SSH Key 생성",
+                sftp_testing_connection: "SFTP 접속 테스트를 진행 중입니다...",
+                sftp_test_success: "[성공] SFTP 원격 서버 접속에 성공했습니다.",
+                sftp_test_failed: "[실패] SFTP 원격 서버 접속 테스트 실패 (사유: {})",
             },
             Language::En => Self {
                 select_language: "Select Language / 언어 선택:",
@@ -200,6 +212,12 @@ impl I18nMessages {
                 reuse_secondary_label: "Secondary",
                 sftp_pubkey_notice: "Register the following public key in the remote server's ~/.ssh/authorized_keys file:",
                 sftp_press_enter: "After configuring the remote server, press [Enter] to continue...",
+                sftp_key_choice_prompt: "Select SSH key option:",
+                sftp_key_choice_use_existing: "[1] Use existing SSH key",
+                sftp_key_choice_generate_new: "[2] Generate new SSH key",
+                sftp_testing_connection: "Testing SFTP connection...",
+                sftp_test_success: "[SUCCESS] Successfully connected to remote SFTP server.",
+                sftp_test_failed: "[FAILED] SFTP connection test failed (Reason: {})",
             },
         }
     }

@@ -175,53 +175,8 @@ impl SetupPrompter for InquirePrompter {
                 .prompt()?;
 
             let (repository, sftp_config, s3_config) = if backend == "sftp" {
-                let key_dir = config_dir;
-                let key_path = key_dir.join("id_ed25519");
-                let pub_path = key_dir.join("id_ed25519.pub");
-                if let Err(e) = std::fs::create_dir_all(key_dir) {
-                    eprintln!("Warning: Failed to create directory {:?}: {}", key_dir, e);
-                }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(key_dir, std::fs::Permissions::from_mode(0o700));
-                }
-                if !key_path.exists() {
-                    let _ = std::process::Command::new("ssh-keygen")
-                        .args(["-t", "ed25519", "-N", "", "-f", key_path.to_str().unwrap_or("/etc/backup/id_ed25519")])
-                        .output();
-                }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if key_path.exists() {
-                        let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
-                    }
-                    if pub_path.exists() {
-                        let _ = std::fs::set_permissions(&pub_path, std::fs::Permissions::from_mode(0o600));
-                    }
-                }
-                if let Ok(pub_key) = std::fs::read_to_string(&pub_path) {
-                    println!("\n================================================================================");
-                    println!("{}", msg.sftp_pubkey_notice);
-                    println!("================================================================================");
-                    println!("{}\n", pub_key.trim());
-                }
-
-                let _ = inquire::Text::new(msg.sftp_press_enter).prompt_skippable()?;
-
-                let host = prompt_text_with_default(msg.sftp_host, "192.168.1.100", lang)?;
-                let port = inquire::CustomType::<u16>::new(msg.sftp_port).with_default(22).prompt()?;
-                let user = prompt_text_with_default(msg.sftp_user, "backup", lang)?;
-                let path = prompt_text_with_default(msg.sftp_path, "/backup", lang)?;
-
-                let repo_uri = format!("sftp:{}@{}:{}", user, host, path);
-                (repo_uri, Some(SftpConfig {
-                    host,
-                    port,
-                    user,
-                    key_file: Some(key_path.to_string_lossy().to_string()),
-                }), None)
+                let (repo_uri, conf) = prompt_sftp_storage(msg, lang, config_dir)?;
+                (repo_uri, Some(conf), None)
             } else if backend == "s3" {
                 let mode_choice = inquire::Select::new(
                     msg.s3_mode_select,
@@ -310,8 +265,15 @@ impl SetupPrompter for InquirePrompter {
 
             let secondary = if enable_sec {
                 let sec_backend = inquire::Select::new(msg.secondary_backend, vec!["sftp", "s3", "local"]).prompt()?;
-                let sec_repo = inquire::Text::new(msg.secondary_repo_uri).prompt()?;
-                let sec_pass = inquire::Password::new(msg.secondary_password).without_confirmation().prompt()?;
+                let (sec_repo, sec_pass) = if sec_backend == "sftp" {
+                    let (repo_uri, _) = prompt_sftp_storage(msg, lang, config_dir)?;
+                    let sec_p = inquire::Password::new(msg.secondary_password).without_confirmation().prompt()?;
+                    (repo_uri, sec_p)
+                } else {
+                    let sec_r = inquire::Text::new(msg.secondary_repo_uri).prompt()?;
+                    let sec_p = inquire::Password::new(msg.secondary_password).without_confirmation().prompt()?;
+                    (sec_r, sec_p)
+                };
                 Some(SecondaryStorageTarget {
                     enabled: true,
                     backend: sec_backend.to_string(),
@@ -415,6 +377,117 @@ pub fn create_default_config_file(path: &Path, profile: &str, target: &str, repo
     };
     let config_dir = path.parent().unwrap_or(path);
     config.save_and_sync(config_dir)
+}
+
+fn prompt_sftp_storage(
+    msg: I18nMessages,
+    lang: Language,
+    config_dir: &Path,
+) -> Result<(String, SftpConfig)> {
+    let key_dir = config_dir;
+    let key_path = key_dir.join("id_ed25519");
+    let pub_path = key_dir.join("id_ed25519.pub");
+
+    if let Err(e) = std::fs::create_dir_all(key_dir) {
+        eprintln!("Warning: Failed to create directory {:?}: {}", key_dir, e);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(key_dir, std::fs::Permissions::from_mode(0o700));
+    }
+
+    let generate_key = if key_path.exists() {
+        let key_choice = inquire::Select::new(
+            msg.sftp_key_choice_prompt,
+            vec![msg.sftp_key_choice_use_existing, msg.sftp_key_choice_generate_new],
+        ).prompt()?;
+        key_choice.starts_with("[2]")
+    } else {
+        true
+    };
+
+    if generate_key {
+        let _ = std::fs::remove_file(&key_path);
+        let _ = std::fs::remove_file(&pub_path);
+        let _ = std::process::Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-f", key_path.to_str().unwrap_or("/etc/backup/id_ed25519")])
+            .output();
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if key_path.exists() {
+            let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+        }
+        if pub_path.exists() {
+            let _ = std::fs::set_permissions(&pub_path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+
+    if let Ok(pub_key) = std::fs::read_to_string(&pub_path) {
+        println!("\n================================================================================");
+        println!("{}", msg.sftp_pubkey_notice);
+        println!("================================================================================");
+        println!("{}\n", pub_key.trim());
+    }
+
+    let _ = inquire::Text::new(msg.sftp_press_enter).prompt_skippable()?;
+
+    let host = prompt_text_with_default(msg.sftp_host, "192.168.1.100", lang)?;
+    let port = inquire::CustomType::<u16>::new(msg.sftp_port).with_default(22).prompt()?;
+    let user = prompt_text_with_default(msg.sftp_user, "backup", lang)?;
+    let path = prompt_text_with_default(msg.sftp_path, "/backup", lang)?;
+
+    // Perform SFTP connection test
+    println!("{}", msg.sftp_testing_connection);
+    let test_output = std::process::Command::new("ssh")
+        .args([
+            "-i",
+            key_path.to_str().unwrap_or("/etc/backup/id_ed25519"),
+            "-p",
+            &port.to_string(),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            &format!("{}@{}", user, host),
+            "exit",
+        ])
+        .output();
+
+    match test_output {
+        Ok(out) if out.status.success() => {
+            println!("{}", msg.sftp_test_success);
+        }
+        Ok(out) => {
+            let err_msg = String::from_utf8_lossy(&out.stderr);
+            let trimmed_err = err_msg.trim();
+            let reason = if trimmed_err.is_empty() {
+                format!("exit code: {}", out.status.code().unwrap_or(-1))
+            } else {
+                trimmed_err.to_string()
+            };
+            println!("{}", msg.sftp_test_failed.replace("{}", &reason));
+        }
+        Err(e) => {
+            println!("{}", msg.sftp_test_failed.replace("{}", &e.to_string()));
+        }
+    }
+
+    let repo_uri = format!("sftp:{}@{}:{}", user, host, path);
+    Ok((
+        repo_uri,
+        SftpConfig {
+            host,
+            port,
+            user,
+            key_file: Some(key_path.to_string_lossy().to_string()),
+        },
+    ))
 }
 
 pub struct SetupEngine;
