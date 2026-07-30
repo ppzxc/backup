@@ -16,6 +16,19 @@ fn test_i18n_messages_lookup() {
     assert!(msg_en.enter_profile_name.contains("Profile"));
 }
 
+#[test]
+fn test_sftp_i18n_messages_presence() {
+    let ko = I18nMessages::get(Language::Ko);
+    assert!(ko.sftp_key_choice_prompt.contains("SSH Key"));
+    assert!(ko.sftp_test_success.contains("성공"));
+    assert!(ko.sftp_test_failed.contains("실패"));
+
+    let en = I18nMessages::get(Language::En);
+    assert!(en.sftp_key_choice_prompt.contains("SSH key"));
+    assert!(en.sftp_test_success.contains("SUCCESS"));
+    assert!(en.sftp_test_failed.contains("FAILED"));
+}
+
 /// POSIX 표준: LC_ALL이 설정되어 있으면 LANG보다 우선해야 합니다.
 /// detect_from()은 순수 함수로 unsafe 환경변수 조작 없이 테스트할 수 있습니다.
 #[test]
