@@ -270,8 +270,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Version => {
             println!("backup {}", env!("CARGO_PKG_VERSION"));
         }
-        Commands::Uninstall { yes, .. } => {
-            let out = backup::commands::uninstall::perform_uninstall(yes)?;
+        Commands::Uninstall { yes, purge } => {
+            let out = backup::commands::uninstall::perform_uninstall(default_config_path, &resticprofile, yes, purge)?;
             println!("{}", out);
         }
     }
