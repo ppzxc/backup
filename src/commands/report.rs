@@ -44,50 +44,35 @@ pub struct AuditReport {
 impl AuditReport {
     pub fn generate(report_type: ReportType, host_name: &str, timestamp: &str) -> Self {
         let items = match report_type {
-            ReportType::All => vec![
-                DiagnosticItem {
-                    name: "백업 환경 및 보안 권한 (ISMS-P 2.9.2)".to_string(),
-                    criterion: "0700 / 0600".to_string(),
-                    result: "0700 / 0600 (****** Masked)".to_string(),
-                    pass: true,
-                },
-                DiagnosticItem {
-                    name: "시각 동기화 (ISMS-P 2.10.1)".to_string(),
-                    criterion: "< 1.0s".to_string(),
-                    result: "chronyd active (+0.0004s)".to_string(),
-                    pass: true,
-                },
-                DiagnosticItem {
-                    name: "복구 모의 훈련 및 RTO (ISMS-P 2.9.3)".to_string(),
-                    criterion: "< 300s".to_string(),
-                    result: "17.0s (Header Signature Valid)".to_string(),
-                    pass: true,
-                },
-            ],
-            ReportType::Environment => vec![
-                DiagnosticItem {
-                    name: "백업 환경 및 보안 권한 (ISMS-P 2.9.2)".to_string(),
-                    criterion: "0700 / 0600".to_string(),
-                    result: "0700 / 0600 (****** Masked)".to_string(),
-                    pass: true,
-                },
-            ],
-            ReportType::TimeSync => vec![
-                DiagnosticItem {
-                    name: "시각 동기화 (ISMS-P 2.10.1)".to_string(),
-                    criterion: "< 1.0s".to_string(),
-                    result: "chronyd active (+0.0004s)".to_string(),
-                    pass: true,
-                },
-            ],
-            ReportType::RestoreDrill => vec![
-                DiagnosticItem {
-                    name: "복구 모의 훈련 및 RTO (ISMS-P 2.9.3)".to_string(),
-                    criterion: "< 300s".to_string(),
-                    result: "17.0s (Header Signature Valid)".to_string(),
-                    pass: true,
-                },
-            ],
+            ReportType::All => {
+                let mut all_items = Vec::new();
+                for sub_type in [
+                    ReportType::Environment,
+                    ReportType::TimeSync,
+                    ReportType::RestoreDrill,
+                ] {
+                    all_items.extend(Self::generate(sub_type, host_name, timestamp).results.items);
+                }
+                all_items
+            }
+            ReportType::Environment => vec![DiagnosticItem {
+                name: "백업 환경 및 보안 권한 (ISMS-P 2.9.2)".to_string(),
+                criterion: "0700 / 0600".to_string(),
+                result: "0700 / 0600 (****** Masked)".to_string(),
+                pass: true,
+            }],
+            ReportType::TimeSync => vec![DiagnosticItem {
+                name: "시각 동기화 (ISMS-P 2.10.1)".to_string(),
+                criterion: "< 1.0s".to_string(),
+                result: "chronyd active (+0.0004s)".to_string(),
+                pass: true,
+            }],
+            ReportType::RestoreDrill => vec![DiagnosticItem {
+                name: "복구 모의 훈련 및 RTO (ISMS-P 2.9.3)".to_string(),
+                criterion: "< 300s".to_string(),
+                result: "17.0s (Header Signature Valid)".to_string(),
+                pass: true,
+            }],
         };
 
         let results = AuditDiagnosticResults {
@@ -185,6 +170,15 @@ impl AuditReportMeta {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ReportExportOptions<'a> {
+    pub report_type: ReportType,
+    pub file: Option<&'a Path>,
+    pub format: Option<ReportFormat>,
+    pub output_dir: &'a Path,
+    pub meta: &'a AuditReportMeta,
+}
+
 pub fn render_html_isms_report(host_name: &str, timestamp: &str) -> String {
     let meta = AuditReportMeta::new(host_name, timestamp);
     render_html_isms_report_with_type(ReportType::Environment, &meta)
@@ -216,15 +210,9 @@ fn sanitize_filename(s: &str) -> String {
         .collect()
 }
 
-pub fn execute_report_export(
-    report_type: ReportType,
-    file: Option<&Path>,
-    format: Option<ReportFormat>,
-    output_dir: &Path,
-    meta: &AuditReportMeta,
-) -> Result<String> {
-    let report = AuditReport::generate(report_type, &meta.host_name, &meta.timestamp);
-    let target_slug = match report_type {
+pub fn execute_report_export(opts: ReportExportOptions) -> Result<String> {
+    let report = AuditReport::generate(opts.report_type, &opts.meta.host_name, &opts.meta.timestamp);
+    let target_slug = match opts.report_type {
         ReportType::All => "all",
         ReportType::Environment => "environment",
         ReportType::TimeSync => "time-sync",
@@ -233,65 +221,32 @@ pub fn execute_report_export(
 
     let mut saved_paths: Vec<PathBuf> = Vec::new();
 
-    match (file, format) {
-        (Some(custom_file), Some(ReportFormat::Html)) => {
-            let html_content = report.render_html();
-            write_file_with_perms(custom_file, &html_content)?;
-            saved_paths.push(custom_file.to_path_buf());
-        }
-        (Some(custom_file), Some(ReportFormat::Json)) => {
-            let json_content = report.render_json()?;
-            write_file_with_perms(custom_file, &json_content)?;
-            saved_paths.push(custom_file.to_path_buf());
-        }
-        (Some(custom_file), None) => {
-            let html_content = report.render_html();
-            let json_content = report.render_json()?;
+    let formats = match opts.format {
+        Some(fmt) => vec![fmt],
+        None => vec![ReportFormat::Html, ReportFormat::Json],
+    };
 
-            let html_path = if custom_file.extension().map_or(false, |ext| ext == "html") {
-                custom_file.to_path_buf()
-            } else {
-                custom_file.with_extension("html")
-            };
+    for fmt in formats {
+        let ext = match fmt {
+            ReportFormat::Html => "html",
+            ReportFormat::Json => "json",
+        };
 
-            let json_path = custom_file.with_extension("json");
-
-            write_file_with_perms(&html_path, &html_content)?;
-            saved_paths.push(html_path);
-
-            write_file_with_perms(&json_path, &json_content)?;
-            saved_paths.push(json_path);
-        }
-        (None, specified_format) => {
-            let clean_ts = sanitize_filename(&meta.timestamp);
-            let base_name = format!("isms_report_{}_{}", target_slug, clean_ts);
-
-            match specified_format {
-                Some(ReportFormat::Html) => {
-                    let html_path = output_dir.join(format!("{}.html", base_name));
-                    let html_content = report.render_html();
-                    write_file_with_perms(&html_path, &html_content)?;
-                    saved_paths.push(html_path);
-                }
-                Some(ReportFormat::Json) => {
-                    let json_path = output_dir.join(format!("{}.json", base_name));
-                    let json_content = report.render_json()?;
-                    write_file_with_perms(&json_path, &json_content)?;
-                    saved_paths.push(json_path);
-                }
-                None => {
-                    let html_path = output_dir.join(format!("{}.html", base_name));
-                    let html_content = report.render_html();
-                    write_file_with_perms(&html_path, &html_content)?;
-                    saved_paths.push(html_path);
-
-                    let json_path = output_dir.join(format!("{}.json", base_name));
-                    let json_content = report.render_json()?;
-                    write_file_with_perms(&json_path, &json_content)?;
-                    saved_paths.push(json_path);
-                }
+        let file_path = match opts.file {
+            Some(f) => f.with_extension(ext),
+            None => {
+                let clean_ts = sanitize_filename(&opts.meta.timestamp);
+                opts.output_dir.join(format!("isms_report_{}_{}.{}", target_slug, clean_ts, ext))
             }
-        }
+        };
+
+        let content = match fmt {
+            ReportFormat::Html => report.render_html(),
+            ReportFormat::Json => report.render_json()?,
+        };
+
+        write_file_with_perms(&file_path, &content)?;
+        saved_paths.push(file_path);
     }
 
     let paths_str = saved_paths
@@ -303,9 +258,21 @@ pub fn execute_report_export(
     Ok(format!("ISMS report saved to {}", paths_str))
 }
 
-pub fn execute_report_file_export_with_type(report_type: ReportType, file: Option<&Path>, meta: &AuditReportMeta) -> Result<String> {
-    let default_output_dir = Path::new("/data/backup/reports");
-    execute_report_export(report_type, file, None, default_output_dir, meta)
+pub fn execute_report_file_export_with_type(
+    report_type: ReportType,
+    file: Option<&Path>,
+    meta: &AuditReportMeta,
+) -> Result<String> {
+    let default_config = crate::config::model::BackupConfig::default();
+    let default_output_dir = Path::new(&default_config.reports.output_dir);
+    let opts = ReportExportOptions {
+        report_type,
+        file,
+        format: None,
+        output_dir: default_output_dir,
+        meta,
+    };
+    execute_report_export(opts)
 }
 
 pub fn execute_report_file_export(report_type: ReportType, file: Option<&Path>) -> Result<String> {

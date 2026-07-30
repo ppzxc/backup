@@ -46,17 +46,18 @@ fn test_report_type_all_rendering() {
 
 #[test]
 fn test_report_file_export_dual_format_by_default() {
-    use backup::commands::report::execute_report_export;
+    use backup::commands::report::{execute_report_export, ReportExportOptions};
     let dir = tempdir().unwrap();
     let base_file = dir.path().join("audit_report");
+    let meta = backup::commands::report::AuditReportMeta::new("host-1", "2026-07-30");
 
-    let msg = execute_report_export(
-        ReportType::All,
-        Some(&base_file),
-        None,
-        dir.path(),
-        &backup::commands::report::AuditReportMeta::new("host-1", "2026-07-30"),
-    ).unwrap();
+    let msg = execute_report_export(ReportExportOptions {
+        report_type: ReportType::All,
+        file: Some(&base_file),
+        format: None,
+        output_dir: dir.path(),
+        meta: &meta,
+    }).unwrap();
 
     assert!(msg.contains("ISMS report saved to"));
     let html_file = dir.path().join("audit_report.html");
@@ -72,17 +73,18 @@ fn test_report_file_export_dual_format_by_default() {
 
 #[test]
 fn test_report_file_export_single_format_when_specified() {
-    use backup::commands::report::{execute_report_export, ReportFormat};
+    use backup::commands::report::{execute_report_export, ReportExportOptions, ReportFormat};
     let dir = tempdir().unwrap();
     let base_file = dir.path().join("audit_report.json");
+    let meta = backup::commands::report::AuditReportMeta::new("host-1", "2026-07-30");
 
-    let msg = execute_report_export(
-        ReportType::Environment,
-        Some(&base_file),
-        Some(ReportFormat::Json),
-        dir.path(),
-        &backup::commands::report::AuditReportMeta::new("host-1", "2026-07-30"),
-    ).unwrap();
+    let msg = execute_report_export(ReportExportOptions {
+        report_type: ReportType::Environment,
+        file: Some(&base_file),
+        format: Some(ReportFormat::Json),
+        output_dir: dir.path(),
+        meta: &meta,
+    }).unwrap();
 
     assert!(msg.contains("ISMS report saved to"));
     let json_file = dir.path().join("audit_report.json");
@@ -94,16 +96,17 @@ fn test_report_file_export_single_format_when_specified() {
 
 #[test]
 fn test_report_file_export_default_directory_when_file_none() {
-    use backup::commands::report::execute_report_export;
+    use backup::commands::report::{execute_report_export, ReportExportOptions};
     let dir = tempdir().unwrap();
+    let meta = backup::commands::report::AuditReportMeta::new("host-1", "2026-07-30");
 
-    let msg = execute_report_export(
-        ReportType::TimeSync,
-        None,
-        None,
-        dir.path(),
-        &backup::commands::report::AuditReportMeta::new("host-1", "2026-07-30"),
-    ).unwrap();
+    let msg = execute_report_export(ReportExportOptions {
+        report_type: ReportType::TimeSync,
+        file: None,
+        format: None,
+        output_dir: dir.path(),
+        meta: &meta,
+    }).unwrap();
 
     assert!(msg.contains("ISMS report saved to"));
     let entries: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().path()).collect();

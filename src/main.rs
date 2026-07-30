@@ -269,13 +269,15 @@ fn main() -> anyhow::Result<()> {
             let meta = backup::commands::report::AuditReportMeta::current();
             let output_dir = std::path::Path::new(&config.reports.output_dir);
 
-            let out = backup::commands::report::execute_report_export(
+            let opts = backup::commands::report::ReportExportOptions {
                 report_type,
-                final_file.as_deref(),
-                final_format,
+                file: final_file.as_deref(),
+                format: final_format,
                 output_dir,
-                &meta,
-            )?;
+                meta: &meta,
+            };
+
+            let out = backup::commands::report::execute_report_export(opts)?;
             println!("{}", out);
         }
         Commands::Schedule { action } => match action {
