@@ -180,6 +180,12 @@ impl BackupConfig {
                 if !pwd.trim().is_empty() {
                     secondary_profile.password = Some(pwd.to_string());
                 }
+                if let Some(ref s3) = sec.s3 {
+                    let mut env_map = secondary_profile.env.unwrap_or_default();
+                    env_map.insert("AWS_ACCESS_KEY_ID".into(), s3.access_key_id.clone());
+                    env_map.insert("AWS_SECRET_ACCESS_KEY".into(), s3.secret_access_key.expose_secret().to_string());
+                    secondary_profile.env = Some(env_map);
+                }
                 restic_config.profiles.insert("secondary".into(), secondary_profile);
             }
         }
@@ -411,6 +417,8 @@ pub struct SecondaryStorageTarget {
     pub repository: String,
     #[serde(serialize_with = "serialize_secret_string")]
     pub password: SecretString,
+    pub sftp: Option<SftpConfig>,
+    pub s3: Option<S3Config>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

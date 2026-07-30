@@ -166,6 +166,8 @@ impl SetupPrompter for InquirePrompter {
                     backend: sec_backend.to_string(),
                     repository: sec_repo,
                     password: SecretString::new(sec_pwd),
+                    sftp: None,
+                    s3: None,
                 }
             });
 
@@ -266,20 +268,61 @@ impl SetupPrompter for InquirePrompter {
 
             let secondary = if enable_sec {
                 let sec_backend = inquire::Select::new(msg.secondary_backend, vec!["sftp", "s3", "local"]).prompt()?;
-                let (sec_repo, sec_pass) = if sec_backend == "sftp" {
+                let (sec_repo, sec_pass, sec_sftp, sec_s3) = if sec_backend == "sftp" {
                     let runner = SystemExecutor;
-                    let (repo_uri, _sec_sftp) = prompt_sftp_storage(msg, lang, config_dir, "id_ed25519_secondary", &runner)?;
-                    (repo_uri, String::new())
+                    let (repo_uri, sec_sftp_conf) = prompt_sftp_storage(msg, lang, config_dir, "id_ed25519_secondary", &runner)?;
+                    (repo_uri, String::new(), Some(sec_sftp_conf), None)
+                } else if sec_backend == "s3" {
+                    let mode_choice = inquire::Select::new(
+                        msg.s3_mode_select,
+                        vec![msg.s3_mode_detailed, msg.s3_mode_uri_only],
+                    ).prompt()?;
+
+                    if mode_choice.starts_with("[1]") {
+                        let endpoint = prompt_text_with_default(msg.s3_endpoint, "https://s3.amazonaws.com", lang)?;
+                        let access_key_id = inquire::Text::new(msg.s3_access_key_id).prompt()?;
+                        let secret_access_key_str = inquire::Password::new(msg.s3_secret_access_key)
+                            .without_confirmation()
+                            .prompt()?;
+                        let _region = prompt_text_with_default(msg.s3_region, "", lang)?;
+                        let bucket = prompt_text_with_default(msg.s3_bucket, "my-backup-bucket", lang)?;
+                        let subfolder = prompt_text_with_default(msg.s3_path, "", lang)?;
+
+                        let clean_endpoint = endpoint.trim_start_matches("s3:").trim_end_matches('/');
+                        let clean_subfolder = subfolder.trim_matches('/');
+                        let repo_uri = if clean_subfolder.is_empty() {
+                            format!("s3:{}/{}", clean_endpoint, bucket)
+                        } else {
+                            format!("s3:{}/{}/{}", clean_endpoint, bucket, clean_subfolder)
+                        };
+
+                        let s3_conf = S3Config {
+                            endpoint,
+                            access_key_id,
+                            secret_access_key: SecretString::new(secret_access_key_str),
+                        };
+                        (repo_uri, String::new(), None, Some(s3_conf))
+                    } else {
+                        let sec_r = prompt_text_with_default(
+                            msg.secondary_repo_uri,
+                            "s3:https://s3.amazonaws.com/my-backup-bucket/backup",
+                            lang,
+                        )?;
+                        let sec_p = inquire::Password::new(msg.secondary_password).without_confirmation().prompt()?;
+                        (sec_r, sec_p, None, None)
+                    }
                 } else {
                     let sec_r = inquire::Text::new(msg.secondary_repo_uri).prompt()?;
                     let sec_p = inquire::Password::new(msg.secondary_password).without_confirmation().prompt()?;
-                    (sec_r, sec_p)
+                    (sec_r, sec_p, None, None)
                 };
                 Some(SecondaryStorageTarget {
                     enabled: true,
                     backend: sec_backend.to_string(),
                     repository: sec_repo,
                     password: SecretString::new(sec_pass),
+                    sftp: sec_sftp,
+                    s3: sec_s3,
                 })
             } else {
                 None
@@ -437,47 +480,79 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
 
     let _ = inquire::Text::new(msg.sftp_press_enter).prompt_skippable()?;
 
-    let host = prompt_text_with_default(msg.sftp_host, "192.168.1.100", lang)?;
-    let port = inquire::CustomType::<u16>::new(msg.sftp_port).with_default(22).prompt()?;
-    let user = prompt_text_with_default(msg.sftp_user, "backup", lang)?;
-    let path = prompt_text_with_default(msg.sftp_path, "/backup", lang)?;
+    let mut host = prompt_text_with_default(msg.sftp_host, "192.168.1.100", lang)?;
+    let mut port = inquire::CustomType::<u16>::new(msg.sftp_port).with_default(22).prompt()?;
+    let mut user = prompt_text_with_default(msg.sftp_user, "backup", lang)?;
+    let mut path = prompt_text_with_default(msg.sftp_path, "/backup", lang)?;
 
-    // Perform SFTP connection test
-    println!("{}", msg.sftp_testing_connection);
-    let port_str = port.to_string();
-    let remote_target = format!("{}@{}", user, host);
-    let test_output = runner.run("ssh", &[
-        "-i",
-        &key_path_str,
-        "-p",
-        &port_str,
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=5",
-        &remote_target,
-        "exit",
-    ]);
+    loop {
+        // Perform SFTP connection test
+        println!("{}", msg.sftp_testing_connection);
+        let port_str = port.to_string();
+        let remote_target = format!("{}@{}", user, host);
+        let test_output = runner.run("ssh", &[
+            "-i",
+            &key_path_str,
+            "-p",
+            &port_str,
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            &remote_target,
+            "exit",
+        ]);
 
-    match test_output {
-        Ok(out) if out.status_code == 0 => {
-            println!("{}", msg.sftp_test_success);
+        let success = match test_output {
+            Ok(ref out) if out.status_code == 0 => {
+                println!("{}", msg.sftp_test_success);
+                true
+            }
+            Ok(ref out) => {
+                let trimmed_err = out.stderr.trim();
+                let reason = if trimmed_err.is_empty() {
+                    format!("exit code: {}", out.status_code)
+                } else {
+                    trimmed_err.to_string()
+                };
+                println!("{}", msg.sftp_test_failed.replace("{}", &reason));
+                false
+            }
+            Err(ref e) => {
+                println!("{}", msg.sftp_test_failed.replace("{}", &e.to_string()));
+                false
+            }
+        };
+
+        if success {
+            break;
         }
-        Ok(out) => {
-            let trimmed_err = out.stderr.trim();
-            let reason = if trimmed_err.is_empty() {
-                format!("exit code: {}", out.status_code)
-            } else {
-                trimmed_err.to_string()
-            };
-            println!("{}", msg.sftp_test_failed.replace("{}", &reason));
-        }
-        Err(e) => {
-            println!("{}", msg.sftp_test_failed.replace("{}", &e.to_string()));
+
+        let options = vec![
+            msg.sftp_action_retry,
+            msg.sftp_action_reenter,
+            msg.sftp_action_ignore,
+            msg.sftp_action_cancel,
+        ];
+        let choice_idx = inquire::Select::new(msg.sftp_test_failed_action, options)
+            .raw_prompt()?
+            .index;
+
+        match choice_idx {
+            0 => continue, // Retry
+            1 => {
+                // Re-enter credentials
+                host = prompt_text_with_default(msg.sftp_host, &host, lang)?;
+                port = inquire::CustomType::<u16>::new(msg.sftp_port).with_default(port).prompt()?;
+                user = prompt_text_with_default(msg.sftp_user, &user, lang)?;
+                path = prompt_text_with_default(msg.sftp_path, &path, lang)?;
+            }
+            2 => break, // Ignore warning and proceed
+            _ => anyhow::bail!("SFTP setup cancelled by user due to connection failure."),
         }
     }
 
-    let repo_uri = format!("sftp:{}@{}:{}", user, host, path);
+    let repo_uri = format_sftp_repository_url(&user, &host, port, &path);
     Ok((
         repo_uri,
         SftpConfig {
@@ -487,6 +562,17 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
             key_file: Some(key_path_str),
         },
     ))
+}
+
+pub fn format_sftp_repository_url(user: &str, host: &str, port: u16, path: &str) -> String {
+    let clean_path = path.trim();
+    if port == 22 {
+        format!("sftp:{}@{}:{}", user, host, clean_path)
+    } else if clean_path.starts_with('/') {
+        format!("sftp://{}@{}:{}//{}", user, host, port, clean_path.trim_start_matches('/'))
+    } else {
+        format!("sftp://{}@{}:{}/{}", user, host, port, clean_path)
+    }
 }
 
 pub struct SetupEngine;

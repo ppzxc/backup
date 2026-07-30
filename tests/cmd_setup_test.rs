@@ -85,6 +85,8 @@ fn test_setup_with_prompter_success() {
             backend: "s3".into(),
             repository: "s3:offsite-bucket".into(),
             password: SecretString::new("secondary_pass_123".into()),
+            sftp: None,
+            s3: None,
         }),
         reports: ReportsConfig {
             output_dir: "/data/backup/reports".into(),
@@ -352,6 +354,29 @@ fn test_sftp_params_key_path_validation() {
     assert_eq!(
         config.storage.primary.sftp.unwrap().key_file.unwrap(),
         "/etc/backup/id_ed25519"
+    );
+}
+
+#[test]
+fn test_format_sftp_repository_url() {
+    use backup::commands::setup::format_sftp_repository_url;
+
+    // Standard port 22 with absolute path
+    assert_eq!(
+        format_sftp_repository_url("backup", "192.168.1.100", 22, "/backup/data"),
+        "sftp:backup@192.168.1.100:/backup/data"
+    );
+
+    // Custom port 49382 with absolute path
+    assert_eq!(
+        format_sftp_repository_url("backup_restic", "59.25.177.53", 49382, "/backup/ns0327/log"),
+        "sftp://backup_restic@59.25.177.53:49382//backup/ns0327/log"
+    );
+
+    // Custom port 2222 with relative path
+    assert_eq!(
+        format_sftp_repository_url("user", "host.com", 2222, "relative/path"),
+        "sftp://user@host.com:2222/relative/path"
     );
 }
 
