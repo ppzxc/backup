@@ -185,7 +185,8 @@ fn check_service_status(service_name: &str) -> (String, String) {
         .output();
     let enabled = match enabled_out {
         Ok(out) if out.status.success() => "enabled".to_string(),
-        _ => "disabled".to_string(),
+        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        Err(_) => "unknown".to_string(),
     };
 
     let active_out = Command::new("systemctl")
@@ -193,10 +194,11 @@ fn check_service_status(service_name: &str) -> (String, String) {
         .output();
     let active = match active_out {
         Ok(out) if out.status.success() => "active".to_string(),
-        _ => "inactive".to_string(),
+        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        Err(_) => "unknown".to_string(),
     };
 
-    (enabled, active)
+    (if enabled.is_empty() { "disabled".into() } else { enabled }, if active.is_empty() { "inactive".into() } else { active })
 }
 
 fn collect_chrony_info() -> (String, String) {
@@ -204,16 +206,16 @@ fn collect_chrony_info() -> (String, String) {
         .arg("sources")
         .output();
     let sources = match sources_out {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
-        _ => "^* any.time.nl 2 6 17 1 -812us[-374us] +/- 20ms".to_string(),
+        Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
+        Err(e) => format!("Error executing chronyc sources: {}", e),
     };
 
     let tracking_out = Command::new("chronyc")
         .arg("tracking")
         .output();
     let tracking = match tracking_out {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
-        _ => "System time : 0.000243256 seconds fast of NTP time\nRMS offset : 0.000438103 seconds".to_string(),
+        Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
+        Err(e) => format!("Error executing chronyc tracking: {}", e),
     };
 
     (sources, tracking)
@@ -226,15 +228,15 @@ fn check_systemd_timer_status() -> (String, String, String) {
         .output();
 
     let next_run = match list_out {
-        Ok(out) if out.status.success() => {
+        Ok(out) => {
             let s = String::from_utf8_lossy(&out.stdout).to_string();
             if !s.trim().is_empty() {
                 s.trim().to_string()
             } else {
-                "Thu 2026-07-23 02:00:00 KST".to_string()
+                "No timer scheduled".to_string()
             }
         }
-        _ => "Thu 2026-07-23 02:00:00 KST".to_string(),
+        Err(e) => format!("Error checking timers: {}", e),
     };
 
     (enabled, active, next_run)
@@ -259,7 +261,7 @@ impl AuditReport {
                 DiagnosticItem {
                     name: "시각 동기화 (ISMS-P 2.10.1)".to_string(),
                     criterion: "< 1.0s".to_string(),
-                    result: "chronyd active (+0.0004s)".to_string(),
+                    result: "chronyd active".to_string(),
                     pass: true,
                 },
                 DiagnosticItem {
@@ -278,7 +280,7 @@ impl AuditReport {
             ReportType::TimeSync => vec![DiagnosticItem {
                 name: "시각 동기화 (ISMS-P 2.10.1)".to_string(),
                 criterion: "< 1.0s".to_string(),
-                result: "chronyd active (+0.0004s)".to_string(),
+                result: "chronyd active".to_string(),
                 pass: true,
             }],
             ReportType::RestoreDrill => vec![DiagnosticItem {
@@ -425,9 +427,8 @@ impl ReportCommand {
                 execute_report_export(opts)
             }
             None => {
-                // Execute all subcommands + All report
+                // Execute subcommands 3종 (Environment, TimeSync, RestoreDrill)
                 let report_types = [
-                    ReportType::All,
                     ReportType::Environment,
                     ReportType::TimeSync,
                     ReportType::RestoreDrill,
@@ -447,7 +448,7 @@ impl ReportCommand {
                     saved_all.push(res_msg);
                 }
 
-                Ok(format!("All reports generated successfully:\n{}", saved_all.join("\n")))
+                Ok(format!("All 3 sub-reports generated successfully:\n{}", saved_all.join("\n")))
             }
         }
     }
@@ -479,7 +480,6 @@ fn write_file_with_perms(file_path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-
 pub fn execute_report_export(opts: ReportExportOptions) -> Result<String> {
     let data = RealReportData::collect_with_meta(opts.config, opts.meta);
 
@@ -507,22 +507,22 @@ pub fn execute_report_export(opts: ReportExportOptions) -> Result<String> {
 
         let file_path = match opts.file {
             Some(f) => {
-                let path_str = f.display().to_string();
-                if path_str.ends_with(".html") || path_str.ends_with(".json") || opts.report_type == ReportType::All {
+                let parent = f.parent().unwrap_or_else(|| Path::new("."));
+                let file_name = f.file_name().unwrap_or_default().to_string_lossy();
+                
+                // If extension is already specified or f points to exact filename, use it
+                if f.extension().is_some() || file_name.contains('.') {
                     f.with_extension(ext)
                 } else {
-                    let parent = f.parent().unwrap_or(opts.output_dir);
-                    parent.join(format!("{}_{}.{}", date_prefix, target_filename, ext))
+                    let stem = f.file_stem().unwrap_or_default().to_string_lossy();
+                    parent.join(format!("{}.{}", stem, ext))
                 }
             }
             None => {
-                if opts.report_type == ReportType::All {
-                    opts.output_dir.join(format!("audit_report.{}", ext))
-                } else {
-                    opts.output_dir.join(format!("{}_{}.{}", date_prefix, target_filename, ext))
-                }
+                opts.output_dir.join(format!("{}_{}.{}", date_prefix, target_filename, ext))
             }
         };
+
 
         let content = match fmt {
             ReportFormat::Html => html_template::render_html_real(opts.report_type, &data),
@@ -541,6 +541,7 @@ pub fn execute_report_export(opts: ReportExportOptions) -> Result<String> {
 
     Ok(format!("ISMS report saved to {}", paths_str))
 }
+
 
 
 
