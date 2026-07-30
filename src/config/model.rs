@@ -87,6 +87,7 @@ impl BackupConfig {
         let mut restic_config = if profiles_yaml_path.exists() {
             ResticProfileConfig::load_from_path(&profiles_yaml_path).unwrap_or_else(|_| ResticProfileConfig {
                 version: "2".into(),
+                audit: None,
                 global: None,
                 groups: None,
                 profiles: std::collections::BTreeMap::new(),
@@ -94,6 +95,7 @@ impl BackupConfig {
         } else {
             ResticProfileConfig {
                 version: "2".into(),
+                audit: None,
                 global: None,
                 groups: None,
                 profiles: std::collections::BTreeMap::new(),
@@ -362,9 +364,20 @@ pub struct S3Config {
     pub secret_access_key: SecretString,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct AuditConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_manager: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_officer: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ResticProfileConfig {
     pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit: Option<AuditConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub global: Option<GlobalSection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

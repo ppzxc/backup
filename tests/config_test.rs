@@ -377,4 +377,24 @@ storage:
     assert_eq!(web_prof.copy.as_ref().unwrap().profile.as_deref(), Some("secondary"));
 }
 
+#[test]
+fn test_restic_profile_config_audit_section() {
+    use backup::config::model::ResticProfileConfig;
+    let yaml = r#"
+version: "2"
+audit:
+  system-manager: "홍길동 차장"
+  security-officer: "김보안 이사"
+global:
+  min-memory: 1024
+profiles: {}
+"#;
+    let config: ResticProfileConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(config.audit.is_some());
+    let audit = config.audit.unwrap();
+    assert_eq!(audit.system_manager, Some("홍길동 차장".to_string()));
+    assert_eq!(audit.security_officer, Some("김보안 이사".to_string()));
+}
+
+
 

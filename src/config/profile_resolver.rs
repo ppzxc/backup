@@ -120,6 +120,7 @@ mod tests {
 
         let config = ResticProfileConfig {
             version: "2".to_string(),
+            audit: None,
             global: None,
             groups: None,
             profiles,
