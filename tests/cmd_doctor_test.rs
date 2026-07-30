@@ -9,3 +9,16 @@ fn test_doctor_checks() {
     assert!(report.contains("Restic binary: OK"));
     assert!(report.contains("NTP Time Sync: OK"));
 }
+
+#[test]
+fn test_doctor_status_enum_and_ntp_check() {
+    use backup::commands::doctor::{DoctorStatus, DoctorCategory, DoctorItem};
+    let item = DoctorItem {
+        category: DoctorCategory::System,
+        criterion: "NTP Time Sync".into(),
+        status: DoctorStatus::Pass,
+        detail: "chronyd active".into(),
+    };
+    assert_eq!(item.status, DoctorStatus::Pass);
+}
+

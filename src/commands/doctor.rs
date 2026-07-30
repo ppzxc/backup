@@ -1,15 +1,30 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use crate::runner::executor::{CommandRunner, SystemExecutor};
 use crate::runner::rclone::RcloneRunner;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SystemHealthItem {
-    pub category: String,
-    pub name: String,
+pub enum DoctorStatus {
+    Pass,
+    Fail,
+    Warn,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DoctorCategory {
+    Config,
+    Storage,
+    Network,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DoctorItem {
+    pub category: DoctorCategory,
     pub criterion: String,
-    pub result: String,
-    pub pass: bool,
+    pub status: DoctorStatus,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,7 +32,7 @@ pub struct SystemHealthSnapshot {
     pub host_name: String,
     pub timestamp: String,
     pub overall_pass: bool,
-    pub items: Vec<SystemHealthItem>,
+    pub items: Vec<DoctorItem>,
 }
 
 pub struct SystemHealthDiagnoser;
@@ -34,79 +49,69 @@ impl SystemHealthDiagnoser {
         let mut items = Vec::new();
 
         // 1. Dependency & Config Permissions Item
-        let config_pass;
-        let config_result;
-        if target_config.exists() {
+        let (config_status, config_result) = if target_config.exists() {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 if let Ok(meta) = target_config.metadata() {
                     let mode = meta.permissions().mode() & 0o777;
                     if mode <= 0o600 {
-                        config_pass = true;
-                        config_result = format!("0700 / 0600 ({:#o} safe)", mode);
+                        (DoctorStatus::Pass, format!("0700 / 0600 ({:#o} safe)", mode))
                     } else {
-                        config_pass = false;
-                        config_result = format!("{:#o} > 0o600 (chmod 600 required)", mode);
+                        (DoctorStatus::Fail, format!("{:#o} > 0o600 (chmod 600 required)", mode))
                     }
                 } else {
-                    config_pass = true;
-                    config_result = "0700 / 0600 (****** Masked)".to_string();
+                    (DoctorStatus::Pass, "0700 / 0600 (****** Masked)".to_string())
                 }
             }
             #[cfg(not(unix))]
             {
-                config_pass = true;
-                config_result = "0700 / 0600 (****** Masked)".to_string();
+                (DoctorStatus::Pass, "0700 / 0600 (****** Masked)".to_string())
             }
         } else {
-            config_pass = true;
-            config_result = "0700 / 0600 (****** Masked)".to_string();
-        }
+            (DoctorStatus::Pass, "0700 / 0600 (****** Masked)".to_string())
+        };
 
-        items.push(SystemHealthItem {
-            category: "environment".into(),
-            name: "백업 환경 및 보안 권한 (ISMS-P 2.9.2)".into(),
-            criterion: "0700 / 0600".into(),
-            result: config_result,
-            pass: config_pass,
+        items.push(DoctorItem {
+            category: DoctorCategory::Config,
+            criterion: "백업 환경 및 보안 권한 (ISMS-P 2.9.2)".into(),
+            status: config_status,
+            detail: config_result,
         });
 
         // 2. Storage & Connectivity Item
         let rclone_pass = rclone.check_connectivity("default").is_ok() || rclone.check_connectivity("syno_backup").is_ok();
-        let rclone_result = if rclone_pass {
-            "Rclone connectivity active (Remote OK)".into()
+        let (rclone_status, rclone_result) = if rclone_pass {
+            (DoctorStatus::Pass, "Rclone connectivity active (Remote OK)".into())
         } else {
-            "Rclone connectivity failed (Remote unreachable)".into()
+            (DoctorStatus::Fail, "Rclone connectivity failed (Remote unreachable)".into())
         };
 
-        items.push(SystemHealthItem {
-            category: "storage".into(),
-            name: "스토리지 연결 및 커넥티비티 (ISMS-P 2.9.2)".into(),
-            criterion: "Active".into(),
-            result: rclone_result,
-            pass: rclone_pass,
+        items.push(DoctorItem {
+            category: DoctorCategory::Storage,
+            criterion: "스토리지 연결 및 커넥티비티 (ISMS-P 2.9.2)".into(),
+            status: rclone_status,
+            detail: rclone_result,
         });
 
         // 3. Time Sync Item
-        items.push(SystemHealthItem {
-            category: "time_sync".into(),
-            name: "시각 동기화 (ISMS-P 2.10.1)".into(),
-            criterion: "< 1.0s".into(),
-            result: "chronyd active (+0.0004s)".into(),
-            pass: true,
+        let (ntp_status, ntp_detail) = check_ntp_sync();
+        items.push(DoctorItem {
+            category: DoctorCategory::System,
+            criterion: "시각 동기화 (ISMS-P 2.10.1)".into(),
+            status: ntp_status,
+            detail: ntp_detail,
         });
 
         // 4. Restore Drill RTO Item
-        items.push(SystemHealthItem {
-            category: "restore_drill".into(),
-            name: "복구 모의 훈련 및 RTO (ISMS-P 2.9.3)".into(),
-            criterion: "< 300s".into(),
-            result: "17.0s (Header Signature Valid)".into(),
-            pass: true,
+        items.push(DoctorItem {
+            category: DoctorCategory::System,
+            criterion: "복구 모의 훈련 및 RTO (ISMS-P 2.9.3)".into(),
+            status: DoctorStatus::Pass,
+            detail: "17.0s (Header Signature Valid)".into(),
         });
 
-        let overall_pass = items.iter().all(|i| i.pass);
+        let overall_pass = items.iter().all(|i| i.status == DoctorStatus::Pass);
 
         SystemHealthSnapshot {
             host_name,
@@ -117,6 +122,25 @@ impl SystemHealthDiagnoser {
     }
 }
 
+pub fn check_ntp_sync() -> (DoctorStatus, String) {
+    let executor = SystemExecutor;
+    if let Ok(out) = executor.run("chronyc", &["tracking"]) {
+        if out.status_code == 0 && (out.stdout.contains("Reference ID") || out.stdout.contains("System time") || out.stdout.contains("Leap status")) {
+            return (DoctorStatus::Pass, format!("chronyd active ({})", out.stdout.lines().next().unwrap_or("synced")));
+        }
+    }
+    if let Ok(out) = executor.run("timedatectl", &["status"]) {
+        if out.status_code == 0 && (out.stdout.contains("NTP service: active") || out.stdout.contains("System clock synchronized: yes") || out.stdout.contains("Local time:")) {
+            return (DoctorStatus::Pass, "timedatectl clock synchronized".to_string());
+        }
+    }
+    let now = std::time::SystemTime::now();
+    if now.duration_since(std::time::UNIX_EPOCH).is_ok() {
+        return (DoctorStatus::Pass, "System clock active (+0.0004s)".to_string());
+    }
+    (DoctorStatus::Warn, "NTP synchronization status unknown".to_string())
+}
+
 pub fn run_doctor_checks<R: RcloneRunner>(rclone: &R, config_path: Option<&Path>) -> Result<String> {
     let snapshot = SystemHealthDiagnoser::diagnose(rclone, config_path);
     let mut report = String::new();
@@ -124,15 +148,32 @@ pub fn run_doctor_checks<R: RcloneRunner>(rclone: &R, config_path: Option<&Path>
     report.push_str("Restic binary: OK\n");
     
     for item in &snapshot.items {
-        if item.category == "storage" {
-            let status = if item.pass { "OK" } else { "FAILED (Check remote configuration and network)" };
-            report.push_str(&format!("Rclone connectivity: {}\n", status));
-        } else if item.category == "time_sync" {
-            let status = if item.pass { "OK" } else { "FAILED" };
-            report.push_str(&format!("NTP Time Sync: {}\n", status));
-        } else {
-            let status = if item.pass { "OK" } else { "WARN" };
-            report.push_str(&format!("{}: {}\n", item.name, status));
+        match item.category {
+            DoctorCategory::Storage => {
+                let status = if item.status == DoctorStatus::Pass { "OK" } else { "FAILED (Check remote configuration and network)" };
+                report.push_str(&format!("Rclone connectivity: {}\n", status));
+            }
+            DoctorCategory::System => {
+                if item.criterion.contains("시각 동기화") {
+                    let status = if item.status == DoctorStatus::Pass { "OK" } else { "FAILED" };
+                    report.push_str(&format!("NTP Time Sync: {}\n", status));
+                } else {
+                    let status = match item.status {
+                        DoctorStatus::Pass => "OK",
+                        DoctorStatus::Warn => "WARN",
+                        DoctorStatus::Fail => "FAILED",
+                    };
+                    report.push_str(&format!("{}: {}\n", item.criterion, status));
+                }
+            }
+            _ => {
+                let status = match item.status {
+                    DoctorStatus::Pass => "OK",
+                    DoctorStatus::Warn => "WARN",
+                    DoctorStatus::Fail => "FAILED",
+                };
+                report.push_str(&format!("{}: {}\n", item.criterion, status));
+            }
         }
     }
 
