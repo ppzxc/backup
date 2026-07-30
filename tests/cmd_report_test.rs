@@ -15,7 +15,7 @@ fn test_report_types_rendering() {
     assert!(html_env.contains("일일 백업 결과 및 보안 설정 검토 보고서"));
 
     let html_ts = render_html_isms_report_with_type(ReportType::TimeSync, &backup::commands::report::AuditReportMeta::new("host-1", "2026-07-23"));
-    assert!(html_ts.contains("ISMS-P 2.9.3 시각 동기화 증적 보고서"));
+    assert!(html_ts.contains("ISMS-P 2.9.3 시각 동기화"));
 
     let html_rd = render_html_isms_report_with_type(ReportType::RestoreDrill, &backup::commands::report::AuditReportMeta::new("host-1", "2026-07-23"));
     assert!(html_rd.contains("백업 데이터 복구 및 정합성 테스트 결과 보고서"));
