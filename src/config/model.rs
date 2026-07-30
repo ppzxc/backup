@@ -437,6 +437,16 @@ pub struct AuditConfig {
     pub security_officer: Option<String>,
 }
 
+impl AuditConfig {
+    pub fn system_manager_name<'a>(&'a self, default: &'a str) -> &'a str {
+        self.system_manager.as_deref().unwrap_or(default)
+    }
+
+    pub fn security_officer_name<'a>(&'a self, default: &'a str) -> &'a str {
+        self.security_officer.as_deref().unwrap_or(default)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ResticProfileConfig {
     pub version: String,

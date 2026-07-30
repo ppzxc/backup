@@ -22,3 +22,37 @@ fn test_doctor_status_enum_and_ntp_check() {
     assert_eq!(item.status, DoctorStatus::Pass);
 }
 
+#[test]
+fn test_ntp_sync_with_mock_executor() {
+    use backup::commands::doctor::{check_ntp_sync_with_runner, DoctorStatus};
+    use backup::runner::executor::{CommandOutput, MockExecutor};
+
+    let mock = MockExecutor::new();
+    mock.push_output("chronyc", CommandOutput {
+        status_code: 0,
+        stdout: "Reference ID    : 192.168.1.1\nSystem time     : 0.0001 sec fast".into(),
+        stderr: "".into(),
+    });
+
+    let (status, detail) = check_ntp_sync_with_runner(&mock);
+    assert_eq!(status, DoctorStatus::Pass);
+    assert!(detail.contains("chronyd active"));
+
+    let mock_fail = MockExecutor::new();
+    mock_fail.push_output("chronyc", CommandOutput {
+        status_code: 1,
+        stdout: "".into(),
+        stderr: "506 Cannot talk to daemon".into(),
+    });
+    mock_fail.push_output("timedatectl", CommandOutput {
+        status_code: 1,
+        stdout: "".into(),
+        stderr: "Failed to query server".into(),
+    });
+
+    let (status_fail, detail_fail) = check_ntp_sync_with_runner(&mock_fail);
+    assert_eq!(status_fail, DoctorStatus::Warn);
+    assert!(detail_fail.contains("NTP synchronization status unknown or inactive"));
+}
+
+

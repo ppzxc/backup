@@ -312,8 +312,8 @@ fn render_all_html(data: &RealReportData) -> String {
         data.timer_active,
         data.etc_backup_dir_perm,
         data.backup_env_file_perm,
-        data.audit.system_manager.as_deref().unwrap_or("시스템 운영팀"),
-        data.audit.security_officer.as_deref().unwrap_or("정보보안책임자"),
+        data.audit.system_manager_name("시스템 운영팀"),
+        data.audit.security_officer_name("정보보안책임자"),
     )
 }
 
@@ -474,8 +474,8 @@ fn render_environment_html(data: &RealReportData) -> String {
         data.config.retention.keep_monthly,
         data.etc_backup_dir_perm,
         data.backup_env_file_perm,
-        data.audit.system_manager.as_deref().unwrap_or("시스템 운영팀"),
-        data.audit.security_officer.as_deref().unwrap_or("정보보안책임자"),
+        data.audit.system_manager_name("시스템 운영팀"),
+        data.audit.security_officer_name("정보보안책임자"),
     )
 }
 
@@ -558,8 +558,8 @@ fn render_time_sync_html(data: &RealReportData) -> String {
         data.chrony_sources,
         data.chrony_tracking,
         chrony_conf_perm_display,
-        data.audit.system_manager.as_deref().unwrap_or("시스템 운영팀"),
-        data.audit.security_officer.as_deref().unwrap_or("정보보안책임자"),
+        data.audit.system_manager_name("시스템 운영팀"),
+        data.audit.security_officer_name("정보보안책임자"),
     )
 }
 
@@ -661,11 +661,11 @@ fn render_restore_drill_html(data: &RealReportData) -> String {
 </html>"#,
         COMMON_REPORT_CSS,
         data.timestamp,
-        data.audit.system_manager.as_deref().unwrap_or("시스템 운영팀"),
+        data.audit.system_manager_name("시스템 운영팀"),
         data.os_info,
-        data.audit.security_officer.as_deref().unwrap_or("정보보안책임자"),
-        data.audit.system_manager.as_deref().unwrap_or("시스템 운영팀"),
-        data.audit.security_officer.as_deref().unwrap_or("정보보안책임자"),
+        data.audit.security_officer_name("정보보안책임자"),
+        data.audit.system_manager_name("시스템 운영팀"),
+        data.audit.security_officer_name("정보보안책임자"),
     )
 }
 
