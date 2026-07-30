@@ -1,22 +1,44 @@
 use backup::commands::uninstall::{execute_uninstall_plan, perform_uninstall};
 use backup::commands::update::execute_update_check;
 
+use std::path::Path;
+use backup::runner::resticprofile::MockResticProfileRunner;
+
 #[test]
 fn test_uninstall_plan() {
     let plan = execute_uninstall_plan();
     assert!(plan.contains("/usr/local/sbin/backup"));
     assert!(plan.contains("/etc/backup"));
+    assert!(plan.contains("resticprofile unschedule"));
 }
 
 #[test]
 fn test_perform_uninstall_with_yes() {
-    let res = perform_uninstall(true).unwrap();
+    let runner = MockResticProfileRunner::new(0, "unscheduled");
+    let res = perform_uninstall(Path::new("/etc/backup/profiles.yaml"), &runner, true, false).unwrap();
     assert!(res.contains("Uninstalled"));
+    let calls = runner.calls.lock().unwrap();
+    assert!(calls.iter().any(|(cmd, _)| cmd == "schedule_disable"));
+}
+
+#[test]
+fn test_perform_uninstall_with_purge() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_dir = temp_dir.path().join("backup");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_file = config_dir.join("profiles.yaml");
+    std::fs::write(&config_file, "dummy").unwrap();
+
+    let runner = MockResticProfileRunner::new(0, "unscheduled");
+    let res = perform_uninstall(&config_file, &runner, true, true).unwrap();
+    assert!(res.contains("Uninstalled"));
+    assert!(!config_dir.exists());
 }
 
 #[test]
 fn test_perform_uninstall_non_interactive_without_yes_fails() {
-    let res = perform_uninstall(false);
+    let runner = MockResticProfileRunner::new(0, "unscheduled");
+    let res = perform_uninstall(Path::new("/etc/backup/profiles.yaml"), &runner, false, false);
     assert!(res.is_err());
 }
 
@@ -26,3 +48,4 @@ fn test_update_check() {
     assert!(result.contains("1.0.0"));
     assert!(result.contains("up to date"));
 }
+
