@@ -107,5 +107,6 @@ pub fn parse_legacy_env(content: &str) -> Result<BackupConfig> {
             secondary: None,
         },
         reports: ReportsConfig::default(),
+        audit: AuditConfig::default(),
     })
 }

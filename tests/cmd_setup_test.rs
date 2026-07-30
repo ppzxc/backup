@@ -47,6 +47,7 @@ impl SetupPrompter for MockPrompter {
             primary_storage: self.params.primary_storage.clone(),
             secondary_storage: self.params.secondary_storage.clone(),
             reports: self.params.reports.clone(),
+            audit: self.params.audit.clone(),
         })
     }
 }
@@ -90,6 +91,10 @@ fn test_setup_with_prompter_success() {
             enable_daily_reports: true,
             enable_annual_dr_drill_report: true,
         },
+        audit: AuditConfig {
+            system_manager: Some("홍길동".into()),
+            security_officer: Some("김보안".into()),
+        },
     };
 
     let prompter = MockPrompter { params };
@@ -126,6 +131,7 @@ fn test_setup_engine_validation_rules() {
         },
         secondary_storage: None,
         reports: ReportsConfig::default(),
+        audit: AuditConfig::default(),
     };
 
     // Password < 12 characters failure
@@ -285,6 +291,7 @@ fn test_setup_auto_enables_schedule() {
         },
         secondary_storage: None,
         reports: ReportsConfig::default(),
+        audit: AuditConfig::default(),
     };
 
     let prompter = MockPrompter { params };

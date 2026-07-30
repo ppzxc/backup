@@ -69,6 +69,8 @@ pub struct I18nMessages {
     pub secondary_password: &'static str,
     pub enable_isms_reports: &'static str,
     pub report_export_dir: &'static str,
+    pub prompt_system_manager: &'static str,
+    pub prompt_security_officer: &'static str,
 
     // S3 setup messages
     pub s3_mode_select: &'static str,
@@ -126,6 +128,8 @@ impl I18nMessages {
                 secondary_password: "2차 저장소 비밀번호:",
                 enable_isms_reports: "ISMS 감사 및 일일/연간 보고서 자동 생성 활성화:",
                 report_export_dir: "보고서 출력 디렉터리 경로:",
+                prompt_system_manager: "시스템 운영/백업 담당자 이름 (검토자):",
+                prompt_security_officer: "정보보안 책임자 이름 (승인자):",
 
                 s3_mode_select: "S3 설정 방식 선택:",
                 s3_mode_detailed: "[1] S3 상세 정보 분해 입력 (Endpoint, Access Key, Secret Key 등) - 기본값",
@@ -177,6 +181,8 @@ impl I18nMessages {
                 secondary_password: "Secondary Password:",
                 enable_isms_reports: "Enable ISMS Audit & Daily/Annual Report Generation?",
                 report_export_dir: "Report Export Directory:",
+                prompt_system_manager: "System Manager Name (Reviewer):",
+                prompt_security_officer: "Security Officer Name (Approver):",
 
                 s3_mode_select: "Select S3 Configuration Mode:",
                 s3_mode_detailed: "[1] Detailed S3 Parameters (Endpoint, Access Key, Secret Key, etc.) - Default",

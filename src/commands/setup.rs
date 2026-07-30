@@ -14,6 +14,7 @@ pub struct SetupParams {
     pub primary_storage: StorageTarget,
     pub secondary_storage: Option<SecondaryStorageTarget>,
     pub reports: ReportsConfig,
+    pub audit: AuditConfig,
 }
 
 pub trait SetupPrompter {
@@ -346,6 +347,23 @@ impl SetupPrompter for InquirePrompter {
             }
         };
 
+        let default_sys_mgr = match lang {
+            Language::Ko => "시스템 운영팀",
+            Language::En => "System Operations Team",
+        };
+        let default_sec_off = match lang {
+            Language::Ko => "정보보안책임자",
+            Language::En => "Chief Information Security Officer",
+        };
+
+        let sys_mgr = prompt_text_with_default(msg.prompt_system_manager, default_sys_mgr, lang)?;
+        let sec_off = prompt_text_with_default(msg.prompt_security_officer, default_sec_off, lang)?;
+
+        let audit = AuditConfig {
+            system_manager: Some(sys_mgr),
+            security_officer: Some(sec_off),
+        };
+
         Ok(SetupParams {
             profile,
             backup_type,
@@ -359,6 +377,7 @@ impl SetupPrompter for InquirePrompter {
             primary_storage,
             secondary_storage,
             reports,
+            audit,
         })
     }
 }
@@ -389,6 +408,10 @@ pub fn create_default_config_file(path: &Path, profile: &str, target: &str, repo
             secondary: None,
         },
         reports: ReportsConfig::default(),
+        audit: AuditConfig {
+            system_manager: Some("시스템 운영팀".into()),
+            security_officer: Some("정보보안책임자".into()),
+        },
     };
     let config_dir = path.parent().unwrap_or(path);
     config.save_and_sync(config_dir)
@@ -429,6 +452,7 @@ impl SetupEngine {
                 secondary: params.secondary_storage,
             },
             reports: params.reports,
+            audit: params.audit,
         })
     }
 

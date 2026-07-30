@@ -39,6 +39,8 @@ pub struct BackupConfig {
     pub storage: StorageConfig,
     #[serde(default)]
     pub reports: ReportsConfig,
+    #[serde(default)]
+    pub audit: AuditConfig,
 }
 
 impl BackupConfig {
@@ -103,6 +105,7 @@ impl BackupConfig {
         };
 
         restic_config.version = "2".into();
+        restic_config.audit = Some(self.audit.clone());
 
         // 1. Populate default profile (truly global options only)
         let mut default_profile = restic_config.profiles.remove("default").unwrap_or_default();
@@ -279,6 +282,7 @@ impl Default for BackupConfig {
                 secondary: None,
             },
             reports: ReportsConfig::default(),
+            audit: AuditConfig::default(),
         }
     }
 }
