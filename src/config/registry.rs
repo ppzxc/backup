@@ -24,4 +24,12 @@ impl ConfigurationRegistry {
     pub fn save_profile_config(config: &BackupConfig, config_dir: &Path) -> Result<()> {
         Self::save_profile(config, config_dir)
     }
+
+    pub fn save_profile_config_to_paths(
+        config: &BackupConfig,
+        config_path: &Path,
+        profiles_path: &Path,
+    ) -> Result<()> {
+        config.save_and_sync_to_paths(config_path, profiles_path)
+    }
 }

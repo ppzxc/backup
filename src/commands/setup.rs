@@ -22,6 +22,7 @@ pub trait SetupPrompter {
         &self,
         lang_opt: Option<Language>,
         config_dir: &Path,
+        profiles_path: &Path,
     ) -> Result<SetupParams>;
 }
 
@@ -52,6 +53,7 @@ impl SetupPrompter for InquirePrompter {
         &self,
         lang_opt: Option<Language>,
         config_dir: &Path,
+        profiles_path: &Path,
     ) -> Result<SetupParams> {
         let lang = lang_opt.unwrap_or(Language::En);
         let msg = I18nMessages::get(lang);
@@ -110,16 +112,8 @@ impl SetupPrompter for InquirePrompter {
             .prompt()?;
 
         // Primary & Secondary Storage Setup
-        let target_profiles_path = config_dir.join(crate::config::model::DEFAULT_PROFILES_FILENAME);
-        let default_yaml_path = Path::new(crate::config::model::DEFAULT_PROFILES_PATH);
-        let profiles_yaml_path = if target_profiles_path.exists() {
-            target_profiles_path.as_path()
-        } else {
-            default_yaml_path
-        };
-
-        let existing_restic = if profiles_yaml_path.exists() {
-            ResticProfileConfig::load_from_path(profiles_yaml_path).ok()
+        let existing_restic = if profiles_path.exists() {
+            ResticProfileConfig::load_from_path(profiles_path).ok()
         } else {
             None
         };
@@ -449,7 +443,24 @@ pub fn create_default_config_file(
     repo: &str,
     pwd: &str,
 ) -> Result<()> {
-    let config = BackupConfig {
+    let config = default_config(profile, target, repo, pwd);
+    let config_dir = path.parent().unwrap_or(path);
+    config.save_and_sync(config_dir)
+}
+
+pub fn create_default_config_files(
+    config_path: &Path,
+    profiles_path: &Path,
+    profile: &str,
+    target: &str,
+    repo: &str,
+    pwd: &str,
+) -> Result<()> {
+    default_config(profile, target, repo, pwd).save_and_sync_to_paths(config_path, profiles_path)
+}
+
+fn default_config(profile: &str, target: &str, repo: &str, pwd: &str) -> BackupConfig {
+    BackupConfig {
         version: "1.0".into(),
         profile: profile.into(),
         backup: BackupTargets {
@@ -482,9 +493,7 @@ pub fn create_default_config_file(
             system_manager: Some("시스템 운영팀".into()),
             security_officer: Some("정보보안책임자".into()),
         },
-    };
-    let config_dir = path.parent().unwrap_or(path);
-    config.save_and_sync(config_dir)
+    }
 }
 
 fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
@@ -724,10 +733,11 @@ impl SetupEngine {
 
     pub fn run<P: SetupPrompter, R: crate::runner::resticprofile::ResticProfileRunner>(
         config_path: &Path,
+        profiles_path: &Path,
         prompter: &P,
         non_interactive: bool,
         lang_opt: Option<Language>,
-        runner: &R,
+        _runner: &R,
     ) -> Result<()> {
         let config_dir = if let Some(parent) = config_path.parent() {
             if parent.as_os_str().is_empty() {
@@ -747,30 +757,22 @@ impl SetupEngine {
         }
 
         if !non_interactive {
-            let params = prompter.prompt_setup_params(lang_opt, config_dir)?;
+            let params = prompter.prompt_setup_params(lang_opt, config_dir, profiles_path)?;
             let config = Self::validate_and_build(params)?;
-            crate::config::registry::ConfigurationRegistry::save_profile_config(
-                &config, config_dir,
+            crate::config::registry::ConfigurationRegistry::save_profile_config_to_paths(
+                &config,
+                config_path,
+                profiles_path,
             )?;
         } else {
-            create_default_config_file(
+            create_default_config_files(
                 config_path,
+                profiles_path,
                 "default",
                 DEFAULT_BACKUP_TARGET,
                 "sftp:backup@192.168.1.100:/backup",
                 &generate_secure_password(),
             )?;
-        }
-
-        let profiles_yaml_path =
-            if config_path.ends_with(crate::config::model::DEFAULT_PROFILES_FILENAME) {
-                config_path.to_path_buf()
-            } else {
-                config_dir.join(crate::config::model::DEFAULT_PROFILES_FILENAME)
-            };
-
-        if profiles_yaml_path.exists() {
-            let _ = runner.schedule_enable(&profiles_yaml_path);
         }
 
         Ok(())
@@ -787,9 +789,35 @@ pub fn run_setup_with_prompter_and_runner<
     lang_opt: Option<Language>,
     runner: &R,
 ) -> Result<()> {
+    let profiles_path = config_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(crate::config::model::DEFAULT_PROFILES_FILENAME);
+    run_setup_with_prompter_and_runner_at_paths(
+        config_path,
+        &profiles_path,
+        prompter,
+        non_interactive,
+        lang_opt,
+        runner,
+    )
+}
+
+pub fn run_setup_with_prompter_and_runner_at_paths<
+    P: SetupPrompter,
+    R: crate::runner::resticprofile::ResticProfileRunner,
+>(
+    config_path: &Path,
+    profiles_path: &Path,
+    prompter: &P,
+    non_interactive: bool,
+    lang_opt: Option<Language>,
+    runner: &R,
+) -> Result<()> {
     let resolved_lang = lang_opt.or_else(|| Some(Language::detect()));
     SetupEngine::run(
         config_path,
+        profiles_path,
         prompter,
         non_interactive,
         resolved_lang,
@@ -806,6 +834,25 @@ pub fn run_setup_with_prompter<P: SetupPrompter>(
     let executor = crate::runner::executor::SystemExecutor;
     let runner = crate::runner::resticprofile::ResticProfileTool::new(&executor);
     run_setup_with_prompter_and_runner(config_path, prompter, non_interactive, lang_opt, &runner)
+}
+
+pub fn run_setup_with_prompter_at_paths<P: SetupPrompter>(
+    config_path: &Path,
+    profiles_path: &Path,
+    prompter: &P,
+    non_interactive: bool,
+    lang_opt: Option<Language>,
+) -> Result<()> {
+    let executor = crate::runner::executor::SystemExecutor;
+    let runner = crate::runner::resticprofile::ResticProfileTool::new(&executor);
+    run_setup_with_prompter_and_runner_at_paths(
+        config_path,
+        profiles_path,
+        prompter,
+        non_interactive,
+        lang_opt,
+        &runner,
+    )
 }
 
 pub fn run_setup(config_path: &Path, lang_opt: Option<Language>) -> Result<()> {

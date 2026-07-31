@@ -41,6 +41,7 @@ impl SetupPrompter for MockPrompter {
         &self,
         _lang_opt: Option<Language>,
         _config_dir: &std::path::Path,
+        _profiles_path: &std::path::Path,
     ) -> anyhow::Result<SetupParams> {
         if self.params.primary_storage.backend == "sftp" {
             let key = self
@@ -310,6 +311,7 @@ fn test_setup_auto_detects_language_when_lang_opt_none() {
             &self,
             lang_opt: Option<Language>,
             _config_dir: &std::path::Path,
+            _profiles_path: &std::path::Path,
         ) -> anyhow::Result<SetupParams> {
             *self.received_lang.lock().unwrap() = lang_opt;
             anyhow::bail!("capture_only") // 언어 캡처가 목적이므로 에러로 조기 종료
@@ -334,7 +336,7 @@ fn test_setup_auto_detects_language_when_lang_opt_none() {
 }
 
 #[test]
-fn test_setup_auto_enables_schedule() {
+fn test_setup_does_not_enable_schedule_outside_the_isolated_e2e_runner() {
     use backup::commands::setup::run_setup_with_prompter_and_runner;
     use backup::runner::resticprofile::MockResticProfileRunner;
 
@@ -376,8 +378,7 @@ fn test_setup_auto_enables_schedule() {
 
     assert!(config_path.exists());
     let mock_calls = runner.calls.lock().unwrap();
-    assert_eq!(mock_calls.len(), 1);
-    assert_eq!(mock_calls[0].0, "schedule_enable");
+    assert!(mock_calls.is_empty());
 }
 
 #[test]

@@ -72,6 +72,26 @@ pub fn save_secure_file(path: &Path, content: &str) -> Result<()> {
 }
 
 impl BackupConfig {
+    fn profile_password_file(&self, config_dir: &Path, is_secondary: bool) -> Result<String> {
+        let (existing_file, inline_password) =
+            self.resolve_storage_password(config_dir, is_secondary)?;
+        if let Some(path) = existing_file {
+            return Ok(path);
+        }
+        let path = config_dir.join(if is_secondary {
+            "secondary-password"
+        } else {
+            "primary-password"
+        });
+        save_secure_file(
+            &path,
+            inline_password
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("Storage password cannot be resolved"))?,
+        )?;
+        Ok(path.to_string_lossy().into_owned())
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self
             .storage
@@ -159,18 +179,26 @@ impl BackupConfig {
     }
 
     pub fn save_and_sync(&self, config_dir: &Path) -> Result<()> {
+        self.save_and_sync_to_paths(
+            &config_dir.join(DEFAULT_CONFIG_FILENAME),
+            &config_dir.join(DEFAULT_PROFILES_FILENAME),
+        )
+    }
+
+    pub fn save_and_sync_to_paths(
+        &self,
+        config_path: &Path,
+        profiles_yaml_path: &Path,
+    ) -> Result<()> {
         self.validate()?;
+        let config_dir = config_path.parent().unwrap_or(Path::new("."));
         if !config_dir.exists() {
             create_secure_dir(config_dir)?;
         }
-        save_secure_file(
-            &config_dir.join(DEFAULT_CONFIG_FILENAME),
-            &serde_yaml::to_string(self)?,
-        )?;
+        save_secure_file(config_path, &serde_yaml::to_string(self)?)?;
 
-        let profiles_yaml_path = config_dir.join(DEFAULT_PROFILES_FILENAME);
         let mut restic_config = if profiles_yaml_path.exists() {
-            ResticProfileConfig::load_from_path(&profiles_yaml_path).unwrap_or_else(|_| {
+            ResticProfileConfig::load_from_path(profiles_yaml_path).unwrap_or_else(|_| {
                 ResticProfileConfig {
                     version: "2".into(),
                     audit: None,
@@ -209,15 +237,17 @@ impl BackupConfig {
         }
         primary_profile.inherit = Some("default".into());
         primary_profile.repository = Some(self.storage.primary.repository.clone());
-        let (primary_pass_file, primary_pass) = self.resolve_storage_password(config_dir, false)?;
-        primary_profile.password_file = primary_pass_file;
-        primary_profile.password = primary_pass;
-        if let Some(ref s3) = self.storage.primary.s3 {
+        primary_profile.password_file = Some(self.profile_password_file(config_dir, false)?);
+        primary_profile.password = None;
+        if self.storage.primary.s3.is_some() {
             let mut env_map = primary_profile.env.unwrap_or_default();
-            env_map.insert("AWS_ACCESS_KEY_ID".into(), s3.access_key_id.clone());
+            env_map.insert(
+                "AWS_ACCESS_KEY_ID".into(),
+                "${BACKUP_PRIMARY_AWS_ACCESS_KEY_ID}".into(),
+            );
             env_map.insert(
                 "AWS_SECRET_ACCESS_KEY".into(),
-                s3.secret_access_key.expose_secret().to_string(),
+                "${BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY}".into(),
             );
             primary_profile.env = Some(env_map);
         }
@@ -244,15 +274,18 @@ impl BackupConfig {
                 }
                 secondary_profile.inherit = Some("default".into());
                 secondary_profile.repository = Some(sec.repository.clone());
-                let (sec_pass_file, sec_pass) = self.resolve_storage_password(config_dir, true)?;
-                secondary_profile.password_file = sec_pass_file;
-                secondary_profile.password = sec_pass;
-                if let Some(ref s3) = sec.s3 {
+                secondary_profile.password_file =
+                    Some(self.profile_password_file(config_dir, true)?);
+                secondary_profile.password = None;
+                if sec.s3.is_some() {
                     let mut env_map = secondary_profile.env.unwrap_or_default();
-                    env_map.insert("AWS_ACCESS_KEY_ID".into(), s3.access_key_id.clone());
+                    env_map.insert(
+                        "AWS_ACCESS_KEY_ID".into(),
+                        "${BACKUP_SECONDARY_AWS_ACCESS_KEY_ID}".into(),
+                    );
                     env_map.insert(
                         "AWS_SECRET_ACCESS_KEY".into(),
-                        s3.secret_access_key.expose_secret().to_string(),
+                        "${BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY}".into(),
                     );
                     secondary_profile.env = Some(env_map);
                 }
@@ -272,12 +305,11 @@ impl BackupConfig {
         // 4. Build target profile section
         let copy_section = if self.storage.secondary.as_ref().map_or(false, |s| s.enabled) {
             let sec = self.storage.secondary.as_ref().unwrap();
-            let (password_file, password) = self.resolve_storage_password(config_dir, true)?;
             Some(CopyCommandSection {
                 profile: Some("secondary".into()),
                 repository: Some(sec.repository.clone()),
-                password_file,
-                password,
+                password_file: Some(self.profile_password_file(config_dir, true)?),
+                password: None,
                 initialize: Some(true),
                 schedule: None,
                 ..Default::default()
@@ -350,7 +382,7 @@ impl BackupConfig {
             .insert(self.profile.clone(), profile_section);
 
         let yaml_content = serde_yaml::to_string(&restic_config)?;
-        save_secure_file(&profiles_yaml_path, &yaml_content)?;
+        save_secure_file(profiles_yaml_path, &yaml_content)?;
         Ok(())
     }
 

@@ -13,11 +13,39 @@ pub fn perform_uninstall<R: ResticProfileRunner>(
     yes: bool,
     purge: bool,
 ) -> Result<String> {
-    perform_uninstall_with_executor(config_path, runner, &SystemExecutor, yes, purge)
+    perform_uninstall_at_paths(config_path, config_path, runner, yes, purge)
+}
+
+pub fn perform_uninstall_at_paths<R: ResticProfileRunner>(
+    config_path: &Path,
+    profiles_path: &Path,
+    runner: &R,
+    yes: bool,
+    purge: bool,
+) -> Result<String> {
+    perform_uninstall_with_executor_at_paths(
+        config_path,
+        profiles_path,
+        runner,
+        &SystemExecutor,
+        yes,
+        purge,
+    )
 }
 
 pub fn perform_uninstall_with_executor<R: ResticProfileRunner, E: CommandRunner>(
     config_path: &Path,
+    runner: &R,
+    executor: &E,
+    yes: bool,
+    purge: bool,
+) -> Result<String> {
+    perform_uninstall_with_executor_at_paths(config_path, config_path, runner, executor, yes, purge)
+}
+
+pub fn perform_uninstall_with_executor_at_paths<R: ResticProfileRunner, E: CommandRunner>(
+    config_path: &Path,
+    profiles_path: &Path,
     runner: &R,
     executor: &E,
     yes: bool,
@@ -42,8 +70,8 @@ pub fn perform_uninstall_with_executor<R: ResticProfileRunner, E: CommandRunner>
         }
     }
 
-    if config_path.exists() {
-        runner.schedule_disable(config_path)?;
+    if profiles_path.exists() {
+        runner.schedule_disable(profiles_path)?;
     }
 
     // Clean up systemd timer/service files if they exist in /etc/systemd/system

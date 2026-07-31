@@ -51,6 +51,33 @@ storage:
 }
 
 #[test]
+fn setup_non_interactive_writes_config_and_profiles_to_their_explicit_paths() {
+    let temp = TempDir::new().unwrap();
+    let config = temp.path().join("environment/config.yml");
+    let profiles = temp.path().join("profile-data/profiles.yml");
+
+    Command::cargo_bin("backup")
+        .unwrap()
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--profiles",
+            profiles.to_str().unwrap(),
+            "setup",
+            "--non-interactive",
+        ])
+        .assert()
+        .success();
+
+    assert!(config.exists(), "setup must honor --config");
+    assert!(profiles.exists(), "setup must honor --profiles");
+    assert!(
+        !config.parent().unwrap().join("profiles.yaml").exists(),
+        "setup must not substitute a config-derived path for --profiles"
+    );
+}
+
+#[test]
 fn copy_propagates_backend_failure() {
     let temp = TempDir::new().unwrap();
     let config = temp.path().join("config.yml");

@@ -136,6 +136,7 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from(backup::config::model::DEFAULT_CONFIG_PATH));
     let config =
         backup::config::model::BackupConfig::load_from_path(&config_path).unwrap_or_default();
+    configure_profile_environment(&config);
     let executor = backup::runner::executor::SystemExecutor;
     let rclone = backup::runner::rclone::RcloneTool::new(&executor);
     let resticprofile = backup::runner::resticprofile::ResticProfileTool::new(&executor);
@@ -180,7 +181,8 @@ fn main() -> anyhow::Result<()> {
             None => {
                 let prompter = backup::commands::setup::InquirePrompter;
                 let lang_opt = lang.as_deref().map(backup::i18n::Language::from_str);
-                if let Err(err) = backup::commands::setup::run_setup_with_prompter(
+                if let Err(err) = backup::commands::setup::run_setup_with_prompter_at_paths(
+                    &config_path,
                     &profiles_path,
                     &prompter,
                     non_interactive,
@@ -193,20 +195,6 @@ fn main() -> anyhow::Result<()> {
                     );
                 } else {
                     println!("Setup completed successfully.");
-                    if let Ok(parsed) =
-                        backup::config::model::ResticProfileConfig::load_from_path(&profiles_path)
-                    {
-                        for name in parsed.profile_names() {
-                            let _ = resticprofile.init(&profiles_path, &name);
-                        }
-                        init_secondary_backend_if_present(
-                            &profiles_path,
-                            &config_path,
-                            &resticprofile,
-                            &executor,
-                            false,
-                        );
-                    }
                 }
             }
         },
@@ -345,8 +333,9 @@ fn main() -> anyhow::Result<()> {
             println!("backup {}", env!("CARGO_PKG_VERSION"));
         }
         Commands::Uninstall { yes, purge } => {
-            let out = backup::commands::uninstall::perform_uninstall(
+            let out = backup::commands::uninstall::perform_uninstall_at_paths(
                 &config_path,
+                &profiles_path,
                 &resticprofile,
                 yes,
                 purge,
@@ -355,6 +344,25 @@ fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn configure_profile_environment(config: &backup::config::model::BackupConfig) {
+    let set_s3_environment = |prefix: &str, s3: Option<&backup::config::model::S3Config>| {
+        if let Some(s3) = s3 {
+            // SAFETY: this single-threaded CLI sets child-process inputs before starting commands.
+            unsafe {
+                std::env::set_var(format!("{prefix}_AWS_ACCESS_KEY_ID"), &s3.access_key_id);
+                std::env::set_var(
+                    format!("{prefix}_AWS_SECRET_ACCESS_KEY"),
+                    secrecy::ExposeSecret::expose_secret(&s3.secret_access_key),
+                );
+            }
+        }
+    };
+    set_s3_environment("BACKUP_PRIMARY", config.storage.primary.s3.as_ref());
+    if let Some(secondary) = &config.storage.secondary {
+        set_s3_environment("BACKUP_SECONDARY", secondary.s3.as_ref());
+    }
 }
 
 fn init_secondary_backend_if_present<

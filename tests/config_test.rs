@@ -269,6 +269,36 @@ storage:
 }
 
 #[test]
+fn generated_profiles_do_not_contain_plaintext_credentials() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("etc_backup");
+    let config: BackupConfig = serde_yaml::from_str(
+        r#"
+version: "1.0"
+profile: "secret-safe"
+backup: { targets: ["/data"], excludes: [] }
+retention: { keepDaily: 1, keepWeekly: 1, keepMonthly: 1 }
+storage:
+  primary:
+    backend: "s3"
+    repository: "s3:https://example.invalid/backup"
+    password: "repository-secret"
+    s3: { endpoint: "https://example.invalid", accessKeyId: "access-key", secretAccessKey: "aws-secret" }
+"#,
+    )
+    .unwrap();
+
+    config.save_and_sync(&config_dir).unwrap();
+
+    let profiles = fs::read_to_string(config_dir.join("profiles.yaml")).unwrap();
+    for secret in ["repository-secret", "access-key", "aws-secret"] {
+        assert!(!profiles.contains(secret), "profiles leaked {secret}");
+    }
+    assert!(profiles.contains("${BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY}"));
+    assert!(config_dir.join("primary-password").exists());
+}
+
+#[test]
 fn test_sftp_option_command_generation() {
     let dir = tempdir().unwrap();
     let config_dir = dir.path().join("etc_backup");
@@ -443,7 +473,16 @@ storage:
         copy_sec.repository.as_deref(),
         Some("s3:https://s3.amazonaws.com/secondary-bucket")
     );
-    assert_eq!(copy_sec.password.as_deref(), Some("secondary_password_123"));
+    assert_eq!(copy_sec.password, None);
+    assert_eq!(
+        copy_sec.password_file.as_deref(),
+        Some(
+            config_dir
+                .join("secondary-password")
+                .to_string_lossy()
+                .as_ref()
+        )
+    );
 }
 
 #[test]
@@ -528,11 +567,24 @@ storage:
         .get("secondary")
         .expect("secondary profile should exist");
 
-    // Deterministic check: when no enc keyfile exists in temp dir, secondary falls back to primary.password
+    // When no keyfile exists, the secondary profile writes the primary fallback password securely.
     if !config_dir.join("enc").is_file() && !std::path::Path::new("/etc/backup/enc").is_file() {
-        assert_eq!(sec_prof.password.as_deref(), Some("primary_secret_123"));
-        assert_eq!(sec_prof.password_file, None);
+        assert_eq!(sec_prof.password, None);
+        assert_eq!(
+            sec_prof.password_file.as_deref(),
+            Some(
+                config_dir
+                    .join("secondary-password")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert_eq!(
+            fs::read_to_string(config_dir.join("secondary-password")).unwrap(),
+            "primary_secret_123"
+        );
     } else {
+        assert_eq!(sec_prof.password, None);
         assert!(sec_prof.password_file.is_some());
     }
 }
