@@ -1,8 +1,10 @@
 use backup::config::model::ResticProfileConfig;
-use backup::runner::executor::{CommandOutput, MockExecutor};
+mod support;
+use backup::runner::executor::CommandOutput;
 use backup::runner::resticprofile::{ResticProfileRunner, ResticProfileTool};
 use std::fs;
 use std::path::Path;
+use support::MockExecutor;
 use tempfile::tempdir;
 
 #[test]

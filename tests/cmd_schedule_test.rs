@@ -1,7 +1,8 @@
 use backup::commands::schedule::{
     execute_schedule_disable, execute_schedule_enable, execute_schedule_status,
 };
-use backup::runner::resticprofile::MockResticProfileRunner;
+mod support;
+use support::MockResticProfileRunner;
 use tempfile::tempdir;
 
 #[test]

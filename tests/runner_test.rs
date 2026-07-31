@@ -1,8 +1,10 @@
-use backup::runner::executor::{CommandOutput, CommandRunner, MockExecutor};
-use backup::runner::rclone::{MockRcloneRunner, RcloneRunner, RcloneTool};
-use backup::runner::restic::{MockResticRunner, ResticRunner, ResticTool};
+mod support;
+use backup::runner::executor::{CommandOutput, CommandRunner};
+use backup::runner::rclone::{RcloneRunner, RcloneTool};
+use backup::runner::restic::{ResticRunner, ResticTool};
 use backup::runner::resticprofile::{ResticProfileRunner, ResticProfileTool};
 use std::path::Path;
+use support::{MockExecutor, MockRcloneRunner, MockResticRunner};
 
 #[test]
 fn test_mock_executor_recording() {

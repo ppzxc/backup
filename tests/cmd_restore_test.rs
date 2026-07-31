@@ -1,8 +1,9 @@
 use backup::commands::restore::execute_restore;
 use backup::commands::snapshots::execute_snapshots;
 use backup::config::model::*;
-use backup::runner::restic::MockResticRunner;
+mod support;
 use secrecy::SecretString;
+use support::MockResticRunner;
 
 #[test]
 fn test_execute_snapshots() {

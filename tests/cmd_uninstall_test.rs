@@ -3,8 +3,9 @@ use backup::commands::uninstall::{
 };
 use backup::commands::update::execute_update_check;
 
-use backup::runner::resticprofile::MockResticProfileRunner;
+mod support;
 use std::path::Path;
+use support::MockResticProfileRunner;
 
 #[test]
 fn test_uninstall_plan() {

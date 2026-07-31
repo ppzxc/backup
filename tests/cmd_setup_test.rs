@@ -1,9 +1,11 @@
+mod support;
 use backup::commands::setup::{
     SetupEngine, SetupParams, SetupPrompter, create_default_config_file, run_setup_with_prompter,
 };
 use backup::config::model::*;
 use backup::i18n::Language;
 use secrecy::SecretString;
+use support::{MockExecutor, MockResticProfileRunner};
 use tempfile::tempdir;
 
 #[test]
@@ -190,7 +192,7 @@ fn test_setup_engine_validation_rules() {
 #[test]
 fn test_run_setup_dependencies_with_mock_runner() {
     use backup::commands::setup::run_setup_dependencies_with_runner;
-    use backup::runner::executor::{CommandOutput, MockExecutor};
+    use backup::runner::executor::CommandOutput;
 
     let mock = MockExecutor::new();
     mock.push_output(
@@ -338,7 +340,6 @@ fn test_setup_auto_detects_language_when_lang_opt_none() {
 #[test]
 fn test_setup_does_not_enable_schedule_outside_the_isolated_e2e_runner() {
     use backup::commands::setup::run_setup_with_prompter_and_runner;
-    use backup::runner::resticprofile::MockResticProfileRunner;
 
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("profiles.yaml");
@@ -463,7 +464,7 @@ fn test_format_sftp_repository_url() {
 #[test]
 fn test_verify_sftp_connection_success_and_failure() {
     use backup::commands::setup::verify_sftp_connection;
-    use backup::runner::executor::{CommandOutput, MockExecutor};
+    use backup::runner::executor::CommandOutput;
 
     let mock_success = MockExecutor::new();
     mock_success.push_output(

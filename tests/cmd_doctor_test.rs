@@ -1,5 +1,6 @@
 use backup::commands::doctor::run_doctor_checks;
-use backup::runner::rclone::MockRcloneRunner;
+mod support;
+use support::MockRcloneRunner;
 
 #[test]
 fn test_doctor_checks() {
@@ -12,8 +13,8 @@ fn test_doctor_checks() {
 
 #[test]
 fn doctor_reports_missing_explicit_temporary_config_path() {
+    use crate::support::MockExecutor;
     use backup::commands::doctor::{DoctorCategory, SystemHealthDiagnoser};
-    use backup::runner::executor::MockExecutor;
 
     let temp = tempfile::tempdir().unwrap();
     let missing_config = temp.path().join("missing/config.yml");
@@ -45,8 +46,9 @@ fn test_doctor_status_enum_and_ntp_check() {
 
 #[test]
 fn test_ntp_sync_with_mock_executor() {
+    use crate::support::MockExecutor;
     use backup::commands::doctor::{DoctorStatus, check_ntp_sync_with_runner};
-    use backup::runner::executor::{CommandOutput, MockExecutor};
+    use backup::runner::executor::CommandOutput;
 
     let mock = MockExecutor::new();
     mock.push_output(

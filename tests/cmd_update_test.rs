@@ -1,4 +1,5 @@
 use backup::commands::update::{is_newer_version, parse_version};
+mod support;
 
 #[test]
 fn test_parse_version() {
@@ -19,8 +20,9 @@ fn test_is_newer_version() {
 
 #[test]
 fn test_execute_update_check_with_mock_runner_already_up_to_date() {
+    use crate::support::MockExecutor;
     use backup::commands::update::execute_update_check_with_runner;
-    use backup::runner::executor::{CommandOutput, MockExecutor};
+    use backup::runner::executor::CommandOutput;
 
     let mock = MockExecutor::new();
     let json_body = r#"{"tag_name":"v0.1.5","assets":[{"name":"backup-v0.1.5-x86_64-unknown-linux-musl.tar.gz","browser_download_url":"https://example.com/asset.tar.gz"}]}"#;
@@ -42,8 +44,9 @@ fn test_execute_update_check_with_mock_runner_already_up_to_date() {
 
 #[test]
 fn update_propagates_release_lookup_failure() {
+    use crate::support::MockExecutor;
     use backup::commands::update::execute_update_check_with_runner;
-    use backup::runner::executor::{CommandOutput, MockExecutor};
+    use backup::runner::executor::CommandOutput;
 
     let mock = MockExecutor::new();
     mock.push_output(

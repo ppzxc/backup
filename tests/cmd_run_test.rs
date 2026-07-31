@@ -2,10 +2,10 @@ use backup::commands::database::execute_database_backup;
 use backup::commands::run::{execute_run, execute_run_profile};
 use backup::commands::status::execute_status;
 use backup::config::model::*;
-use backup::runner::restic::MockResticRunner;
-use backup::runner::resticprofile::MockResticProfileRunner;
+mod support;
 use secrecy::SecretString;
 use std::path::Path;
+use support::{MockResticProfileRunner, MockResticRunner};
 
 #[test]
 fn test_execute_run() {
@@ -116,8 +116,9 @@ fn database_stream_propagates_restic_failure() {
 
 #[test]
 fn test_execute_status_dynamic() {
+    use crate::support::MockExecutor;
     use backup::commands::status::execute_status_with_runner;
-    use backup::runner::executor::{CommandOutput, MockExecutor};
+    use backup::runner::executor::CommandOutput;
 
     let config = BackupConfig {
         version: "1.0".into(),
@@ -175,8 +176,9 @@ fn test_execute_status_dynamic() {
 
 #[test]
 fn test_execute_status_fallback_on_error() {
+    use crate::support::MockExecutor;
     use backup::commands::status::execute_status_with_runner;
-    use backup::runner::executor::{CommandOutput, MockExecutor};
+    use backup::runner::executor::CommandOutput;
 
     let config = BackupConfig {
         version: "1.0".into(),
@@ -223,7 +225,6 @@ fn test_execute_status_fallback_on_error() {
 #[test]
 fn test_execute_status_from_profiles_config() {
     use backup::commands::status::execute_status_from_profiles_config;
-    use backup::runner::resticprofile::MockResticProfileRunner;
     use tempfile::NamedTempFile;
 
     let yaml_content = r#"version: '2'
@@ -254,7 +255,6 @@ profiles:
 #[test]
 fn test_execute_status_from_profiles_config_all_profiles() {
     use backup::commands::status::execute_status_from_profiles_config;
-    use backup::runner::resticprofile::MockResticProfileRunner;
     use tempfile::NamedTempFile;
 
     let yaml_content = r#"version: '2'
@@ -285,7 +285,6 @@ profiles:
 #[test]
 fn test_execute_status_from_profiles_config_no_active_profiles() {
     use backup::commands::status::execute_status_from_profiles_config;
-    use backup::runner::resticprofile::MockResticProfileRunner;
     use tempfile::NamedTempFile;
 
     let yaml_content = r#"version: '2'
@@ -387,7 +386,6 @@ fn test_execute_status() {
 #[test]
 fn test_copy() {
     use backup::commands::copy::execute_copy;
-    use backup::runner::resticprofile::MockResticProfileRunner;
     use std::path::Path;
     let mock = MockResticProfileRunner::new(0, "copy ok");
     let res = execute_copy(

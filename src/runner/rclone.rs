@@ -36,29 +36,3 @@ impl<'a, E: CommandRunner> RcloneRunner for RcloneTool<'a, E> {
         Ok(output.stdout)
     }
 }
-
-pub struct MockRcloneRunner {
-    pub exit_code: i32,
-    pub response: String,
-}
-
-impl MockRcloneRunner {
-    pub fn new(exit_code: i32, response: &str) -> Self {
-        Self {
-            exit_code,
-            response: response.to_string(),
-        }
-    }
-}
-
-impl RcloneRunner for MockRcloneRunner {
-    fn check_connectivity(&self, _remote: &str) -> Result<String> {
-        Ok(self.response.clone())
-    }
-    fn list_remotes(&self) -> Result<String> {
-        Ok(self.response.clone())
-    }
-    fn sync(&self, _source: &str, _target: &str) -> Result<String> {
-        Ok(self.response.clone())
-    }
-}
