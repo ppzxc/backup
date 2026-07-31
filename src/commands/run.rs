@@ -31,13 +31,6 @@ impl<'a, R: ResticProfileRunner> PipelineEngine<'a, R> {
         opts: &PipelineOptions,
     ) -> Result<String> {
         let mut output = String::new();
-        if !opts.skip_database {
-            if opts.dry_run {
-                output.push_str("[Pipeline] [Dry-Run] Executed Database streaming backup check\n");
-            } else {
-                output.push_str("[Pipeline] Executed Database streaming backup check\n");
-            }
-        }
         match self.runner.backup(config_path, profile, opts.dry_run) {
             Ok(profile_res) => output.push_str(&profile_res),
             Err(err) if opts.dry_run => {
@@ -49,20 +42,25 @@ impl<'a, R: ResticProfileRunner> PipelineEngine<'a, R> {
             Err(err) => return Err(err),
         }
 
-        if !opts.skip_secondary_sync {
-            if opts.dry_run {
-                output.push_str("\n[Pipeline] [Dry-Run] Secondary storage sync simulated");
-            } else {
-                output.push_str("\n[Pipeline] Secondary storage sync completed");
-            }
-        }
-        if !opts.skip_retention && !opts.dry_run {
-            let prune_res = self.runner.prune(config_path, profile)?;
-            output.push_str("\n[Pipeline] Retention prune completed: ");
-            output.push_str(&prune_res);
-        }
         Ok(output)
     }
+}
+
+pub fn execute_secondary_copy<R: ResticProfileRunner>(
+    config_path: &Path,
+    profile: &str,
+    dry_run: bool,
+    runner: &R,
+) -> Result<String> {
+    runner.copy(config_path, profile, dry_run)
+}
+
+pub fn execute_retention<R: ResticProfileRunner>(
+    config_path: &Path,
+    profile: &str,
+    runner: &R,
+) -> Result<String> {
+    runner.prune(config_path, profile)
 }
 
 pub fn execute_run<R: ResticRunner>(config: &BackupConfig, runner: &R) -> Result<String> {

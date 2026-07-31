@@ -39,3 +39,22 @@ fn test_execute_update_check_with_mock_runner_already_up_to_date() {
         "최신 버전인 경우 Already up to date 메시지가 반환되어야 합니다"
     );
 }
+
+#[test]
+fn update_propagates_release_lookup_failure() {
+    use backup::commands::update::execute_update_check_with_runner;
+    use backup::runner::executor::{CommandOutput, MockExecutor};
+
+    let mock = MockExecutor::new();
+    mock.push_output(
+        "curl",
+        CommandOutput {
+            status_code: 22,
+            stdout: String::new(),
+            stderr: "network unavailable".into(),
+        },
+    );
+
+    let error = execute_update_check_with_runner("0.1.5", &mock).unwrap_err();
+    assert!(error.to_string().contains("Failed to fetch release info"));
+}

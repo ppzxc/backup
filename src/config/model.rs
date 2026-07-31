@@ -423,9 +423,9 @@ impl Default for BackupConfig {
             },
             storage: StorageConfig {
                 primary: StorageTarget {
-                    backend: "sftp".into(),
-                    repository: "rclone:syno_backup:/backup".into(),
-                    password: SecretString::new("default_secret".into()),
+                    backend: String::new(),
+                    repository: String::new(),
+                    password: SecretString::new(String::new()),
                     sftp: None,
                     s3: None,
                 },

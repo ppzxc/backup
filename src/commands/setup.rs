@@ -765,13 +765,17 @@ impl SetupEngine {
                 profiles_path,
             )?;
         } else {
-            create_default_config_files(
+            if !config_path.is_file() {
+                anyhow::bail!(
+                    "Non-interactive setup requires an existing explicit Backup Environment with real target, repository, and credentials"
+                );
+            }
+            let config = crate::config::model::BackupConfig::load_from_path(config_path)?;
+            config.validate()?;
+            crate::config::registry::ConfigurationRegistry::save_profile_config_to_paths(
+                &config,
                 config_path,
                 profiles_path,
-                "default",
-                DEFAULT_BACKUP_TARGET,
-                "sftp:backup@192.168.1.100:/backup",
-                &generate_secure_password(),
             )?;
         }
 

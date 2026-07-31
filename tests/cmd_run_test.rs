@@ -321,6 +321,14 @@ fn test_execute_run_profile() {
     };
     let result = execute_run_profile(config_path, "self", &opts, &mock_runner).unwrap();
     assert!(result.contains("resticprofile backup complete"));
+    let calls = mock_runner.calls.lock().unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|(call, _)| call.as_str())
+            .collect::<Vec<_>>(),
+        ["backup"]
+    );
 }
 
 #[test]

@@ -56,9 +56,24 @@ impl SystemHealthDiagnoser {
         let timestamp = format!("{:?}", std::time::SystemTime::now());
 
         let target_config =
-            config_path.unwrap_or_else(|| Path::new(crate::config::model::DEFAULT_PROFILES_PATH));
+            config_path.unwrap_or_else(|| Path::new(crate::config::model::DEFAULT_CONFIG_PATH));
 
         let mut items = Vec::new();
+
+        let (restic_status, restic_detail) = match runner.run("restic", &["version"]) {
+            Ok(out) if out.status_code == 0 => (DoctorStatus::Pass, out.stdout.trim().to_string()),
+            Ok(out) => (
+                DoctorStatus::Fail,
+                format!("restic version exited with {}", out.status_code),
+            ),
+            Err(err) => (DoctorStatus::Fail, format!("restic unavailable: {err}")),
+        };
+        items.push(DoctorItem {
+            category: DoctorCategory::System,
+            criterion: "Restic binary".into(),
+            status: restic_status,
+            detail: restic_detail,
+        });
 
         // 1. Dependency & Config Permissions Item
         let (config_status, config_result) = if target_config.exists() {
@@ -67,15 +82,24 @@ impl SystemHealthDiagnoser {
                 use std::os::unix::fs::PermissionsExt;
                 if let Ok(meta) = target_config.metadata() {
                     let mode = meta.permissions().mode() & 0o777;
-                    if mode <= 0o600 {
+                    let parent_safe = target_config.parent().is_some_and(|parent| {
+                        parent
+                            .metadata()
+                            .ok()
+                            .is_some_and(|meta| (meta.permissions().mode() & 0o777) <= 0o700)
+                    });
+                    if mode <= 0o600 && parent_safe {
                         (
                             DoctorStatus::Pass,
-                            format!("0700 / 0600 ({:#o} safe)", mode),
+                            format!("0700 / 0600 ({:#o} file, parent safe)", mode),
                         )
                     } else {
                         (
                             DoctorStatus::Fail,
-                            format!("{:#o} > 0o600 (chmod 600 required)", mode),
+                            format!(
+                                "{:#o} or parent permissions unsafe (chmod 700/600 required)",
+                                mode
+                            ),
                         )
                     }
                 } else {
@@ -149,7 +173,7 @@ impl SystemHealthDiagnoser {
             let target = tempfile::tempdir()?;
             let password_path = password_file.path().to_string_lossy();
             let target_path = target.path().to_string_lossy();
-            runner.run(
+            let output = runner.run(
                 "restic",
                 &[
                     "-r",
@@ -161,22 +185,26 @@ impl SystemHealthDiagnoser {
                     "--target",
                     &target_path,
                 ],
-            )
+            )?;
+            if output.status_code != 0 {
+                anyhow::bail!("restic restore exited with {}", output.status_code);
+            }
+            crate::commands::restore::validate_restored_output(
+                target.path(),
+                matches!(
+                    config.backup.backup_type,
+                    crate::config::model::BackupType::DbStream { .. }
+                ),
+            )?;
+            Ok(())
         })();
         let elapsed = start_time.elapsed().as_secs_f64();
 
-        let (rto_status, rto_detail) = if let Ok(out) = restic_res {
-            if out.status_code == 0 {
-                (
-                    DoctorStatus::Pass,
-                    format!("{:.1}s (Latest snapshot restored and validated)", elapsed),
-                )
-            } else {
-                (
-                    DoctorStatus::Warn,
-                    format!("{:.1}s (restore returned non-zero code)", elapsed),
-                )
-            }
+        let (rto_status, rto_detail) = if restic_res.is_ok() {
+            (
+                DoctorStatus::Pass,
+                format!("{:.1}s (Latest snapshot restored and validated)", elapsed),
+            )
         } else {
             (
                 DoctorStatus::Fail,
@@ -255,7 +283,6 @@ pub fn run_doctor_checks_with_runner<R: RcloneRunner, C: CommandRunner>(
     let snapshot = SystemHealthDiagnoser::diagnose_with_runner(rclone, runner, config_path);
     let mut report = String::new();
     report.push_str("Checking dependencies...\n");
-    report.push_str("Restic binary: OK\n");
 
     for item in &snapshot.items {
         match item.category {
@@ -268,7 +295,14 @@ pub fn run_doctor_checks_with_runner<R: RcloneRunner, C: CommandRunner>(
                 report.push_str(&format!("Rclone connectivity: {}\n", status));
             }
             DoctorCategory::System => {
-                if item.criterion.contains("시각 동기화") {
+                if item.criterion == "Restic binary" {
+                    let status = if item.status == DoctorStatus::Pass {
+                        "OK"
+                    } else {
+                        "FAILED"
+                    };
+                    report.push_str(&format!("Restic binary: {}\n", status));
+                } else if item.criterion.contains("시각 동기화") {
                     let status = if item.status == DoctorStatus::Pass {
                         "OK"
                     } else {

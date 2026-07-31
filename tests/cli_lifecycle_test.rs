@@ -51,7 +51,7 @@ storage:
 }
 
 #[test]
-fn setup_non_interactive_writes_config_and_profiles_to_their_explicit_paths() {
+fn setup_non_interactive_rejects_missing_explicit_configuration() {
     let temp = TempDir::new().unwrap();
     let config = temp.path().join("environment/config.yml");
     let profiles = temp.path().join("profile-data/profiles.yml");
@@ -67,14 +67,13 @@ fn setup_non_interactive_writes_config_and_profiles_to_their_explicit_paths() {
             "--non-interactive",
         ])
         .assert()
-        .success();
+        .failure()
+        .stderr(predicates::str::contains(
+            "requires an existing explicit Backup Environment",
+        ));
 
-    assert!(config.exists(), "setup must honor --config");
-    assert!(profiles.exists(), "setup must honor --profiles");
-    assert!(
-        !config.parent().unwrap().join("profiles.yaml").exists(),
-        "setup must not substitute a config-derived path for --profiles"
-    );
+    assert!(!config.exists());
+    assert!(!profiles.exists());
 }
 
 #[test]

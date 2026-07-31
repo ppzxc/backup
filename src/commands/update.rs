@@ -116,8 +116,13 @@ pub fn perform_self_replace_with_runner<R: CommandRunner>(
     }
 
     // 3. 권한 설정 및 덮어쓰기
-    let new_binary_str = new_binary.to_str().unwrap();
-    let _ = runner.run("chmod", &["+x", new_binary_str]);
+    let new_binary_str = new_binary
+        .to_str()
+        .ok_or_else(|| anyhow!("Extracted binary path is not valid UTF-8"))?;
+    let chmod = runner.run("chmod", &["+x", new_binary_str])?;
+    if chmod.status_code != 0 {
+        return Err(anyhow!("Failed to mark extracted update binary executable"));
+    }
 
     std::fs::rename(&new_binary, &current_exe).or_else(|_| {
         let backup_exe = current_exe.with_extension("old");
@@ -140,31 +145,18 @@ pub fn execute_update_check_with_runner<R: CommandRunner>(
     current_version: &str,
     runner: &R,
 ) -> Result<String> {
-    match fetch_latest_release_info_with_runner(runner) {
-        Ok((latest_tag, download_url)) => {
-            if is_newer_version(current_version, &latest_tag) {
-                if let Err(e) = perform_self_replace_with_runner(&download_url, runner) {
-                    Ok(format!(
-                        "New version {} available at {}, but auto-update failed: {}",
-                        latest_tag, download_url, e
-                    ))
-                } else {
-                    Ok(format!(
-                        "Updating from {} to {}...\nSuccessfully updated backup to version {}!",
-                        current_version, latest_tag, latest_tag
-                    ))
-                }
-            } else {
-                Ok(format!(
-                    "Current version is {}. Already up to date.",
-                    current_version
-                ))
-            }
-        }
-        Err(e) => Ok(format!(
-            "Current version is {}. Failed to check latest release online: {}",
-            current_version, e
-        )),
+    let (latest_tag, download_url) = fetch_latest_release_info_with_runner(runner)?;
+    if is_newer_version(current_version, &latest_tag) {
+        perform_self_replace_with_runner(&download_url, runner)?;
+        Ok(format!(
+            "Updating from {} to {}...\nSuccessfully updated backup to version {}!",
+            current_version, latest_tag, latest_tag
+        ))
+    } else {
+        Ok(format!(
+            "Current version is {}. Already up to date.",
+            current_version
+        ))
     }
 }
 

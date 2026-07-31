@@ -625,8 +625,8 @@ fn render_restore_drill_html(data: &RealReportData) -> String {
       <tr>
         <td>[1차] 원본 크기</td>
         <td>-</td>
-        <td>401.83 MB</td>
-        <td><span class="badge badge-success">정상</span></td>
+        <td>복원 훈련 실행 로그 참조</td>
+        <td><span class="badge badge-warning">측정 로그 확인 필요</span></td>
       </tr>
       <tr>
         <td>[1차] 복구 시간</td>

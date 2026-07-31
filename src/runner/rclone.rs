@@ -20,6 +20,9 @@ impl<'a, E: CommandRunner> RcloneTool<'a, E> {
 impl<'a, E: CommandRunner> RcloneRunner for RcloneTool<'a, E> {
     fn check_connectivity(&self, remote: &str) -> Result<String> {
         let output = self.executor.run("rclone", &["lsd", remote])?;
+        if output.status_code != 0 {
+            anyhow::bail!("rclone connectivity check failed: {}", output.stderr.trim());
+        }
         Ok(output.stdout)
     }
 

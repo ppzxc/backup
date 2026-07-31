@@ -547,6 +547,13 @@ fn execute_restore_drill(config: &crate::config::model::BackupConfig) -> Result<
         "latest",
         target.path().to_string_lossy().as_ref(),
     )?;
+    crate::commands::restore::validate_restored_output(
+        target.path(),
+        matches!(
+            config.backup.backup_type,
+            crate::config::model::BackupType::DbStream { .. }
+        ),
+    )?;
     Ok(())
 }
 

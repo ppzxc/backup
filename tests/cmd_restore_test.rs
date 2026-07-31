@@ -38,18 +38,30 @@ fn test_execute_snapshots() {
 }
 
 #[test]
-fn test_execute_restore() {
+fn restore_rejects_successful_runner_that_produces_no_output() {
     let config = BackupConfig::default();
     let dir = tempfile::tempdir().unwrap();
-    let result = execute_restore(
+    let error = execute_restore(
         &config,
         &MockResticRunner::new(0, "restored"),
         "12345678",
         dir.path().to_str().unwrap(),
         false,
     )
+    .unwrap_err();
+    assert!(error.to_string().contains("no non-empty output"));
+}
+
+#[test]
+fn restore_validation_accepts_nonempty_database_sql_dump() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("nested")).unwrap();
+    std::fs::write(
+        dir.path().join("nested/database.sql"),
+        "-- PostgreSQL database dump\nCREATE TABLE items (id int);",
+    )
     .unwrap();
-    assert_eq!(result, "restored");
+    backup::commands::restore::validate_restored_output(dir.path(), true).unwrap();
 }
 
 #[test]

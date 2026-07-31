@@ -246,12 +246,11 @@ pub fn render_json_real(report_type: ReportType, data: &RealReportData) -> Resul
                     .security_officer
                     .clone()
                     .unwrap_or_else(|| "정보보안책임자".into()),
-                target_snapshot_id:
-                    "58afba4bb29c368bb3a3cb45c18d3da8a1b09709cd19df9aeda1b722eb825ce1".into(),
-                target_snapshot_time: data.timestamp.clone(),
-                target_directory: "/tmp/restore_test".into(),
+                target_snapshot_id: "latest (resolved during restore drill)".into(),
+                target_snapshot_time: "recorded in restore command output".into(),
+                target_directory: "temporary verification directory".into(),
                 recovery_results: RecoveryResultsJson {
-                    data_size_human: "401.69 MB".into(),
+                    data_size_human: "measured restore output (see drill log)".into(),
                     elapsed_seconds: 0,
                     elapsed_human: "실행 로그 참조".into(),
                     target_rto_minutes: 120,
