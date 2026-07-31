@@ -53,6 +53,52 @@ fn test_database_stream_uses_database_adapter() {
 }
 
 #[test]
+fn database_stream_rejects_missing_connection_url() {
+    let mut config = BackupConfig::default();
+    config.backup.backup_type = BackupType::DbStream {
+        db_type: DatabaseType::Postgres,
+        connection_url: None,
+    };
+
+    let error =
+        execute_database_backup(&config, &MockResticRunner::new(0, "unused"), false).unwrap_err();
+
+    assert!(error.to_string().contains("connection URL"));
+}
+
+#[test]
+fn database_stream_rejects_url_without_database_name() {
+    let mut config = BackupConfig::default();
+    config.backup.backup_type = BackupType::DbStream {
+        db_type: DatabaseType::Mysql,
+        connection_url: Some("mysql://root:secret@db:3306/".into()),
+    };
+
+    let error =
+        execute_database_backup(&config, &MockResticRunner::new(0, "unused"), false).unwrap_err();
+
+    assert!(error.to_string().contains("database name"));
+}
+
+#[test]
+fn database_stream_propagates_restic_failure() {
+    let mut config = BackupConfig::default();
+    config.backup.backup_type = BackupType::DbStream {
+        db_type: DatabaseType::Postgres,
+        connection_url: Some("postgres://postgres:secret@db:5432/app".into()),
+    };
+
+    let error = execute_database_backup(
+        &config,
+        &MockResticRunner::new(1, "repository unavailable"),
+        false,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("repository unavailable"));
+}
+
+#[test]
 fn test_execute_status_dynamic() {
     use backup::commands::status::execute_status_with_runner;
     use backup::runner::executor::{CommandOutput, MockExecutor};

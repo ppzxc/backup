@@ -183,11 +183,22 @@ impl MockResticRunner {
             response: response.to_string(),
         }
     }
+
+    fn result(&self) -> Result<String> {
+        if self.exit_code != 0 {
+            anyhow::bail!(
+                "mock restic failed with exit code {}: {}",
+                self.exit_code,
+                self.response
+            );
+        }
+        Ok(self.response.clone())
+    }
 }
 
 impl ResticRunner for MockResticRunner {
     fn init_repo(&self, _repo: &str, _password: &str) -> Result<String> {
-        Ok(self.response.clone())
+        self.result()
     }
     fn backup_paths(
         &self,
@@ -196,16 +207,16 @@ impl ResticRunner for MockResticRunner {
         _targets: &[String],
         _excludes: &[String],
     ) -> Result<String> {
-        Ok(self.response.clone())
+        self.result()
     }
     fn list_snapshots(&self, _repo: &str, _password: &str) -> Result<String> {
-        Ok(self.response.clone())
+        self.result()
     }
     fn restore(&self, _: &str, _: &str, _: &str, _: &str) -> Result<String> {
-        Ok(self.response.clone())
+        self.result()
     }
     fn backup_command(&self, _: &str, _: &str, _: &str, _: &str, _: &[String]) -> Result<String> {
-        Ok(self.response.clone())
+        self.result()
     }
     fn backup_command_with_env(
         &self,
@@ -216,6 +227,6 @@ impl ResticRunner for MockResticRunner {
         _: &[String],
         _: &[(&str, &str)],
     ) -> Result<String> {
-        Ok(self.response.clone())
+        self.result()
     }
 }
