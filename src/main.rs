@@ -361,8 +361,10 @@ fn init_secondary_backend_if_present<
         if let Some(sec_profile) = parsed.profiles.get("secondary") {
             let repo = sec_profile.repository.as_deref().unwrap_or("");
             if repo.starts_with("sftp:") {
-                let backup_config =
-                    backup::config::model::BackupConfig::load_from_path(config_path).ok();
+                let backup_config = backup::config::model::BackupConfig::load_from_path(
+                    std::path::Path::new(backup::config::model::DEFAULT_CONFIG_PATH),
+                )
+                .ok();
                 let sftp_conf = backup_config
                     .as_ref()
                     .and_then(|c| c.storage.secondary.as_ref())

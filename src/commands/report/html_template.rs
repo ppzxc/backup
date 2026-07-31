@@ -595,7 +595,7 @@ fn render_restore_drill_html(data: &RealReportData) -> String {
       <td class="label">대상 OS</td>
       <td>{}</td>
       <td class="label">복원 경로</td>
-      <td>/tmp/restore_test</td>
+      <td>임시 격리 경로</td>
     </tr>
     <tr>
       <td class="label">대상 스냅샷</td>
@@ -631,14 +631,14 @@ fn render_restore_drill_html(data: &RealReportData) -> String {
       <tr>
         <td>[1차] 복구 시간</td>
         <td>RTO 기준 120분 이내 복구</td>
-        <td>3초</td>
-        <td><span class="badge badge-success">만족</span></td>
+        <td>실행 로그 참조</td>
+        <td><span class="badge badge-warning">수동 확인 필요</span></td>
       </tr>
       <tr>
         <td>데이터 정합성 상태</td>
         <td>회원 레코드 및 테이블 조회 성공</td>
-        <td>회원 정보 일치 검증 완료</td>
-        <td><span class="badge badge-success">성공</span></td>
+        <td>DB import를 수행하지 않는 비파괴 훈련</td>
+        <td><span class="badge badge-warning">수동 확인 필요</span></td>
       </tr>
     </tbody>
   </table>

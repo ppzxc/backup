@@ -252,11 +252,11 @@ pub fn render_json_real(report_type: ReportType, data: &RealReportData) -> Resul
                 target_directory: "/tmp/restore_test".into(),
                 recovery_results: RecoveryResultsJson {
                     data_size_human: "401.69 MB".into(),
-                    elapsed_seconds: 4,
-                    elapsed_human: "4초".into(),
+                    elapsed_seconds: 0,
+                    elapsed_human: "실행 로그 참조".into(),
                     target_rto_minutes: 120,
-                    rto_satisfied: true,
-                    data_integrity_verified: true,
+                    rto_satisfied: false,
+                    data_integrity_verified: false,
                     database_verification: serde_json::json!({
                         "db_type": null,
                         "db_snapshot_id": null,

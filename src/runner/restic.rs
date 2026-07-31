@@ -68,7 +68,7 @@ impl<'a, E: CommandRunner> ResticRunner for ResticTool<'a, E> {
             "restic",
             &["-r", repo, "--password-file", &pass_path, "init"],
         )?;
-        Ok(output.stdout)
+        Self::checked(output)
     }
 
     fn backup_paths(
@@ -89,7 +89,7 @@ impl<'a, E: CommandRunner> ResticRunner for ResticTool<'a, E> {
             args.push(e);
         }
         let output = self.executor.run("restic", &args)?;
-        Ok(output.stdout)
+        Self::checked(output)
     }
 
     fn list_snapshots(&self, repo: &str, password: &str) -> Result<String> {
@@ -99,7 +99,7 @@ impl<'a, E: CommandRunner> ResticRunner for ResticTool<'a, E> {
             "restic",
             &["-r", repo, "--password-file", &pass_path, "snapshots"],
         )?;
-        Ok(output.stdout)
+        Self::checked(output)
     }
     fn restore(&self, repo: &str, password: &str, snapshot: &str, target: &str) -> Result<String> {
         let pass_file = create_temp_password_file(password)?;
