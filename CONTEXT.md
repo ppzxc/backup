@@ -46,6 +46,22 @@
 * **설명**: `/etc/backup` 디렉터리(`700`) 및 설정 파일(`600`)의 POSIX 권한을 생성/수정 시 명시적이고 엄격하게 강제하는 도메인 정책.
 * **비고**: 권한 설정 중 오류 발생 시 경고에 그치지 않고 즉시 반환 에러(`Result::Err`)로 처리하여 권한이 보장되지 않은 상태에서의 프로세스 진행을 차단합니다.
 
+### 9. Container E2E Matrix (컨테이너 E2E 매트릭스)
+* **설명**: 격리된 Docker 환경에서 Backup Pipeline과 Database Stream의 실제 저장·복사·복원 결과를 검증하는 테스트 계약.
+* **비고**: 기본 `cargo test`에 포함하며, Docker runner 안에서 필요한 외부 도구와 저장소를 격리해 단일 모듈에서 순차 실행합니다. 스케줄러 검증은 privileged systemd runner에서 수행합니다.
+
+### 10. Test Configuration Override (테스트 설정 경로 오버라이드)
+* **설명**: CLI가 기본 Backup Environment 대신 호출자가 명시한 설정 및 프로필 파일을 사용하는 실행 범위.
+* **비고**: 모든 서브커맨드에서 공통 `--config` 및 `--profiles` 옵션으로 지정합니다.
+
+### 11. Restore Verification (복원 검증)
+* **설명**: BackupEngine이 스냅샷을 지정한 대상에 복원한 뒤, 원본 데이터와 복원 산출물의 무결성을 확인하는 행위.
+* **비고**: Database Stream의 SQL import와 행 검증은 Container E2E Matrix의 검증 단계이며 `backup restore`의 자동 동작이 아닙니다.
+
+### 12. Database E2E Support Matrix (데이터베이스 E2E 지원 매트릭스)
+* **설명**: Database Stream의 실제 백업·복원을 계속 검증하는 프로덕션 데이터베이스 버전 집합.
+* **비고**: MariaDB 12 LTS, MariaDB 5.5.56, PostgreSQL 16으로 고정합니다.
+
 
 ## CLI 서브커맨드 구조 명세 (Command Architecture Spec)
 
