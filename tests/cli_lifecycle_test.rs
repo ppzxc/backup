@@ -2,36 +2,31 @@ use assert_cmd::Command;
 use std::fs;
 use tempfile::TempDir;
 
-#[test]
-fn cli_lifecycle_contract_uses_explicit_temporary_paths() {
-    let temp = TempDir::new().unwrap();
-    let config = temp.path().join("config.yml");
-    let profiles = temp.path().join("profiles.yml");
-    fs::write(
-        &config,
-        r#"version: "1.0"
-profile: "test"
-backup:
-  backup_type: directory
-  targets: ["/tmp"]
-  excludes: []
-retention: { keep_daily: 1, keep_weekly: 1, keep_monthly: 1 }
-storage:
-  primary: { backend: "local", repository: "/tmp/repo", password: "test-password" }
-"#,
+fn unified_profiles_yaml(application: &str, profile: &str) -> String {
+    format!(
+        "version: '2'\napplication:\n{application}\nprofiles:\n  {profile}:\n    repository: /tmp/repo\n    password: test-password\n    backup: {{source: ['/tmp']}}\n"
     )
-    .unwrap();
+}
+
+#[test]
+fn cli_lifecycle_contract_uses_one_explicit_profiles_path() {
+    let temp = TempDir::new().unwrap();
+    let profiles = temp.path().join("profiles.yaml");
     fs::write(
         &profiles,
-        "version: '2'\nprofiles:\n  test:\n    repository: /tmp/repo\n",
+        unified_profiles_yaml(
+            &format!(
+                "  version: '1.0'\n  profile: test\n  backup: {{backup_type: directory, targets: ['/tmp'], excludes: []}}\n  retention: {{keep_daily: 1, keep_weekly: 1, keep_monthly: 1}}\n  storage: {{primary: {{backend: local, repository: /tmp/repo, password: test-password}}}}\n  reports: {{outputDir: '{}', enableDailyReports: true, enableAnnualDrDrillReport: false}}",
+                temp.path().join("reports").display()
+            ),
+            "test",
+        ),
     )
     .unwrap();
 
-    let run_assert = Command::cargo_bin("backup")
+    Command::cargo_bin("backup")
         .unwrap()
         .args([
-            "--config",
-            config.to_str().unwrap(),
             "--profiles",
             profiles.to_str().unwrap(),
             "run",
@@ -40,27 +35,22 @@ storage:
         ])
         .assert()
         .success();
-    let run_stdout = String::from_utf8(run_assert.get_output().stdout.clone()).unwrap();
-    assert!(!run_stdout.contains("Database streaming backup check"));
 
     Command::cargo_bin("backup")
         .unwrap()
-        .args(["--config", config.to_str().unwrap(), "version"])
+        .arg("version")
         .assert()
         .success();
 }
 
 #[test]
-fn setup_non_interactive_rejects_missing_explicit_configuration() {
+fn setup_non_interactive_rejects_missing_profiles_file() {
     let temp = TempDir::new().unwrap();
-    let config = temp.path().join("environment/config.yml");
-    let profiles = temp.path().join("profile-data/profiles.yml");
+    let profiles = temp.path().join("profile-data/profiles.yaml");
 
     Command::cargo_bin("backup")
         .unwrap()
         .args([
-            "--config",
-            config.to_str().unwrap(),
             "--profiles",
             profiles.to_str().unwrap(),
             "setup",
@@ -69,62 +59,43 @@ fn setup_non_interactive_rejects_missing_explicit_configuration() {
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "requires an existing explicit Backup Environment",
+            "requires an existing unified profiles.yaml",
         ));
 
-    assert!(!config.exists());
     assert!(!profiles.exists());
 }
 
 #[test]
 fn copy_propagates_backend_failure() {
     let temp = TempDir::new().unwrap();
-    let config = temp.path().join("config.yml");
-    let profiles = temp.path().join("profiles.yml");
-    fs::write(&config, "version: '1.0'\nprofile: test\n").unwrap();
+    let profiles = temp.path().join("profiles.yaml");
     fs::write(&profiles, "not valid: [profiles").unwrap();
 
     Command::cargo_bin("backup")
         .unwrap()
-        .args([
-            "--config",
-            config.to_str().unwrap(),
-            "--profiles",
-            profiles.to_str().unwrap(),
-            "copy",
-        ])
+        .args(["--profiles", profiles.to_str().unwrap(), "copy"])
         .assert()
         .failure();
 }
 
 #[test]
-fn database_dry_run_accepts_database_stream_configuration() {
+fn database_dry_run_accepts_unified_database_configuration() {
     let temp = TempDir::new().unwrap();
-    let config = temp.path().join("database.yml");
+    let profiles = temp.path().join("profiles.yaml");
     fs::write(
-        &config,
-        r#"version: '1.0'
-profile: database
-backup:
-  backupType: !dbStream
-    db_type: postgres
-    connection_url: postgres://postgres:secret@db:5432/app
-  targets: []
-  excludes: []
-retention: {keepDaily: 1, keepWeekly: 1, keepMonthly: 1}
-storage:
-  primary: {backend: s3, repository: 's3:http://minio:9000/database', password: test-password}
-"#,
+        &profiles,
+        unified_profiles_yaml(
+            "  version: '1.0'\n  profile: database\n  backup:\n    backupType: !dbStream\n      db_type: postgres\n      connection_url: postgres://postgres:secret@db:5432/app\n    targets: []\n    excludes: []\n  retention: {keepDaily: 1, keepWeekly: 1, keepMonthly: 1}\n  storage: {primary: {backend: s3, repository: 's3:http://minio:9000/database', password: test-password}}",
+            "database",
+        ),
     )
     .unwrap();
-    let parsed = backup::config::model::BackupConfig::load_from_path(&config);
-    assert!(parsed.is_ok(), "configuration must parse: {parsed:?}");
 
     Command::cargo_bin("backup")
         .unwrap()
         .args([
-            "--config",
-            config.to_str().unwrap(),
+            "--profiles",
+            profiles.to_str().unwrap(),
             "database",
             "--dry-run",
         ])

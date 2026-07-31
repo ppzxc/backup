@@ -8,6 +8,69 @@ use std::path::Path;
 use support::{MockResticProfileRunner, MockResticRunner};
 
 #[test]
+fn execution_reports_capture_failures_without_exposing_storage_passwords() {
+    use backup::commands::run::{ExecutionReport, write_execution_report};
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = BackupConfig::default();
+    config.storage.primary.password = SecretString::new("top-secret-password".into());
+    config.reports.output_dir = directory.path().to_string_lossy().into_owned();
+    let report = ExecutionReport::failure(
+        "default",
+        "secondary-sync",
+        "copy failed: top-secret-password",
+    );
+
+    let path = write_execution_report(&config, report).unwrap();
+    let contents = std::fs::read_to_string(path).unwrap();
+    assert!(contents.contains("secondary-sync"));
+    assert!(contents.contains("******"));
+    assert!(!contents.contains("top-secret-password"));
+}
+
+#[test]
+fn execution_reports_mask_s3_and_database_credentials() {
+    use backup::commands::run::{ExecutionReport, write_execution_report};
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = BackupConfig::default();
+    config.reports.output_dir = directory.path().to_string_lossy().into_owned();
+    config.storage.primary.s3 = Some(S3Config {
+        endpoint: "https://s3.example".into(),
+        access_key_id: SecretString::new("access-key".into()),
+        secret_access_key: SecretString::new("s3-secret".into()),
+    });
+    config.backup.backup_type = BackupType::DbStream {
+        db_type: DatabaseType::Postgres,
+        connection_url: Some("postgres://user:db-secret@host/db".into()),
+    };
+    let path = write_execution_report(
+        &config,
+        ExecutionReport::failure(
+            "default",
+            "database",
+            "access-key s3-secret postgres://user:db-secret@host/db",
+        ),
+    )
+    .unwrap();
+    let contents = std::fs::read_to_string(path).unwrap();
+    for secret in [
+        "access-key",
+        "s3-secret",
+        "postgres://user:db-secret@host/db",
+    ] {
+        assert!(!contents.contains(secret));
+    }
+}
+
+#[test]
+fn execution_reports_record_the_primary_snapshot_id() {
+    use backup::commands::run::ExecutionReport;
+
+    let report = ExecutionReport::success("default", "snapshot abc123 saved\n".into(), None, None);
+
+    assert_eq!(report.snapshot_id.as_deref(), Some("abc123"));
+}
+
+#[test]
 fn test_execute_run() {
     let mock_runner = MockResticRunner::new(0, "backup complete");
     let config = BackupConfig {

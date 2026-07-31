@@ -1,5 +1,6 @@
 use crate::runner::executor::{CommandOutput, CommandRunner};
 use anyhow::Result;
+use secrecy::ExposeSecret;
 use std::path::Path;
 
 pub trait ResticProfileRunner {
@@ -40,6 +41,57 @@ impl<'a, E: CommandRunner> ResticProfileTool<'a, E> {
         }
         Ok(output.stdout)
     }
+
+    fn run_profile_command(
+        &self,
+        config_path: &Path,
+        profile: &str,
+        args: &[&str],
+    ) -> Result<CommandOutput> {
+        let config = crate::config::model::BackupConfig::load_from_path(config_path).ok();
+        let storage = config.as_ref().and_then(|config| {
+            if profile == "secondary" {
+                config
+                    .storage
+                    .secondary
+                    .as_ref()
+                    .filter(|storage| storage.enabled)
+                    .map(|storage| (storage.s3.as_ref(), storage.password.expose_secret()))
+            } else {
+                Some((
+                    config.storage.primary.s3.as_ref(),
+                    config.storage.primary.password.expose_secret(),
+                ))
+            }
+        });
+        let mut env: Vec<(&str, &str)> = Vec::new();
+        if let Some((Some(s3), _)) = storage {
+            env.push(("AWS_ACCESS_KEY_ID", s3.access_key_id.expose_secret()));
+            env.push((
+                "AWS_SECRET_ACCESS_KEY",
+                s3.secret_access_key.expose_secret(),
+            ));
+            env.push((
+                "BACKUP_PRIMARY_AWS_ACCESS_KEY_ID",
+                s3.access_key_id.expose_secret(),
+            ));
+            env.push((
+                "BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY",
+                s3.secret_access_key.expose_secret(),
+            ));
+            if profile == "secondary" {
+                env.push((
+                    "BACKUP_SECONDARY_AWS_ACCESS_KEY_ID",
+                    s3.access_key_id.expose_secret(),
+                ));
+                env.push((
+                    "BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY",
+                    s3.secret_access_key.expose_secret(),
+                ));
+            }
+        }
+        self.executor.run_with_env("resticprofile", args, &env)
+    }
 }
 
 impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {
@@ -50,14 +102,15 @@ impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {
             args.push("--dry-run");
         }
         args.push("backup");
-        let output = self.executor.run("resticprofile", &args)?;
+        let output = self.run_profile_command(config_path, profile, &args)?;
         self.check_output(output)
     }
 
     fn init(&self, config_path: &Path, profile: &str) -> Result<String> {
         let config_str = config_path.to_string_lossy();
-        let output = self.executor.run(
-            "resticprofile",
+        let output = self.run_profile_command(
+            config_path,
+            profile,
             &["--config", &config_str, "--name", profile, "init"],
         )?;
         self.check_output(output)
@@ -92,8 +145,9 @@ impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {
 
     fn list_snapshots(&self, config_path: &Path, profile: &str) -> Result<String> {
         let config_str = config_path.to_string_lossy();
-        let output = self.executor.run(
-            "resticprofile",
+        let output = self.run_profile_command(
+            config_path,
+            profile,
             &["--config", &config_str, "--name", profile, "snapshots"],
         )?;
         self.check_output(output)
@@ -101,8 +155,9 @@ impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {
 
     fn prune(&self, config_path: &Path, profile: &str) -> Result<String> {
         let config_str = config_path.to_string_lossy();
-        let output = self.executor.run(
-            "resticprofile",
+        let output = self.run_profile_command(
+            config_path,
+            profile,
             &["--config", &config_str, "--name", profile, "prune"],
         )?;
         self.check_output(output)
@@ -110,8 +165,9 @@ impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {
 
     fn check(&self, config_path: &Path, profile: &str) -> Result<String> {
         let config_str = config_path.to_string_lossy();
-        let output = self.executor.run(
-            "resticprofile",
+        let output = self.run_profile_command(
+            config_path,
+            profile,
             &["--config", &config_str, "--name", profile, "check"],
         )?;
         self.check_output(output)
@@ -124,7 +180,7 @@ impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {
             args.push("--dry-run");
         }
         args.push("copy");
-        let output = self.executor.run("resticprofile", &args)?;
+        let output = self.run_profile_command(config_path, profile, &args)?;
         self.check_output(output)
     }
 }

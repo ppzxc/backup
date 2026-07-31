@@ -6,8 +6,8 @@ use std::path::Path;
 
 pub const DEFAULT_PROFILES_FILENAME: &str = "profiles.yaml";
 pub const DEFAULT_PROFILES_PATH: &str = "/etc/backup/profiles.yaml";
-pub const DEFAULT_CONFIG_FILENAME: &str = "config.yml";
-pub const DEFAULT_CONFIG_PATH: &str = "/etc/backup/config.yml";
+
+const APPLICATION_SECRET_PREFIX: &str = "${BACKUP_";
 
 fn serialize_secret_string<S>(secret: &SecretString, serializer: S) -> Result<S::Ok, S::Error>
 where
@@ -118,10 +118,15 @@ impl BackupConfig {
         let mut masked = self.clone();
         masked.storage.primary.password = SecretString::new("******".into());
         if let Some(ref mut s3) = masked.storage.primary.s3 {
+            s3.access_key_id = SecretString::new("******".into());
             s3.secret_access_key = SecretString::new("******".into());
         }
         if let Some(ref mut sec) = masked.storage.secondary {
             sec.password = SecretString::new("******".into());
+            if let Some(s3) = sec.s3.as_mut() {
+                s3.access_key_id = SecretString::new("******".into());
+                s3.secret_access_key = SecretString::new("******".into());
+            }
         }
         if let BackupType::DbStream {
             connection_url: Some(url),
@@ -179,28 +184,21 @@ impl BackupConfig {
     }
 
     pub fn save_and_sync(&self, config_dir: &Path) -> Result<()> {
-        self.save_and_sync_to_paths(
-            &config_dir.join(DEFAULT_CONFIG_FILENAME),
-            &config_dir.join(DEFAULT_PROFILES_FILENAME),
-        )
+        self.save_to_profiles_path(&config_dir.join(DEFAULT_PROFILES_FILENAME))
     }
 
-    pub fn save_and_sync_to_paths(
-        &self,
-        config_path: &Path,
-        profiles_yaml_path: &Path,
-    ) -> Result<()> {
+    pub fn save_to_profiles_path(&self, profiles_yaml_path: &Path) -> Result<()> {
         self.validate()?;
-        let config_dir = config_path.parent().unwrap_or(Path::new("."));
+        let config_dir = profiles_yaml_path.parent().unwrap_or(Path::new("."));
         if !config_dir.exists() {
             create_secure_dir(config_dir)?;
         }
-        save_secure_file(config_path, &serde_yaml::to_string(self)?)?;
 
         let mut restic_config = if profiles_yaml_path.exists() {
             ResticProfileConfig::load_from_path(profiles_yaml_path).unwrap_or_else(|_| {
                 ResticProfileConfig {
                     version: "2".into(),
+                    application: None,
                     audit: None,
                     global: None,
                     groups: None,
@@ -210,6 +208,7 @@ impl BackupConfig {
         } else {
             ResticProfileConfig {
                 version: "2".into(),
+                application: None,
                 audit: None,
                 global: None,
                 groups: None,
@@ -219,6 +218,8 @@ impl BackupConfig {
 
         restic_config.version = "2".into();
         restic_config.audit = Some(self.audit.clone());
+        restic_config.application =
+            Some(self.application_config_with_secret_references(config_dir)?);
 
         // 1. Populate default profile (truly global options only)
         let mut default_profile = restic_config.profiles.remove("default").unwrap_or_default();
@@ -239,17 +240,16 @@ impl BackupConfig {
         primary_profile.repository = Some(self.storage.primary.repository.clone());
         primary_profile.password_file = Some(self.profile_password_file(config_dir, false)?);
         primary_profile.password = None;
-        if self.storage.primary.s3.is_some() {
-            let mut env_map = primary_profile.env.unwrap_or_default();
-            env_map.insert(
-                "AWS_ACCESS_KEY_ID".into(),
-                "${BACKUP_PRIMARY_AWS_ACCESS_KEY_ID}".into(),
-            );
-            env_map.insert(
-                "AWS_SECRET_ACCESS_KEY".into(),
-                "${BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY}".into(),
-            );
-            primary_profile.env = Some(env_map);
+        if let Some(env) = primary_profile.env.as_mut() {
+            env.remove("AWS_ACCESS_KEY_ID");
+            env.remove("AWS_SECRET_ACCESS_KEY");
+        }
+        if primary_profile
+            .env
+            .as_ref()
+            .is_some_and(|env| env.is_empty())
+        {
+            primary_profile.env = None;
         }
         if let Some(ref sftp) = self.storage.primary.sftp {
             if let Some(sftp_cmd) = sftp.sftp_command() {
@@ -277,17 +277,16 @@ impl BackupConfig {
                 secondary_profile.password_file =
                     Some(self.profile_password_file(config_dir, true)?);
                 secondary_profile.password = None;
-                if sec.s3.is_some() {
-                    let mut env_map = secondary_profile.env.unwrap_or_default();
-                    env_map.insert(
-                        "AWS_ACCESS_KEY_ID".into(),
-                        "${BACKUP_SECONDARY_AWS_ACCESS_KEY_ID}".into(),
-                    );
-                    env_map.insert(
-                        "AWS_SECRET_ACCESS_KEY".into(),
-                        "${BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY}".into(),
-                    );
-                    secondary_profile.env = Some(env_map);
+                if let Some(env) = secondary_profile.env.as_mut() {
+                    env.remove("AWS_ACCESS_KEY_ID");
+                    env.remove("AWS_SECRET_ACCESS_KEY");
+                }
+                if secondary_profile
+                    .env
+                    .as_ref()
+                    .is_some_and(|env| env.is_empty())
+                {
+                    secondary_profile.env = None;
                 }
                 if let Some(ref sftp) = sec.sftp {
                     if let Some(sftp_cmd) = sftp.sftp_command() {
@@ -331,7 +330,7 @@ impl BackupConfig {
                     Some(self.backup.excludes.clone())
                 },
                 tag: Some(vec![self.profile.clone()]),
-                schedule: Some("*-*-* 03:00:00".into()),
+                schedule: None,
                 schedule_permission: None,
                 schedule_priority: None,
                 schedule_ignore_on_battery_less_than: None,
@@ -388,8 +387,123 @@ impl BackupConfig {
 
     pub fn load_from_path(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)?;
-        let config: Self = serde_yaml::from_str(&content)?;
-        Ok(config)
+        let profiles: ResticProfileConfig = serde_yaml::from_str(&content)?;
+        let config = profiles.application.ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} is missing its application configuration section",
+                path.display()
+            )
+        })?;
+        config.resolve_application_secret_references(path.parent().unwrap_or(Path::new(".")))
+    }
+
+    fn application_config_with_secret_references(&self, config_dir: &Path) -> Result<Self> {
+        let mut application = self.clone();
+        application.storage.primary.password =
+            SecretString::new("${BACKUP_PRIMARY_PASSWORD}".into());
+        if let Some(s3) = application.storage.primary.s3.as_mut() {
+            save_secure_file(
+                &config_dir.join("primary-aws-access-key-id"),
+                s3.access_key_id.expose_secret(),
+            )?;
+            save_secure_file(
+                &config_dir.join("primary-aws-secret-access-key"),
+                s3.secret_access_key.expose_secret(),
+            )?;
+            s3.access_key_id = SecretString::new("${BACKUP_PRIMARY_AWS_ACCESS_KEY_ID}".into());
+            s3.secret_access_key =
+                SecretString::new("${BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY}".into());
+        }
+        if let Some(secondary) = application.storage.secondary.as_mut() {
+            secondary.password = SecretString::new("${BACKUP_SECONDARY_PASSWORD}".into());
+            if let Some(s3) = secondary.s3.as_mut() {
+                save_secure_file(
+                    &config_dir.join("secondary-aws-access-key-id"),
+                    s3.access_key_id.expose_secret(),
+                )?;
+                save_secure_file(
+                    &config_dir.join("secondary-aws-secret-access-key"),
+                    s3.secret_access_key.expose_secret(),
+                )?;
+                s3.access_key_id =
+                    SecretString::new("${BACKUP_SECONDARY_AWS_ACCESS_KEY_ID}".into());
+                s3.secret_access_key =
+                    SecretString::new("${BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY}".into());
+            }
+        }
+        if let BackupType::DbStream {
+            connection_url: Some(connection_url),
+            ..
+        } = &mut application.backup.backup_type
+        {
+            save_secure_file(&config_dir.join("database-connection-url"), connection_url)?;
+            *connection_url = "${BACKUP_DATABASE_CONNECTION_URL}".into();
+        }
+        Ok(application)
+    }
+
+    fn resolve_application_secret_references(mut self, config_dir: &Path) -> Result<Self> {
+        fn read_secret(config_dir: &Path, marker: &str, filename: &str) -> Result<String> {
+            if marker.starts_with(APPLICATION_SECRET_PREFIX) {
+                let path = config_dir.join(filename);
+                if path.is_file() {
+                    return Ok(fs::read_to_string(path)?);
+                }
+                let legacy_enc = config_dir.join("enc");
+                if (filename == "primary-password" || filename == "secondary-password")
+                    && legacy_enc.is_file()
+                {
+                    return Ok(fs::read_to_string(legacy_enc)?);
+                }
+                anyhow::bail!("Missing secret file for application setting {marker}");
+            }
+            Ok(marker.to_owned())
+        }
+
+        self.storage.primary.password = SecretString::new(read_secret(
+            config_dir,
+            self.storage.primary.password.expose_secret(),
+            "primary-password",
+        )?);
+        if let Some(s3) = self.storage.primary.s3.as_mut() {
+            s3.access_key_id = SecretString::new(read_secret(
+                config_dir,
+                s3.access_key_id.expose_secret(),
+                "primary-aws-access-key-id",
+            )?);
+            s3.secret_access_key = SecretString::new(read_secret(
+                config_dir,
+                s3.secret_access_key.expose_secret(),
+                "primary-aws-secret-access-key",
+            )?);
+        }
+        if let Some(secondary) = self.storage.secondary.as_mut() {
+            secondary.password = SecretString::new(read_secret(
+                config_dir,
+                secondary.password.expose_secret(),
+                "secondary-password",
+            )?);
+            if let Some(s3) = secondary.s3.as_mut() {
+                s3.access_key_id = SecretString::new(read_secret(
+                    config_dir,
+                    s3.access_key_id.expose_secret(),
+                    "secondary-aws-access-key-id",
+                )?);
+                s3.secret_access_key = SecretString::new(read_secret(
+                    config_dir,
+                    s3.secret_access_key.expose_secret(),
+                    "secondary-aws-secret-access-key",
+                )?);
+            }
+        }
+        if let BackupType::DbStream {
+            connection_url: Some(connection_url),
+            ..
+        } = &mut self.backup.backup_type
+        {
+            *connection_url = read_secret(config_dir, connection_url, "database-connection-url")?;
+        }
+        Ok(self)
     }
 
     pub fn render(&self, format: &str, redacted: bool) -> Result<String> {
@@ -575,7 +689,8 @@ impl SftpConfig {
 #[serde(rename_all = "camelCase")]
 pub struct S3Config {
     pub endpoint: String,
-    pub access_key_id: String,
+    #[serde(serialize_with = "serialize_secret_string")]
+    pub access_key_id: SecretString,
     #[serde(serialize_with = "serialize_secret_string")]
     pub secret_access_key: SecretString,
 }
@@ -599,9 +714,13 @@ impl AuditConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResticProfileConfig {
     pub version: String,
+    /// Application-owned settings intentionally use a dedicated namespace so they
+    /// do not collide with resticprofile v2's top-level keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application: Option<BackupConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<AuditConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -328,7 +328,7 @@ impl CliHelp {
             },
             Language::En => Self {
                 about: "Backup CLI — restic/rclone based backup automation tool",
-                cmd_setup: "Backup environment and profile setup wizard",
+                cmd_setup: "Unified backup configuration setup wizard",
                 cmd_copy: "Sync snapshots from primary to secondary storage target",
                 cmd_run: "Execute backup pipeline manually",
                 cmd_doctor: "Comprehensive system settings, dependencies, and health check diagnostics",
@@ -350,7 +350,7 @@ impl CliHelp {
                 opt_run_skip_secondary_sync: "Skip the secondary storage sync step",
                 opt_run_skip_retention: "Skip the retention policy enforcement step",
                 opt_run_dry_run: "Simulate the pipeline without executing",
-                cmd_report_environment: "Generate backup environment directory/file permissions and secret masking report",
+                cmd_report_environment: "Generate unified profiles configuration permissions and secret masking report",
                 cmd_report_time_sync: "Generate NTP/Chrony time synchronization status report",
                 cmd_report_restore_drill: "Execute restore drill, measure RTO, and check database header integrity report",
                 opt_report_file: "File path to export report results",

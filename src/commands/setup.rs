@@ -1,7 +1,7 @@
 use crate::config::model::*;
 use crate::i18n::{I18nMessages, Language};
 use anyhow::Result;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
 
 #[derive(Clone)]
@@ -232,7 +232,7 @@ impl SetupPrompter for InquirePrompter {
 
                     let s3_conf = S3Config {
                         endpoint,
-                        access_key_id,
+                        access_key_id: SecretString::new(access_key_id),
                         secret_access_key: SecretString::new(secret_access_key_str),
                     };
                     (repo_uri, None, Some(s3_conf))
@@ -341,7 +341,7 @@ impl SetupPrompter for InquirePrompter {
 
                         let s3_conf = S3Config {
                             endpoint,
-                            access_key_id,
+                            access_key_id: SecretString::new(access_key_id),
                             secret_access_key: SecretString::new(secret_access_key_str),
                         };
                         (repo_uri, String::new(), None, Some(s3_conf))
@@ -367,7 +367,14 @@ impl SetupPrompter for InquirePrompter {
                     enabled: true,
                     backend: sec_backend.to_string(),
                     repository: sec_repo,
-                    password: SecretString::new(sec_pass),
+                    // The detailed S3/SFTP flows authenticate storage access separately
+                    // and do not prompt for a second repository password. Restic copy
+                    // requires both repositories to use the same key in that case.
+                    password: SecretString::new(if sec_pass.is_empty() {
+                        primary.password.expose_secret().to_owned()
+                    } else {
+                        sec_pass
+                    }),
                     sftp: sec_sftp,
                     s3: sec_s3,
                 })
@@ -436,30 +443,18 @@ impl SetupPrompter for InquirePrompter {
     }
 }
 
-pub fn create_default_config_file(
-    path: &Path,
-    profile: &str,
-    target: &str,
-    repo: &str,
-    pwd: &str,
-) -> Result<()> {
-    let config = default_config(profile, target, repo, pwd);
-    let config_dir = path.parent().unwrap_or(path);
-    config.save_and_sync(config_dir)
-}
-
-pub fn create_default_config_files(
-    config_path: &Path,
+pub fn create_default_profiles_file(
     profiles_path: &Path,
     profile: &str,
     target: &str,
     repo: &str,
     pwd: &str,
 ) -> Result<()> {
-    default_config(profile, target, repo, pwd).save_and_sync_to_paths(config_path, profiles_path)
+    let config = default_application_config(profile, target, repo, pwd);
+    config.save_to_profiles_path(profiles_path)
 }
 
-fn default_config(profile: &str, target: &str, repo: &str, pwd: &str) -> BackupConfig {
+fn default_application_config(profile: &str, target: &str, repo: &str, pwd: &str) -> BackupConfig {
     BackupConfig {
         version: "1.0".into(),
         profile: profile.into(),
@@ -731,22 +726,26 @@ impl SetupEngine {
         })
     }
 
-    pub fn run<P: SetupPrompter, R: crate::runner::resticprofile::ResticProfileRunner>(
-        config_path: &Path,
+    pub fn run<
+        P: SetupPrompter,
+        R: crate::runner::resticprofile::ResticProfileRunner,
+        S: crate::runner::scheduler::BackupScheduler,
+    >(
         profiles_path: &Path,
         prompter: &P,
         non_interactive: bool,
         lang_opt: Option<Language>,
-        _runner: &R,
+        runner: &R,
+        scheduler: &S,
     ) -> Result<()> {
-        let config_dir = if let Some(parent) = config_path.parent() {
+        let config_dir = if let Some(parent) = profiles_path.parent() {
             if parent.as_os_str().is_empty() {
                 Path::new(".")
             } else {
                 parent
             }
         } else {
-            config_path
+            profiles_path
         };
 
         crate::config::model::create_secure_dir(config_dir)?;
@@ -756,92 +755,154 @@ impl SetupEngine {
             std::fs::set_permissions(config_dir, std::fs::Permissions::from_mode(0o700))?;
         }
 
-        if !non_interactive {
+        let config = if !non_interactive {
             let params = prompter.prompt_setup_params(lang_opt, config_dir, profiles_path)?;
-            let config = Self::validate_and_build(params)?;
-            crate::config::registry::ConfigurationRegistry::save_profile_config_to_paths(
-                &config,
-                config_path,
-                profiles_path,
-            )?;
+            Self::validate_and_build(params)?
         } else {
-            if !config_path.is_file() {
+            if !profiles_path.is_file() {
                 anyhow::bail!(
-                    "Non-interactive setup requires an existing explicit Backup Environment with real target, repository, and credentials"
+                    "Non-interactive setup requires an existing unified profiles.yaml with real target, repository, and credentials"
                 );
             }
-            let config = crate::config::model::BackupConfig::load_from_path(config_path)?;
+            let config = crate::config::model::BackupConfig::load_from_path(profiles_path)?;
             config.validate()?;
-            crate::config::registry::ConfigurationRegistry::save_profile_config_to_paths(
+            config
+        };
+
+        std::fs::create_dir_all(&config.reports.output_dir)?;
+        let staged_dir = tempfile::Builder::new()
+            .prefix(".setup-")
+            .tempdir_in(config_dir)?;
+        let staged_profiles = staged_dir
+            .path()
+            .join(crate::config::model::DEFAULT_PROFILES_FILENAME);
+        config.save_to_profiles_path(&staged_profiles)?;
+        configure_backend_environment(&config);
+        let staged = crate::config::model::ResticProfileConfig::load_from_path(&staged_profiles)?;
+        for name in staged.profile_names() {
+            runner.init(&staged_profiles, &name)?;
+        }
+        if config
+            .storage
+            .secondary
+            .as_ref()
+            .is_some_and(|storage| storage.enabled)
+        {
+            runner.init(&staged_profiles, "secondary")?;
+        }
+        let previous = LiveConfigSnapshot::capture(profiles_path)?;
+        if let Err(error) =
+            crate::config::registry::ConfigurationRegistry::save_profile_config_to_path(
                 &config,
-                config_path,
                 profiles_path,
-            )?;
+            )
+        {
+            previous.restore()?;
+            return Err(error);
+        }
+        if let Err(error) = scheduler.enable(profiles_path) {
+            previous.restore()?;
+            let _ = scheduler.enable(profiles_path);
+            return Err(error);
         }
 
         Ok(())
     }
 }
 
-pub fn run_setup_with_prompter_and_runner<
-    P: SetupPrompter,
-    R: crate::runner::resticprofile::ResticProfileRunner,
->(
-    config_path: &Path,
-    prompter: &P,
-    non_interactive: bool,
-    lang_opt: Option<Language>,
-    runner: &R,
-) -> Result<()> {
-    let profiles_path = config_path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join(crate::config::model::DEFAULT_PROFILES_FILENAME);
-    run_setup_with_prompter_and_runner_at_paths(
-        config_path,
-        &profiles_path,
-        prompter,
-        non_interactive,
-        lang_opt,
-        runner,
-    )
+pub fn configure_backend_environment(config: &BackupConfig) {
+    let set_s3_environment = |prefix: &str, s3: Option<&S3Config>| {
+        if let Some(s3) = s3 {
+            // Setup runs in a single CLI process before launching resticprofile.
+            unsafe {
+                std::env::set_var(
+                    format!("{prefix}_AWS_ACCESS_KEY_ID"),
+                    secrecy::ExposeSecret::expose_secret(&s3.access_key_id),
+                );
+                std::env::set_var(
+                    format!("{prefix}_AWS_SECRET_ACCESS_KEY"),
+                    secrecy::ExposeSecret::expose_secret(&s3.secret_access_key),
+                );
+            }
+        }
+    };
+    set_s3_environment("BACKUP_PRIMARY", config.storage.primary.s3.as_ref());
+    if let Some(secondary) = &config.storage.secondary {
+        set_s3_environment("BACKUP_SECONDARY", secondary.s3.as_ref());
+    }
 }
 
-pub fn run_setup_with_prompter_and_runner_at_paths<
+const APPLICATION_SECRET_FILENAMES: [&str; 6] = [
+    "primary-password",
+    "secondary-password",
+    "primary-aws-access-key-id",
+    "primary-aws-secret-access-key",
+    "secondary-aws-access-key-id",
+    "secondary-aws-secret-access-key",
+];
+
+struct LiveConfigSnapshot {
+    files: Vec<(std::path::PathBuf, Option<Vec<u8>>)>,
+}
+
+impl LiveConfigSnapshot {
+    fn capture(profiles_path: &Path) -> Result<Self> {
+        let config_dir = profiles_path.parent().unwrap_or_else(|| Path::new("."));
+        let mut paths = vec![
+            profiles_path.to_path_buf(),
+            config_dir.join("database-connection-url"),
+        ];
+        paths.extend(APPLICATION_SECRET_FILENAMES.map(|filename| config_dir.join(filename)));
+        let files = paths
+            .into_iter()
+            .map(|path| {
+                Ok((
+                    path.clone(),
+                    path.is_file().then(|| std::fs::read(&path)).transpose()?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { files })
+    }
+
+    fn restore(&self) -> Result<()> {
+        for (path, content) in &self.files {
+            match content {
+                Some(content) => {
+                    crate::config::model::save_secure_file(path, &String::from_utf8_lossy(content))?
+                }
+                None if path.exists() => std::fs::remove_file(path)?,
+                None => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn run_setup_with_prompter_and_runners<
     P: SetupPrompter,
     R: crate::runner::resticprofile::ResticProfileRunner,
+    S: crate::runner::scheduler::BackupScheduler,
 >(
-    config_path: &Path,
     profiles_path: &Path,
     prompter: &P,
     non_interactive: bool,
     lang_opt: Option<Language>,
     runner: &R,
+    scheduler: &S,
 ) -> Result<()> {
     let resolved_lang = lang_opt.or_else(|| Some(Language::detect()));
     SetupEngine::run(
-        config_path,
         profiles_path,
         prompter,
         non_interactive,
         resolved_lang,
         runner,
+        scheduler,
     )
 }
 
 pub fn run_setup_with_prompter<P: SetupPrompter>(
-    config_path: &Path,
-    prompter: &P,
-    non_interactive: bool,
-    lang_opt: Option<Language>,
-) -> Result<()> {
-    let executor = crate::runner::executor::SystemExecutor;
-    let runner = crate::runner::resticprofile::ResticProfileTool::new(&executor);
-    run_setup_with_prompter_and_runner(config_path, prompter, non_interactive, lang_opt, &runner)
-}
-
-pub fn run_setup_with_prompter_at_paths<P: SetupPrompter>(
-    config_path: &Path,
     profiles_path: &Path,
     prompter: &P,
     non_interactive: bool,
@@ -849,19 +910,20 @@ pub fn run_setup_with_prompter_at_paths<P: SetupPrompter>(
 ) -> Result<()> {
     let executor = crate::runner::executor::SystemExecutor;
     let runner = crate::runner::resticprofile::ResticProfileTool::new(&executor);
-    run_setup_with_prompter_and_runner_at_paths(
-        config_path,
+    let scheduler = crate::runner::scheduler::SystemScheduler::new(&executor, "backup");
+    run_setup_with_prompter_and_runners(
         profiles_path,
         prompter,
         non_interactive,
         lang_opt,
         &runner,
+        &scheduler,
     )
 }
 
-pub fn run_setup(config_path: &Path, lang_opt: Option<Language>) -> Result<()> {
+pub fn run_setup(profiles_path: &Path, lang_opt: Option<Language>) -> Result<()> {
     let prompter = InquirePrompter;
-    run_setup_with_prompter(config_path, &prompter, false, lang_opt)
+    run_setup_with_prompter(profiles_path, &prompter, false, lang_opt)
 }
 
 use crate::runner::executor::{CommandRunner, SystemExecutor};

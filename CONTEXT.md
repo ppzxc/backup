@@ -6,11 +6,15 @@
 
 ### 1. Backup Profile (백엔드 프로필)
 * **설명**: 특정 데이터 대상(예: DB, 로그 파일 등)을 백업하기 위한 보관 주기, 저장 대상, 암호, 스케줄링 등의 구성을 갖춘 독립적인 백업 동작 단위.
-* **비고**: 설정 파일(`backup.env`) 내의 `BACKUP_PROFILE_NAME`으로 표현되며, 호스트의 호스트명을 기본값으로 갖습니다. `profiles.yaml`에서 프로필 키로 렌더링됩니다.
+* **비고**: `/etc/backup/profiles.yaml`의 resticprofile v2 `profiles` 키 아래 프로필 키로 표현되며, 호스트명을 기본값으로 갖습니다.
 
-### 2. Backup Environment (백업 설정파일)
+### 2. Unified Backup Configuration (통합 백업 설정)
 * **설명**: 호스트별 설정의 유일한 단일 원천(Source of Truth)으로 작동하는 환경설정 파일.
-* **비고**: 기본 경로는 `/etc/restic/backup.env`이며, 권한은 반드시 `600`이어야 합니다. Restic 저장소 접속용 자격 증명(비밀번호, 액세스 키 등)과 백업 대상, 웹훅 정보 등을 환경 변수(`export VAR=val`) 형태로 가집니다.
+* **비고**: 기본 경로는 `/etc/backup/profiles.yaml`이며, 권한은 반드시 `600`이어야 합니다. resticprofile v2 설정은 표준 최상위 키(`version`, `global`, `groups`, `profiles`)를 사용하고, 애플리케이션 설정은 충돌하지 않는 `application` 키 아래에 보관합니다. 비밀값은 같은 디렉터리의 `600` 파일로 분리합니다.
+
+### 2-1. Setup Wizard (설정 위자드)
+* **설명**: 사용자가 Backup Profile과 Unified Backup Configuration을 대화형으로 생성하는 `backup setup` 진입점.
+* **비고**: Setup Wizard는 1차·2차 Backend Adapter의 연결을 검증하고 비어 있는 저장소를 초기화하며, 서버 로컬 시간 기준 기본 03:00의 일별 스케줄러와 백업 실행 리포트의 파일 보관을 자동 설정합니다. 재실행 시 새 구성이 완전히 준비되기 전에는 기존 설정과 스케줄을 유지합니다. Container E2E Matrix의 저장소 조합은 Setup Wizard가 생성한 설정을 유일한 입력으로 사용하며, 테스트가 설정 파일을 직접 작성해 이를 대체하지 않습니다.
 
 ### 3. Configuration Registry (설정 레지스트리)
 * **설명**: 백업 설정을 관리하는 심층 아키텍처 모듈.
@@ -51,20 +55,28 @@
 * **비고**: 기본 `cargo test`에 포함하며, Docker runner 안에서 필요한 외부 도구와 저장소를 격리해 단일 모듈에서 순차 실행합니다. 스케줄러 검증은 privileged systemd runner에서 수행합니다.
 
 ### 10. Test Configuration Override (테스트 설정 경로 오버라이드)
-* **설명**: CLI가 기본 Backup Environment 대신 호출자가 명시한 설정 및 프로필 파일을 사용하는 실행 범위.
-* **비고**: 모든 서브커맨드에서 공통 `--config` 및 `--profiles` 옵션으로 지정합니다.
+* **설명**: CLI가 기본 통합 설정 파일 대신 호출자가 명시한 `profiles.yaml`을 사용하는 실행 범위.
+* **비고**: 모든 서브커맨드에서 공통 `--profiles` 옵션으로 지정합니다.
 
 ### 11. Restore Verification (복원 검증)
-* **설명**: BackupEngine이 스냅샷을 지정한 대상에 복원한 뒤, 원본 데이터와 복원 산출물의 무결성을 확인하는 행위.
-* **비고**: Database Stream의 SQL import와 행 검증은 Container E2E Matrix의 검증 단계이며 `backup restore`의 자동 동작이 아닙니다.
+* **설명**: BackupEngine이 스냅샷을 지정한 대상에 복원한 뒤, 원본 데이터와 복원 산출물의 무결성을 확인하는 행위. Secondary Backend Adapter가 설정된 경우 1차와 2차 저장소 각각에서 독립적으로 수행한다.
+* **비고**: 파일 복원은 상대 경로·내용 해시·빈 파일·중첩 디렉터리·유니코드 파일명·실행 권한의 동등성을 검증합니다. Database Stream의 SQL import와 행 검증은 Container E2E Matrix의 검증 단계이며 `backup restore`의 자동 동작이 아닙니다.
+
+### 11-1. Backup Execution Report (백업 실행 리포트)
+* **설명**: 하나의 `backup run` 또는 스케줄러 실행의 결과를 파일로 보존하는 운영 증적.
+* **비고**: 성공과 실패 모두 생성하며, 실행 시각·Backup Profile·저장소별 결과·스냅샷 식별자를 기록합니다. 실패 시 실패 단계와 마스킹된 오류를 기록하고 실행 결과는 실패로 유지합니다.
+
+### 11-2. Scheduled Backup Run (예약 백업 실행)
+* **설명**: Setup Wizard가 등록한 스케줄러가 전체 Backup Pipeline을 호출하는 일별 자동 실행.
+* **비고**: 실행 단위는 `backup run`이며, resticprofile의 단일 `backup` 작업이 아닙니다. 따라서 1차 백업·2차 동기화·Retention·Backup Execution Report가 같은 실행 결과에 포함됩니다. Setup Wizard는 systemd timer를 우선 선택하고, 사용할 수 없을 때만 Cron fallback을 자동 선택합니다.
 
 ### 12. Database E2E Support Matrix (데이터베이스 E2E 지원 매트릭스)
 * **설명**: Database Stream의 실제 백업·복원을 계속 검증하는 프로덕션 데이터베이스 버전 집합.
-* **비고**: MariaDB 12 LTS, MariaDB 5.5.56, PostgreSQL 16으로 고정합니다.
+* **비고**: MariaDB 12 LTS, MariaDB 5.5.56, PostgreSQL 16으로 고정합니다. Container E2E Matrix의 S3/SFTP 파일 복원 조합과 분리해 검증합니다.
 
 ### 13. Production Execution Integrity (프로덕션 실행 무결성)
 * **설명**: 운영 CLI 경로는 선언하거나 완료로 보고하는 Backup Pipeline, Backend Adapter, Restore Verification, 감사 진단을 실제로 실행해야 한다는 정책.
-* **비고**: `Mock*` 구현과 고정된 더미 결과는 테스트 격리에서만 허용됩니다. 일반 프로덕션 빌드와 public API에는 `Mock*` 구현을 포함하지 않습니다. 운영 경로는 실제 호출 없이 성공·완료·검증됨을 출력해서는 안 됩니다. 활성화된 Secondary Backend Adapter는 `backup run`에서 실제 스냅샷 복사를 마친 뒤에만 완료로 보고합니다. Database Stream은 하나의 `backup run`에서 Backup Profile 반복 전에 정확히 한 번 실제 실행합니다. ISMS 증적과 보고서는 실제 진단·복구 결과만 포함하며, 고정된 성공값 및 더미 스냅샷 메타데이터를 포함하지 않습니다. `backup doctor`는 Restic 실행 가능 여부와 지정된 Backup Environment의 실제 경로·권한을 검사한 결과로만 상태를 보고합니다. 필수 설정을 읽지 못하거나 선언한 작업이 실패한 운영 명령은 성공으로 반환하지 않고 오류 종료합니다. Restore Verification은 복원 산출물의 존재·비어 있지 않음을 확인하고, Database Stream에는 덤프 형식 검증과 실제 측정 RTO를 포함합니다. 비대화형 Setup은 명시 입력된 실제 대상·저장소·자격 증명만 저장하며, 예시값·기본 비밀값 또는 기본 구성으로 대체하지 않습니다. Update의 릴리스 조회·다운로드·자가 교체 실패는 오류 종료로 전파합니다.
+* **비고**: `Mock*` 구현과 고정된 더미 결과는 테스트 격리에서만 허용됩니다. 일반 프로덕션 빌드와 public API에는 `Mock*` 구현을 포함하지 않습니다. 운영 경로는 실제 호출 없이 성공·완료·검증됨을 출력해서는 안 됩니다. 활성화된 Secondary Backend Adapter는 `backup run`에서 실제 스냅샷 복사를 마친 뒤에만 완료로 보고합니다. Database Stream은 하나의 `backup run`에서 Backup Profile 반복 전에 정확히 한 번 실제 실행합니다. ISMS 증적과 보고서는 실제 진단·복구 결과만 포함하며, 고정된 성공값 및 더미 스냅샷 메타데이터를 포함하지 않습니다. `backup doctor`는 Restic 실행 가능 여부와 지정된 통합 설정 파일의 실제 경로·권한을 검사한 결과로만 상태를 보고합니다. 필수 설정을 읽지 못하거나 선언한 작업이 실패한 운영 명령은 성공으로 반환하지 않고 오류 종료합니다. Restore Verification은 복원 산출물의 존재·비어 있지 않음을 확인하고, Database Stream에는 덤프 형식 검증과 실제 측정 RTO를 포함합니다. 비대화형 Setup은 명시 입력된 실제 대상·저장소·자격 증명만 저장하며, 예시값·기본 비밀값 또는 기본 구성으로 대체하지 않습니다. Update의 릴리스 조회·다운로드·자가 교체 실패는 오류 종료로 전파합니다.
 
 
 ## CLI 서브커맨드 구조 명세 (Command Architecture Spec)
@@ -72,7 +84,7 @@
 유비쿼터스 언어에 맞춰 설계된 Rust CLI 커맨드 구조 및 역할 정의입니다.
 
 ### 1. `backup setup` (환경 및 프로필 초기화)
-* **`backup setup`**: `inquire` TUI 마법사로 **Backup Environment** 및 **Backup Profile** 대화형 생성
+* **`backup setup`**: `inquire` TUI 마법사로 통합 설정과 **Backup Profile** 대화형 생성
 * **`backup setup --non-interactive`**: 대화 없이 설정 파일 기반으로 환경 설정 및 초기화 일괄 수행
 * **`backup setup dependencies`**: 필수 바이너리 의존성(`restic`, `rclone`, `resticprofile`) 검증 및 자동 설치
 * **`backup setup backend-init`**: 1차/2차 **Backend Adapter** 저장소(`restic init`) 연결 점검 및 초기화
@@ -88,7 +100,7 @@
 * **`--dry-run`**: 실제 실행 없는 명령어 및 대상 시뮬레이션
 
 ### 4-1. `backup database` (데이터베이스 백업 실행)
-* **`backup database`**: 현재 Backup Environment의 Database Backup Adapter를 실행하여 Database Stream 스냅샷을 생성
+* **`backup database`**: 현재 통합 설정의 Database Backup Adapter를 실행하여 Database Stream 스냅샷을 생성
 * **관계**: 독립 실행 진입점이지만, Database Backup Adapter가 설정된 경우 `backup run`도 동일한 동작을 파이프라인의 데이터베이스 단계로 실행. Adapter가 없으면 `backup database`는 설정 오류로 종료하고, `backup run`은 파일 백업 파이프라인을 계속 실행합니다.
 
 ### 5. `backup doctor` (시스템 및 백업 종합 진단)
@@ -96,17 +108,17 @@
 
 ### 6. `backup report` (ISMS-P 감사 증적 및 레포트 생성)
 * **`backup report [subcommand] [--file <path>] [--format <html|json>]`**: 서브 커맨드 미지정 시 전체 검사 항목(`environment`, `time-sync`, `restore-drill`)을 순환 실행하여 통합 보고서를 생성하며, `--file` 미지정 시 `BackupConfig.reports.output_dir` (기본값: `/data/backup/reports`) 내 타임스탬프 파일로 기록됨. `--format` 미지정 시 HTML 및 JSON 포맷 보고서 2종을 모두 생성하며, 지정 시 해당 포맷 파일만 단독 생성됨.
-* **`backup report environment [--file <path>] [--format <html|json>]`**: **Backup Environment** 권한 및 보안 규정 검증 보고서 생성
+* **`backup report environment [--file <path>] [--format <html|json>]`**: 통합 설정 파일의 권한 및 보안 규정 검증 보고서 생성
 * **`backup report time-sync [--file <path>] [--format <html|json>]`**: NTP/Chrony 시각 동기화 검증 및 ISMS 증적 보고서 생성
 * **`backup report restore-drill [--file <path>] [--format <html|json>]`**: 스냅샷을 임시 복구 대상에 실제로 복원하는 비파괴 모의훈련을 실행하고, RTO 및 DB 덤프 무결성 검증 보고서를 생성. 운영 데이터베이스에는 dump를 import하지 않습니다.
 
 ### 7. `backup schedule` (스케줄러 관리)
-* **`backup schedule enable`**: Systemd Timer (또는 Cron Fallback) 자동 백업 스케줄 등록
+* **`backup schedule enable`**: Systemd Timer (또는 Cron Fallback) 자동 백업 스케줄 임의 등록
 * **`backup schedule disable`**: 자동 백업 스케줄 해제
 * **`backup schedule status`**: 타이머/스케줄러 현재 동작 상태 조회
 
 ### 7. 기타 운영 커맨드
-* **`backup restore --target <path>`**: 백업 데이터 및 DB dump를 지정한 복구 대상으로 실행. 대상은 기본값 없이 명시해야 하며, 비어 있지 않은 대상에 대한 덮어쓰기는 명시적인 강제 확인이 필요합니다.
+* **`backup restore --target <path> [--storage <primary|secondary>]`**: 백업 데이터 및 DB dump를 지정한 복구 대상으로 실행. `storage`를 생략하면 primary를 사용하며, 활성화된 2차 저장소의 독립 복원은 `--storage secondary`로 명시합니다. 대상은 기본값 없이 명시해야 하며, 비어 있지 않은 대상에 대한 덮어쓰기는 명시적인 강제 확인이 필요합니다.
 * **`backup snapshots`**: 1차/2차 저장소 스냅샷 목록을 저장소별로 구분해 조회. Primary Backend Adapter 조회 실패는 명령 실패이며, Secondary Backend Adapter 조회 실패는 primary 결과와 경고를 함께 출력합니다.
 * **`backup status [--profile <name>]`**: 백업 프로필별 저장소 위치, 최신 스냅샷(ID/시각/용량) 및 파이프라인 상태 종합 동적 조회 (조회 실패 시 Graceful Fallback 경고 표기)
 * **`backup update`**: 자기 자신(Rust 바이너리) 및 설정 갱신

@@ -4,6 +4,36 @@ use anyhow::{Result, bail};
 use secrecy::ExposeSecret;
 use std::path::Path;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum RestoreStorage {
+    Primary,
+    Secondary,
+}
+
+impl Default for RestoreStorage {
+    fn default() -> Self {
+        Self::Primary
+    }
+}
+
+pub fn select_storage(config: &BackupConfig, storage: RestoreStorage) -> Result<(&str, &str)> {
+    match storage {
+        RestoreStorage::Primary => Ok((
+            &config.storage.primary.repository,
+            config.storage.primary.password.expose_secret(),
+        )),
+        RestoreStorage::Secondary => {
+            let secondary = config
+                .storage
+                .secondary
+                .as_ref()
+                .filter(|storage| storage.enabled)
+                .ok_or_else(|| anyhow::anyhow!("Secondary storage is not configured or enabled"))?;
+            Ok((&secondary.repository, secondary.password.expose_secret()))
+        }
+    }
+}
+
 pub fn validate_restored_output(target: &Path, database_stream: bool) -> Result<()> {
     if !target.is_dir() {
         bail!("Restore target was not created");
@@ -51,16 +81,30 @@ pub fn execute_restore<R: ResticRunner>(
     target_path: &str,
     force: bool,
 ) -> Result<String> {
+    execute_restore_from_storage(
+        config,
+        runner,
+        snapshot_id,
+        target_path,
+        force,
+        RestoreStorage::Primary,
+    )
+}
+
+pub fn execute_restore_from_storage<R: ResticRunner>(
+    config: &BackupConfig,
+    runner: &R,
+    snapshot_id: &str,
+    target_path: &str,
+    force: bool,
+    storage: RestoreStorage,
+) -> Result<String> {
     let target = Path::new(target_path);
     if target.exists() && target.read_dir()?.next().is_some() && !force {
         bail!("Restore target is not empty; pass --force to overwrite");
     }
-    let result = runner.restore(
-        &config.storage.primary.repository,
-        config.storage.primary.password.expose_secret(),
-        snapshot_id,
-        target_path,
-    )?;
+    let (repository, password) = select_storage(config, storage)?;
+    let result = runner.restore(repository, password, snapshot_id, target_path)?;
     validate_restored_output(
         target,
         matches!(

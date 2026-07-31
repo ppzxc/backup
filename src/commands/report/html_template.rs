@@ -261,7 +261,7 @@ fn render_all_html(data: &RealReportData) -> String {
         <td><span class="badge badge-success">안전</span></td>
       </tr>
       <tr>
-        <td>자격증명 파일 (/etc/backup/backup.env) 권한</td>
+        <td>통합 설정 파일 (/etc/backup/profiles.yaml) 권한</td>
         <td>{}</td>
         <td><span class="badge badge-success">안전</span></td>
       </tr>
@@ -420,7 +420,7 @@ fn render_environment_html(data: &RealReportData) -> String {
         <td><span class="badge badge-success">안전 - 소유자 외 접근불가</span></td>
       </tr>
       <tr>
-        <td>자격증명 파일 (/etc/backup/backup.env) 권한</td>
+        <td>통합 설정 파일 (/etc/backup/profiles.yaml) 권한</td>
         <td>600 권한 (평문 노출 방지)</td>
         <td>{}</td>
         <td><span class="badge badge-success">안전 - 평문 노출 방지</span></td>

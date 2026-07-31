@@ -77,6 +77,36 @@ backup() {{
     docker_ok(&["exec", &resources.runner, "bash", "-ceu", &wrapped_script])
 }
 
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\\"'\\\"'"))
+}
+
+fn wizard_storage_case(
+    resources: &E2eResources,
+    name: &str,
+    answers: &[&str],
+    has_secondary: bool,
+) {
+    let answers = answers
+        .iter()
+        .map(|answer| shell_quote(answer))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let secondary_restore = if has_secondary {
+        format!(
+            "backup --profiles /work/{name}/profiles.yaml restore --storage secondary --target /work/{name}-secondary\nassert_tree /work/source /work/{name}-secondary/work/source"
+        )
+    } else {
+        String::new()
+    };
+    runner(
+        resources,
+        &format!(
+            "mkdir -p /work/{name}; cp /work/e2e-key/id_ed25519 /work/{name}/id_ed25519; cp /work/e2e-key/id_ed25519 /work/{name}/id_ed25519_secondary; chmod 600 /work/{name}/id_ed25519*\nprintf '%s\\n' {answers} | BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' TERM=dumb script -qec '/usr/local/bin/backup --profiles /work/{name}/profiles.yaml setup --lang en' /dev/null\ntree_digest() {{ (cd \"$1\" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sort); }}\ntree_modes() {{ (cd \"$1\" && find . -type f -printf '%m %p\\n' | sort); }}\nassert_tree() {{ [ \"$(tree_digest \"$1\")\" = \"$(tree_digest \"$2\")\" ] && [ \"$(tree_modes \"$1\")\" = \"$(tree_modes \"$2\")\" ]; }}\nbackup --profiles /work/{name}/profiles.yaml run --skip-database\nbackup --profiles /work/{name}/profiles.yaml restore --target /work/{name}-primary\nassert_tree /work/source /work/{name}-primary/work/source\n{secondary_restore}\nreport=$(find /work/reports/{name} -name 'execution-*.json' -print -quit); test -n \"$report\" && grep -Eq '\"snapshot_id\": \"[^\"]+\"' \"$report\"\nsystemctl is-active --quiet backup-pipeline.timer\nfind /work/reports/{name} -maxdepth 1 -name 'execution-*.json' -delete\nfor _ in {{1..75}}; do find /work/reports/{name} -name 'execution-*.json' -print -quit | grep -q . && break; sleep 1; done\nfind /work/reports/{name} -name 'execution-*.json' -print -quit | grep -q .\nbackup --profiles /work/{name}/profiles.yaml schedule disable"
+        ),
+    );
+}
+
 struct DockerCleanup<'a> {
     resources: &'a E2eResources,
 }
@@ -241,26 +271,222 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
     );
     runner(
         &resources,
-        "mkdir -p /work/source/nested /work/restore-primary /work/restore-secondary; printf 'alpha\\n' >/work/source/a; printf 'beta\\n' >/work/source/nested/b",
+        "mkdir -p /work/source/nested /work/restore-primary /work/restore-secondary; printf 'alpha\\n' >/work/source/a; chmod 755 /work/source/a; printf 'beta\\n' >/work/source/nested/b; : >/work/source/empty; printf 'unicode\\n' >/work/source/nested/한글",
     );
     runner(
         &resources,
         "mkdir -p /root/.ssh; cp /work/e2e-key/id_ed25519 /root/.ssh/id_ed25519; chmod 600 /root/.ssh/id_ed25519; printf 'Host *\\n  StrictHostKeyChecking no\\n  UserKnownHostsFile /dev/null\\n  IdentitiesOnly yes\\n' >/root/.ssh/config",
     );
+    // Every storage case is configured through the real pseudo-TTY Setup Wizard.
+    // The six cases cover both standalone backends and every S3/SFTP replication direction.
+    wizard_storage_case(
+        &resources,
+        "s3-primary",
+        &[
+            "s3-primary",
+            "",
+            "/work/source",
+            "",
+            "1",
+            "1",
+            "1",
+            "\x1b[B",
+            "",
+            "http://backup-e2e-minio:9000",
+            "minioadmin",
+            "minioadmin",
+            "",
+            "wizard-s3-primary",
+            "",
+            "",
+            "",
+            "",
+            "/work/reports/s3-primary",
+            "",
+            "",
+        ],
+        false,
+    );
+    wizard_storage_case(
+        &resources,
+        "sftp-primary",
+        &[
+            "sftp-primary",
+            "",
+            "/work/source",
+            "",
+            "1",
+            "1",
+            "1",
+            "",
+            "",
+            "",
+            "backup-e2e-sftp",
+            "",
+            "backupuser",
+            "/upload/wizard-sftp-primary",
+            "\x1b[B\x1b[B]",
+            "",
+            "",
+            "",
+            "/work/reports/sftp-primary",
+            "",
+            "",
+        ],
+        false,
+    );
+    wizard_storage_case(
+        &resources,
+        "s3-to-s3",
+        &[
+            "s3-to-s3",
+            "",
+            "/work/source",
+            "",
+            "1",
+            "1",
+            "1",
+            "\x1b[B",
+            "",
+            "http://backup-e2e-minio:9000",
+            "minioadmin",
+            "minioadmin",
+            "",
+            "wizard-s3-to-s3-primary",
+            "",
+            "",
+            "y",
+            "\x1b[B",
+            "",
+            "http://backup-e2e-minio:9000",
+            "minioadmin",
+            "minioadmin",
+            "",
+            "wizard-s3-to-s3-secondary",
+            "",
+            "",
+            "/work/reports/s3-to-s3",
+            "",
+            "",
+        ],
+        true,
+    );
+    wizard_storage_case(
+        &resources,
+        "s3-to-sftp",
+        &[
+            "s3-to-sftp",
+            "",
+            "/work/source",
+            "",
+            "1",
+            "1",
+            "1",
+            "\x1b[B",
+            "",
+            "http://backup-e2e-minio:9000",
+            "minioadmin",
+            "minioadmin",
+            "",
+            "wizard-s3-to-sftp",
+            "",
+            "",
+            "y",
+            "",
+            "",
+            "",
+            "backup-e2e-sftp",
+            "",
+            "backupuser",
+            "/upload/wizard-s3-to-sftp",
+            "\x1b[B\x1b[B]",
+            "",
+            "/work/reports/s3-to-sftp",
+            "",
+            "",
+        ],
+        true,
+    );
+    wizard_storage_case(
+        &resources,
+        "sftp-to-s3",
+        &[
+            "sftp-to-s3",
+            "",
+            "/work/source",
+            "",
+            "1",
+            "1",
+            "1",
+            "",
+            "",
+            "",
+            "backup-e2e-sftp",
+            "",
+            "backupuser",
+            "/upload/wizard-sftp-to-s3",
+            "\x1b[B\x1b[B]",
+            "",
+            "y",
+            "\x1b[B",
+            "",
+            "http://backup-e2e-minio:9000",
+            "minioadmin",
+            "minioadmin",
+            "",
+            "wizard-sftp-to-s3",
+            "",
+            "",
+            "/work/reports/sftp-to-s3",
+            "",
+            "",
+        ],
+        true,
+    );
+    wizard_storage_case(
+        &resources,
+        "sftp-to-sftp",
+        &[
+            "sftp-to-sftp",
+            "",
+            "/work/source",
+            "",
+            "1",
+            "1",
+            "1",
+            "",
+            "",
+            "",
+            "backup-e2e-sftp",
+            "",
+            "backupuser",
+            "/upload/wizard-sftp-to-sftp-primary",
+            "\x1b[B\x1b[B]",
+            "",
+            "y",
+            "",
+            "",
+            "",
+            "backup-e2e-sftp",
+            "",
+            "backupuser",
+            "/upload/wizard-sftp-to-sftp-secondary",
+            "\x1b[B\x1b[B]",
+            "",
+            "/work/reports/sftp-to-sftp",
+            "",
+            "",
+        ],
+        true,
+    );
     runner(
         &resources,
-        "restic -r s3:http://backup-e2e-minio:9000/primary --password-command 'printf e2e-password' init; restic -r sftp:backupuser@backup-e2e-sftp:/upload/s3-to-sftp --password-command 'printf e2e-password' init; restic -r sftp:backupuser@backup-e2e-sftp:/upload/sftp-to-s3 --password-command 'printf e2e-password' init",
-    );
-    // The runner uses explicit paths for every CLI invocation; the files never touch /etc/backup.
-    runner(
-        &resources,
-        "tree_digest() { (cd \"$1\" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sort); }\ncat >/work/config.yml <<'EOF'\nversion: '1.0'\nprofile: primary\nbackup:\n  backup_type: directory\n  targets: [/work/source]\n  excludes: []\nretention: {keep_daily: 1, keep_weekly: 1, keep_monthly: 1}\nstorage:\n  primary: {backend: s3, repository: 's3:http://backup-e2e-minio:9000/primary', password: e2e-password}\nEOF\ncat >/work/profiles.yml <<'EOF'\nversion: '2'\nprofiles:\n  primary:\n    repository: s3:http://backup-e2e-minio:9000/primary\n    password: e2e-password\n    initialize: true\n    env: {AWS_ACCESS_KEY_ID: minioadmin, AWS_SECRET_ACCESS_KEY: minioadmin}\n    backup: {source: [/work/source], schedule: '*-*-* 03:00:00'}\n    copy:\n      repository: sftp:backupuser@backup-e2e-sftp:/upload/s3-to-sftp\n      password: e2e-password\n      initialize: true\nEOF\nbackup --config /work/config.yml --profiles /work/profiles.yml run --skip-database --skip-retention\nbackup --config /work/config.yml restore --target /work/restore-primary\n[ \"$(tree_digest /work/source)\" = \"$(tree_digest /work/restore-primary/work/source)\" ]\nbackup --config /work/config.yml --profiles /work/profiles.yml copy --profile primary\ncat >/work/sftp.yml <<'EOF'\nversion: '1.0'\nprofile: sftp\nbackup:\n  backup_type: directory\n  targets: [/work/source]\n  excludes: []\nretention: {keep_daily: 1, keep_weekly: 1, keep_monthly: 1}\nstorage:\n  primary: {backend: sftp, repository: 'sftp:backupuser@backup-e2e-sftp:/upload/s3-to-sftp', password: e2e-password}\nEOF\nbackup --config /work/sftp.yml restore --target /work/restore-secondary\n[ \"$(tree_digest /work/source)\" = \"$(tree_digest /work/restore-secondary/work/source)\" ]",
+        "find /work/reports/s3-to-sftp -maxdepth 1 -name 'execution-*.json' -delete\nBACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' backup --profiles /work/s3-to-sftp/profiles.yaml schedule enable\nfor _ in {1..75}; do find /work/reports/s3-to-sftp -name 'execution-*.json' -print -quit | grep -q . && break; sleep 1; done\nfind /work/reports/s3-to-sftp -name 'execution-*.json' -print -quit | grep -q .",
     );
     runner(
         &resources,
-        "tree_digest() { (cd \"$1\" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sort); }\ncat >/work/sftp-primary.yml <<'EOF'\nversion: '1.0'\nprofile: sftp-primary\nbackup:\n  backup_type: directory\n  targets: [/work/source]\n  excludes: []\nretention: {keep_daily: 1, keep_weekly: 1, keep_monthly: 1}\nstorage:\n  primary: {backend: sftp, repository: 'sftp:backupuser@backup-e2e-sftp:/upload/sftp-to-s3', password: e2e-password}\nEOF\ncat >/work/sftp-primary-profiles.yml <<'EOF'\nversion: '2'\nprofiles:\n  sftp-primary:\n    repository: sftp:backupuser@backup-e2e-sftp:/upload/sftp-to-s3\n    password: e2e-password\n    initialize: true\n    backup: {source: [/work/source]}\n    copy:\n      repository: s3:http://backup-e2e-minio:9000/sftp-to-s3\n      password: e2e-password\n      initialize: true\n      env: {AWS_ACCESS_KEY_ID: minioadmin, AWS_SECRET_ACCESS_KEY: minioadmin}\nEOF\nbackup --config /work/sftp-primary.yml --profiles /work/sftp-primary-profiles.yml run --skip-database --skip-retention\nbackup --config /work/sftp-primary.yml --profiles /work/sftp-primary-profiles.yml copy --profile sftp-primary\ncat >/work/reverse.yml <<'EOF'\nversion: '1.0'\nprofile: reverse\nbackup:\n  backup_type: directory\n  targets: [/work/source]\n  excludes: []\nretention: {keep_daily: 1, keep_weekly: 1, keep_monthly: 1}\nstorage:\n  primary: {backend: s3, repository: 's3:http://backup-e2e-minio:9000/sftp-to-s3', password: e2e-password}\nEOF\nrm -rf /work/restore-reverse && backup --config /work/reverse.yml restore --target /work/restore-reverse\n[ \"$(tree_digest /work/source)\" = \"$(tree_digest /work/restore-reverse/work/source)\" ]",
+        "backup --profiles /work/s3-to-sftp/profiles.yaml schedule disable\nfind /work/reports/s3-to-sftp -maxdepth 1 -name 'execution-*.json' -delete\nsystemctl start cron\nBACKUP_TEST_FORCE_CRON=1 BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' backup --profiles /work/s3-to-sftp/profiles.yaml schedule enable\nfor _ in {1..75}; do find /work/reports/s3-to-sftp -name 'execution-*.json' -print -quit | grep -q . && break; sleep 1; done\nfind /work/reports/s3-to-sftp -name 'execution-*.json' -print -quit | grep -q .",
     );
-
     for (host, port, database, kind, seed, query) in [
         (
             "backup-e2e-mariadb12",
@@ -313,7 +539,7 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
         runner(
             &resources,
             &format!(
-                "cat >/work/db.yml <<'EOF'\nversion: '1.0'\nprofile: db\nbackup:\n  backupType: !dbStream\n    db_type: {kind}\n    connection_url: '{url}'\n  targets: []\n  excludes: []\nretention: {{keepDaily: 1, keepWeekly: 1, keepMonthly: 1}}\nstorage:\n  primary: {{backend: s3, repository: 's3:http://backup-e2e-minio:9000/db-{database}', password: e2e-password}}\nEOF\nrestic -r s3:http://backup-e2e-minio:9000/db-{database} --password-command 'printf e2e-password' init\n{command} --host={host} --port={port} {connection_args} {execute_flag} \"{seed}\"\nbackup --config /work/db.yml database\n{command} --host={host} --port={port} {connection_args} {execute_flag} 'DROP TABLE {table};'\nrm -rf /work/db-restore && backup --config /work/db.yml restore --target /work/db-restore\n{command} --host={host} --port={port} {connection_args} < \"$(find /work/db-restore -name '{database}.sql' -print -quit)\"\n{command} --host={host} --port={port} {connection_args} {rows_only_flag} {execute_flag} \"{query}\" | grep -q '{expected}'",
+                "cat >/work/db-profiles.yml <<'EOF'\nversion: '2'\napplication:\n  version: '1.0'\n  profile: db\n  backup:\n    backupType: !dbStream\n      db_type: {kind}\n      connection_url: '{url}'\n    targets: []\n    excludes: []\n  retention: {{keepDaily: 1, keepWeekly: 1, keepMonthly: 1}}\n  storage:\n    primary: {{backend: s3, repository: 's3:http://backup-e2e-minio:9000/db-{database}', password: e2e-password}}\nprofiles: {{}}\nEOF\nrestic -r s3:http://backup-e2e-minio:9000/db-{database} --password-command 'printf e2e-password' init\n{command} --host={host} --port={port} {connection_args} {execute_flag} \"{seed}\"\nbackup --profiles /work/db-profiles.yml database\n{command} --host={host} --port={port} {connection_args} {execute_flag} 'DROP TABLE {table};'\nrm -rf /work/db-restore && backup --profiles /work/db-profiles.yml restore --target /work/db-restore\n{command} --host={host} --port={port} {connection_args} < \"$(find /work/db-restore -name '{database}.sql' -print -quit)\"\n{command} --host={host} --port={port} {connection_args} {rows_only_flag} {execute_flag} \"{query}\" | grep -q '{expected}'",
                 table = if kind == "mysql" {
                     "users"
                 } else {
@@ -327,20 +553,4 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
             ),
         );
     }
-    runner(
-        &resources,
-        "backup --config /work/config.yml --profiles /work/profiles.yml schedule enable",
-    );
-    runner(
-        &resources,
-        "timer=resticprofile-backup@profile-primary.timer; systemctl list-timers --all --no-legend | grep -Fq \"$timer\"; systemctl is-active --quiet \"$timer\"",
-    );
-    runner(
-        &resources,
-        "backup --config /work/config.yml --profiles /work/profiles.yml schedule disable",
-    );
-    runner(
-        &resources,
-        "! systemctl list-timers --all --no-legend | grep -Fq resticprofile-backup@profile-primary.timer",
-    );
 }

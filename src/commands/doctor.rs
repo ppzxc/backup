@@ -56,7 +56,7 @@ impl SystemHealthDiagnoser {
         let timestamp = format!("{:?}", std::time::SystemTime::now());
 
         let target_config =
-            config_path.unwrap_or_else(|| Path::new(crate::config::model::DEFAULT_CONFIG_PATH));
+            config_path.unwrap_or_else(|| Path::new(crate::config::model::DEFAULT_PROFILES_PATH));
 
         let mut items = Vec::new();
 
@@ -119,7 +119,7 @@ impl SystemHealthDiagnoser {
         } else {
             (
                 DoctorStatus::Fail,
-                "Backup Environment is missing".to_string(),
+                "Unified profiles configuration is missing".to_string(),
             )
         };
 

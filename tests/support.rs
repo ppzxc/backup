@@ -5,6 +5,7 @@ use backup::runner::executor::{CommandOutput, CommandRunner};
 use backup::runner::rclone::RcloneRunner;
 use backup::runner::restic::ResticRunner;
 use backup::runner::resticprofile::ResticProfileRunner;
+use backup::runner::scheduler::BackupScheduler;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -216,5 +217,38 @@ impl ResticProfileRunner for MockResticProfileRunner {
     }
     fn copy(&self, path: &Path, _: &str, _: bool) -> Result<String> {
         self.result("copy", path)
+    }
+}
+
+pub struct MockScheduler {
+    pub exit_code: i32,
+    pub response: String,
+    pub calls: Mutex<Vec<String>>,
+}
+impl MockScheduler {
+    pub fn new(exit_code: i32, response: &str) -> Self {
+        Self {
+            exit_code,
+            response: response.into(),
+            calls: Mutex::new(vec![]),
+        }
+    }
+    fn result(&self, call: &str) -> Result<String> {
+        self.calls.lock().unwrap().push(call.into());
+        if self.exit_code != 0 {
+            anyhow::bail!("mock scheduler failed: {}", self.response)
+        }
+        Ok(self.response.clone())
+    }
+}
+impl BackupScheduler for MockScheduler {
+    fn enable(&self, _: &Path) -> Result<String> {
+        self.result("enable")
+    }
+    fn disable(&self) -> Result<String> {
+        self.result("disable")
+    }
+    fn status(&self) -> Result<String> {
+        self.result("status")
     }
 }

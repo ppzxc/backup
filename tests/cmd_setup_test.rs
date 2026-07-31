@@ -1,6 +1,7 @@
 mod support;
 use backup::commands::setup::{
-    SetupEngine, SetupParams, SetupPrompter, create_default_config_file, run_setup_with_prompter,
+    SetupEngine, SetupParams, SetupPrompter, create_default_profiles_file, run_setup_with_prompter,
+    run_setup_with_prompter_and_runners,
 };
 use backup::config::model::*;
 use backup::i18n::Language;
@@ -9,10 +10,10 @@ use support::{MockExecutor, MockResticProfileRunner};
 use tempfile::tempdir;
 
 #[test]
-fn test_create_default_config_file() {
+fn test_create_default_profiles_file() {
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("profiles.yaml");
-    create_default_config_file(
+    create_default_profiles_file(
         &config_path,
         "host1",
         "/var/log",
@@ -114,7 +115,7 @@ fn test_setup_with_prompter_success() {
             s3: None,
         }),
         reports: ReportsConfig {
-            output_dir: "/data/backup/reports".into(),
+            output_dir: config_dir.join("reports").to_string_lossy().into_owned(),
             enable_daily_reports: true,
             enable_annual_dr_drill_report: true,
         },
@@ -125,7 +126,17 @@ fn test_setup_with_prompter_success() {
     };
 
     let prompter = MockPrompter { params };
-    run_setup_with_prompter(&config_path, &prompter, false, Some(Language::En)).unwrap();
+    let runner = MockResticProfileRunner::new(0, "initialized");
+    let scheduler = support::MockScheduler::new(0, "scheduled");
+    run_setup_with_prompter_and_runners(
+        &config_path,
+        &prompter,
+        false,
+        Some(Language::En),
+        &runner,
+        &scheduler,
+    )
+    .unwrap();
 
     assert!(config_path.exists());
     let content = std::fs::read_to_string(&config_path).unwrap();
@@ -339,7 +350,7 @@ fn test_setup_auto_detects_language_when_lang_opt_none() {
 
 #[test]
 fn test_setup_does_not_enable_schedule_outside_the_isolated_e2e_runner() {
-    use backup::commands::setup::run_setup_with_prompter_and_runner;
+    use backup::commands::setup::run_setup_with_prompter_and_runners;
 
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("profiles.yaml");
@@ -367,19 +378,149 @@ fn test_setup_does_not_enable_schedule_outside_the_isolated_e2e_runner() {
             s3: None,
         },
         secondary_storage: None,
-        reports: ReportsConfig::default(),
+        reports: ReportsConfig {
+            output_dir: dir.path().join("reports").to_string_lossy().into_owned(),
+            ..ReportsConfig::default()
+        },
         audit: AuditConfig::default(),
     };
 
     let prompter = MockPrompter { params };
-    let runner = MockResticProfileRunner::new(0, "scheduled successfully");
+    let runner = MockResticProfileRunner::new(0, "initialized successfully");
+    let scheduler = support::MockScheduler::new(0, "scheduled successfully");
 
-    run_setup_with_prompter_and_runner(&config_path, &prompter, false, Some(Language::En), &runner)
-        .unwrap();
+    run_setup_with_prompter_and_runners(
+        &config_path,
+        &prompter,
+        false,
+        Some(Language::En),
+        &runner,
+        &scheduler,
+    )
+    .unwrap();
 
     assert!(config_path.exists());
     let mock_calls = runner.calls.lock().unwrap();
-    assert!(mock_calls.is_empty());
+    assert!(mock_calls.iter().any(|(call, _)| call == "init"));
+    assert_eq!(scheduler.calls.lock().unwrap().as_slice(), ["enable"]);
+}
+
+#[test]
+fn setup_keeps_the_existing_configuration_when_backend_initialization_fails() {
+    let dir = tempdir().unwrap();
+    let profiles = dir.path().join("profiles.yaml");
+    std::fs::write(&profiles, "previous configuration").unwrap();
+    let params = SetupParams {
+        profile: "default".into(),
+        backup_type: BackupType::Directory,
+        targets: vec!["/var/log".into()],
+        excludes: vec![],
+        retention: RetentionPolicy::standard_defaults(),
+        primary_storage: StorageTarget {
+            backend: "s3".into(),
+            repository: "s3:bucket/new".into(),
+            password: SecretString::new("secure_password_123".into()),
+            sftp: None,
+            s3: None,
+        },
+        secondary_storage: None,
+        reports: ReportsConfig {
+            output_dir: dir.path().join("reports").to_string_lossy().into_owned(),
+            ..ReportsConfig::default()
+        },
+        audit: AuditConfig::default(),
+    };
+    let runner = MockResticProfileRunner::new(1, "repository unreachable");
+    let scheduler = support::MockScheduler::new(0, "scheduled");
+
+    let error = run_setup_with_prompter_and_runners(
+        &profiles,
+        &MockPrompter { params },
+        false,
+        Some(Language::En),
+        &runner,
+        &scheduler,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("repository unreachable"));
+    assert_eq!(
+        std::fs::read_to_string(&profiles).unwrap(),
+        "previous configuration"
+    );
+    assert!(scheduler.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn setup_restores_the_existing_configuration_when_schedule_registration_fails() {
+    let dir = tempdir().unwrap();
+    let profiles = dir.path().join("profiles.yaml");
+    std::fs::write(&profiles, "previous configuration").unwrap();
+    let params = SetupParams {
+        profile: "default".into(),
+        backup_type: BackupType::Directory,
+        targets: vec!["/var/log".into()],
+        excludes: vec![],
+        retention: RetentionPolicy::standard_defaults(),
+        primary_storage: StorageTarget {
+            backend: "s3".into(),
+            repository: "s3:bucket/new".into(),
+            password: SecretString::new("secure_password_123".into()),
+            sftp: None,
+            s3: None,
+        },
+        secondary_storage: None,
+        reports: ReportsConfig {
+            output_dir: dir.path().join("reports").to_string_lossy().into_owned(),
+            ..ReportsConfig::default()
+        },
+        audit: AuditConfig::default(),
+    };
+    let scheduler = support::MockScheduler::new(1, "scheduler unavailable");
+    let error = run_setup_with_prompter_and_runners(
+        &profiles,
+        &MockPrompter { params },
+        false,
+        Some(Language::En),
+        &MockResticProfileRunner::new(0, "initialized"),
+        &scheduler,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("scheduler unavailable"));
+    assert_eq!(
+        std::fs::read_to_string(&profiles).unwrap(),
+        "previous configuration"
+    );
+}
+
+#[test]
+fn setup_initialization_exposes_s3_credentials_to_the_backend_process() {
+    let config = BackupConfig {
+        storage: StorageConfig {
+            primary: StorageTarget {
+                backend: "s3".into(),
+                repository: "s3:http://example/bucket".into(),
+                password: SecretString::new("secure_password_123".into()),
+                sftp: None,
+                s3: Some(S3Config {
+                    endpoint: "http://example".into(),
+                    access_key_id: SecretString::new("test-access".into()),
+                    secret_access_key: SecretString::new("test-secret".into()),
+                }),
+            },
+            secondary: None,
+        },
+        ..BackupConfig::default()
+    };
+    backup::commands::setup::configure_backend_environment(&config);
+    assert_eq!(
+        std::env::var("BACKUP_PRIMARY_AWS_ACCESS_KEY_ID").unwrap(),
+        "test-access"
+    );
+    assert_eq!(
+        std::env::var("BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY").unwrap(),
+        "test-secret"
+    );
 }
 
 #[test]

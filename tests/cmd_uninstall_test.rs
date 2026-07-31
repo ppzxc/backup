@@ -1,5 +1,5 @@
 use backup::commands::uninstall::{
-    execute_uninstall_plan, perform_uninstall, perform_uninstall_at_paths,
+    execute_uninstall_plan, perform_uninstall, perform_uninstall_at_path,
 };
 use backup::commands::update::execute_update_check;
 
@@ -28,13 +28,12 @@ fn test_perform_uninstall_with_yes() {
 #[test]
 fn test_uninstall_uses_profiles_override_for_scheduler_cleanup() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let config_path = temp_dir.path().join("environment/config.yml");
     let profiles_path = temp_dir.path().join("profiles/profiles.yml");
     std::fs::create_dir_all(profiles_path.parent().unwrap()).unwrap();
     std::fs::write(&profiles_path, "version: '2'\nprofiles: {}\n").unwrap();
 
     let runner = MockResticProfileRunner::new(0, "unscheduled");
-    perform_uninstall_at_paths(&config_path, &profiles_path, &runner, true, false).unwrap();
+    perform_uninstall_at_path(&profiles_path, &runner, true, false).unwrap();
 
     let calls = runner.calls.lock().unwrap();
     assert_eq!(

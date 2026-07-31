@@ -415,7 +415,7 @@ Update subcommand docstrings in `src/main.rs`:
 ```rust
 #[derive(Subcommand)]
 enum Commands {
-    /// Backup Environment and Backup Profile setup / 백업 환경 및 프로필 설정 마법사
+    /// Unified backup configuration setup wizard / 통합 백업 설정 마법사
     Setup {
         /// Select language (ko/en) / 언어 선택 (ko/en)
         #[arg(long)]

@@ -143,7 +143,7 @@ impl RealReportData {
         };
 
         let etc_backup_dir = Path::new("/etc/backup");
-        let backup_env_file = Path::new("/etc/backup/backup.env");
+        let backup_env_file = Path::new("/etc/backup/profiles.yaml");
 
         let (etc_backup_dir_perm, etc_backup_dir_safe) =
             get_file_perm_and_safety(etc_backup_dir, 0o700);
@@ -419,7 +419,7 @@ pub struct ReportExportOptions<'a> {
 
 #[derive(Debug, Clone, clap::Subcommand, Serialize, Deserialize)]
 pub enum ReportAction {
-    /// Check Backup Environment directory/file permissions and secret masking
+    /// Check unified profiles configuration permissions and secret masking
     Environment {
         #[arg(long, short = 'f')]
         file: Option<PathBuf>,

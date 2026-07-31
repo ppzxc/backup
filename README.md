@@ -35,7 +35,7 @@ cargo install --path .
 * **고성능 & 안전한 Rust CLI**: 빠른 실행 속도, 강력한 타입 안정성 및 메모리 안전성 보장.
 * **Functional Core / Imperative Shell 계층 구조**: 비즈니스 로직과 외부 I/O 레이어를 엄격히 분리하여 100% Mocking 및 단위 테스트 가능.
 * **심층 아키텍처 (Deep Module Seams)**:
-  * **Configuration Registry**: `/etc/backup` (`700`), `config.yml` / `backup.env` (`600`) POSIX 권한 자동 강제 및 `profiles.yaml` 파생 설정 동기화.
+  * **Configuration Registry**: `/etc/backup` (`700`)와 단일 설정 파일 `profiles.yaml` (`600`)에 resticprofile v2 및 애플리케이션 설정을 함께 관리.
   * **Doctor Diagnostic Engine**: ISMS-P 인증 감사 규정 검증(보안 권한, NTP 시각 동기화, DB 헤더 검증 및 RTO 측정 HTML 보고서 생성).
   * **Pipeline Engine**: DB 덤프 스트리밍 -> 1차 백업 -> 2차 2차 백업 복제 -> 보관 주기(Retention) 정리 수동/자동 원스톱 파이프라인 수행.
 * **보안 및 자격 증명 보호**: 비밀번호 및 Access Key 등 민감 자격 증명(`SecretString`) 마스킹 처리.
@@ -107,7 +107,6 @@ $ ./scripts/test_coverage.sh
 | 서브커맨드 | 주요 역할 및 설명 | 실행 예시 |
 | :--- | :--- | :--- |
 | **`setup`** | TUI 마법사로 환경/프로필 초기화, 바이너리 의존성 자동 설치, 저장소 초기화 | `backup setup`<br>`backup setup dependencies` |
-| **`config`** | 설정값 조회 (비밀값 마스킹), 설정 파일 편집 및 레거시 Bash `backup.env` 이관 | `backup config show`<br>`backup config edit` |
 | **`run`** | 전체 백업 파이프라인 수동/드라이런 실행 (DB -> Primary -> Secondary -> Retention) | `backup run`<br>`backup run --dry-run` |
 | **`doctor`** | 권한, 시각 동기화(NTP), 모의복구 훈련(RTO) 진단 및 ISMS-P HTML 보고서 생성 | `backup doctor`<br>`backup doctor environment --file report.html` |
 | **`copy`** | 1차 저장소에서 2차 저장소로 스냅샷 동기화 및 복사 (별칭: `sync`) | `backup copy`<br>`backup sync --dry-run` |

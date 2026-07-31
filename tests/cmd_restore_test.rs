@@ -6,6 +6,23 @@ use secrecy::SecretString;
 use support::MockResticRunner;
 
 #[test]
+fn restore_storage_defaults_to_primary_and_requires_an_enabled_secondary() {
+    use backup::commands::restore::{RestoreStorage, select_storage};
+    let mut config = BackupConfig::default();
+    config.storage.primary.repository = "primary-repository".into();
+    assert_eq!(
+        select_storage(&config, RestoreStorage::Primary).unwrap().0,
+        "primary-repository"
+    );
+    assert!(
+        select_storage(&config, RestoreStorage::Secondary)
+            .unwrap_err()
+            .to_string()
+            .contains("not configured")
+    );
+}
+
+#[test]
 fn test_execute_snapshots() {
     let mock_runner = MockResticRunner::new(0, "ID        Date\n12345678  2026-07-23");
     let config = BackupConfig {

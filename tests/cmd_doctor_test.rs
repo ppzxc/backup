@@ -17,7 +17,7 @@ fn doctor_reports_missing_explicit_temporary_config_path() {
     use backup::commands::doctor::{DoctorCategory, SystemHealthDiagnoser};
 
     let temp = tempfile::tempdir().unwrap();
-    let missing_config = temp.path().join("missing/config.yml");
+    let missing_config = temp.path().join("missing/profiles.yaml");
     let snapshot = SystemHealthDiagnoser::diagnose_with_runner(
         &MockRcloneRunner::new(0, "syno_backup"),
         &MockExecutor::new(),
@@ -29,7 +29,10 @@ fn doctor_reports_missing_explicit_temporary_config_path() {
         .iter()
         .find(|item| item.category == DoctorCategory::Config)
         .unwrap();
-    assert_eq!(config_item.detail, "Backup Environment is missing");
+    assert_eq!(
+        config_item.detail,
+        "Unified profiles configuration is missing"
+    );
 }
 
 #[test]

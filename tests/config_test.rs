@@ -133,7 +133,7 @@ storage:
 #[test]
 fn test_config_save_to_path() {
     let dir = tempdir().unwrap();
-    let file_path = dir.path().join("sub_dir").join("config.yaml");
+    let file_path = dir.path().join("sub_dir").join("profiles.yaml");
 
     let yaml = r#"
 version: "1.0"
@@ -294,7 +294,10 @@ storage:
     for secret in ["repository-secret", "access-key", "aws-secret"] {
         assert!(!profiles.contains(secret), "profiles leaked {secret}");
     }
-    assert!(profiles.contains("${BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY}"));
+    assert!(
+        !profiles.contains("env:\n      AWS_SECRET_ACCESS_KEY"),
+        "resticprofile profile must not override injected AWS credentials"
+    );
     assert!(config_dir.join("primary-password").exists());
 }
 
@@ -370,16 +373,26 @@ storage:
     let config1: BackupConfig = serde_yaml::from_str(yaml1).unwrap();
     config1.save_and_sync(&config_dir).unwrap();
 
-    let env_file = config_dir.join("backup.env");
-    let config_yml = config_dir.join("config.yml");
     let profiles_file = config_dir.join("profiles.yaml");
 
-    // Canonical config and derived resticprofile YAML should exist.
-    assert!(!env_file.exists(), "backup.env should not be created");
-    assert!(config_yml.exists(), "config.yml should be created");
+    // profiles.yaml is the sole canonical configuration file. Application settings
+    // live under its dedicated top-level section, separate from resticprofile v2 keys.
     assert!(profiles_file.exists(), "profiles.yaml must exist");
 
     let content1 = fs::read_to_string(&profiles_file).unwrap();
+    let parsed1: backup::config::model::ResticProfileConfig =
+        serde_yaml::from_str(&content1).unwrap();
+    let application = parsed1
+        .application
+        .expect("profiles.yaml must contain the application configuration section");
+    assert_eq!(application.profile, "log");
+    let loaded = BackupConfig::load_from_path(&profiles_file)
+        .expect("application settings must load from the unified profiles.yaml");
+    assert_eq!(loaded.profile, "log");
+    assert_eq!(
+        loaded.storage.primary.password.expose_secret(),
+        "secret_pass_123"
+    );
     assert!(content1.contains("log:"));
     assert!(content1.contains("sftp:backup@192.168.1.100:/backup"));
 

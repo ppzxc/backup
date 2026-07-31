@@ -155,7 +155,7 @@ pub fn render_json_real(report_type: ReportType, data: &RealReportData) -> Resul
                     etc_restic_dir: "/etc/backup".into(),
                     etc_restic_dir_permission: data.etc_backup_dir_perm.clone(),
                     etc_restic_dir_safe: data.etc_backup_dir_safe,
-                    backup_env_file: "/etc/backup/backup.env".into(),
+                    backup_env_file: "/etc/backup/profiles.yaml".into(),
                     backup_env_file_permission: data.backup_env_file_perm.clone(),
                     backup_env_file_safe: data.backup_env_file_safe,
                 },
