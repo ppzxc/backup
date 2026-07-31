@@ -49,3 +49,60 @@ storage:
         .assert()
         .success();
 }
+
+#[test]
+fn copy_propagates_backend_failure() {
+    let temp = TempDir::new().unwrap();
+    let config = temp.path().join("config.yml");
+    let profiles = temp.path().join("profiles.yml");
+    fs::write(&config, "version: '1.0'\nprofile: test\n").unwrap();
+    fs::write(&profiles, "not valid: [profiles").unwrap();
+
+    Command::cargo_bin("backup")
+        .unwrap()
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--profiles",
+            profiles.to_str().unwrap(),
+            "copy",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn database_dry_run_accepts_database_stream_configuration() {
+    let temp = TempDir::new().unwrap();
+    let config = temp.path().join("database.yml");
+    fs::write(
+        &config,
+        r#"version: '1.0'
+profile: database
+backup:
+  backupType: !dbStream
+    db_type: postgres
+    connection_url: postgres://postgres:secret@db:5432/app
+  targets: []
+  excludes: []
+retention: {keepDaily: 1, keepWeekly: 1, keepMonthly: 1}
+storage:
+  primary: {backend: s3, repository: 's3:http://minio:9000/database', password: test-password}
+"#,
+    )
+    .unwrap();
+    let parsed = backup::config::model::BackupConfig::load_from_path(&config);
+    assert!(parsed.is_ok(), "configuration must parse: {parsed:?}");
+
+    Command::cargo_bin("backup")
+        .unwrap()
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "database",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("pg_dump -> app.sql"));
+}

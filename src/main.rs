@@ -213,15 +213,13 @@ fn main() -> anyhow::Result<()> {
 
         Commands::Copy { profile, dry_run } => {
             let target_profile = profile.as_deref().unwrap_or("default");
-            match backup::commands::copy::execute_copy(
+            let out = backup::commands::copy::execute_copy(
                 &resticprofile,
                 &profiles_path,
                 target_profile,
                 dry_run,
-            ) {
-                Ok(out) => println!("{}", out),
-                Err(err) => println!("Copy completed with warning ({})", err),
-            }
+            )?;
+            println!("{}", out);
         }
 
         Commands::Run {

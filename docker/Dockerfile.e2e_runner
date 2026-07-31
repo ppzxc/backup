@@ -8,7 +8,8 @@ FROM golang:1-bookworm AS resticprofile
 RUN go install github.com/creativeprojects/resticprofile@latest
 
 FROM debian:bookworm
-ENV DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive \
+    container=docker
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl mariadb-client postgresql-client restic rclone openssh-client systemd \
     && rm -rf /var/lib/apt/lists/*

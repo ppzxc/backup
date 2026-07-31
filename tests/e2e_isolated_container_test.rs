@@ -1,6 +1,8 @@
 //! Docker-only acceptance test.  It deliberately has no availability guard: the
 //! default test contract requires the daemon, image pulls, and runner build.
+use std::fs;
 use std::process::{Command, Output};
+use tempfile::TempDir;
 
 const RUNNER: &str = "backup-e2e-runner";
 const NETWORK: &str = "backup-e2e-network";
@@ -46,6 +48,21 @@ impl Drop for DockerCleanup {
 #[test]
 fn isolated_container_matrix_exercises_storage_database_and_systemd() {
     let _cleanup = DockerCleanup;
+    let ssh_dir = TempDir::new().expect("create temporary SSH directory");
+    let authorized_keys = TempDir::new().expect("create temporary authorized-key directory");
+    let key_path = ssh_dir.path().join("id_ed25519");
+    let keygen = Command::new("ssh-keygen")
+        .args(["-q", "-N", "", "-f", key_path.to_str().unwrap()])
+        .status()
+        .expect("ssh-keygen must be installed for the E2E suite");
+    assert!(keygen.success(), "ssh-keygen must create the E2E key pair");
+    fs::copy(
+        key_path.with_extension("pub"),
+        authorized_keys.path().join("e2e.pub"),
+    )
+    .expect("install E2E public key for SFTP");
+    let ssh_dir_path = ssh_dir.path().to_str().unwrap().to_owned();
+    let authorized_keys_path = authorized_keys.path().to_str().unwrap().to_owned();
     docker_ok(&[
         "build",
         "--tag",
@@ -77,6 +94,8 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
         "backup-e2e-sftp",
         "--network",
         NETWORK,
+        "--mount",
+        &format!("type=bind,src={authorized_keys_path},dst=/home/backupuser/.ssh/keys,readonly"),
         "atmoz/sftp:alpine",
         "backupuser:backuppass:::upload",
     ]);
@@ -130,6 +149,8 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
         "--cgroupns=host",
         "--mount",
         "type=bind,src=/sys/fs/cgroup,dst=/sys/fs/cgroup,readonly",
+        "--mount",
+        &format!("type=bind,src={ssh_dir_path},dst=/work/e2e-key,readonly"),
         "-e",
         "AWS_ACCESS_KEY_ID=minioadmin",
         "-e",
@@ -145,15 +166,14 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
         "mkdir -p /work/source/nested /work/restore-primary /work/restore-secondary; printf 'alpha\\n' >/work/source/a; printf 'beta\\n' >/work/source/nested/b",
     );
     runner(
-        "ssh-keygen -q -N '' -f /root/.ssh/id_ed25519; mkdir -p /root/.ssh; printf 'Host *\\n  StrictHostKeyChecking no\\n' >/root/.ssh/config",
+        "mkdir -p /root/.ssh; cp /work/e2e-key/id_ed25519 /root/.ssh/id_ed25519; chmod 600 /root/.ssh/id_ed25519; printf 'Host *\\n  StrictHostKeyChecking no\\n  UserKnownHostsFile /dev/null\\n  IdentitiesOnly yes\\n' >/root/.ssh/config",
     );
     // The runner uses explicit paths for every CLI invocation; the files never touch /etc/backup.
     runner(
-        "cat >/work/config.yml <<'EOF'\nversion: '1.0'\nprofile: primary\nbackup:\n  backup_type: directory\n  targets: [/work/source]\n  excludes: []\nretention: {keep_daily: 1, keep_weekly: 1, keep_monthly: 1}\nstorage:\n  primary: {backend: s3, repository: 's3:http://backup-e2e-minio:9000/primary', password: e2e-password}\nEOF\ncat >/work/profiles.yml <<'EOF'\nversion: '2'\nprofiles:\n  primary:\n    repository: s3:http://backup-e2e-minio:9000/primary\n    password: e2e-password\n    env: {AWS_ACCESS_KEY_ID: minioadmin, AWS_SECRET_ACCESS_KEY: minioadmin}\n    backup: {source: [/work/source]}\nEOF\nrestic -r s3:http://backup-e2e-minio:9000/primary --password-command 'printf e2e-password' init\nbackup --config /work/config.yml --profiles /work/profiles.yml run --skip-database --skip-retention\nbackup --config /work/config.yml restore --target /work/restore-primary\n[ \"$(find /work/source -type f -print0 | xargs -0 sha256sum | awk '{print $1}' | sort)\" = \"$(find /work/restore-primary -type f -print0 | xargs -0 sha256sum | awk '{print $1}' | sort)\" ]",
+        "tree_digest() { (cd \"$1\" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sort); }\ncat >/work/config.yml <<'EOF'\nversion: '1.0'\nprofile: primary\nbackup:\n  backup_type: directory\n  targets: [/work/source]\n  excludes: []\nretention: {keep_daily: 1, keep_weekly: 1, keep_monthly: 1}\nstorage:\n  primary: {backend: s3, repository: 's3:http://backup-e2e-minio:9000/primary', password: e2e-password}\nEOF\ncat >/work/profiles.yml <<'EOF'\nversion: '2'\nprofiles:\n  primary:\n    repository: s3:http://backup-e2e-minio:9000/primary\n    password: e2e-password\n    initialize: true\n    env: {AWS_ACCESS_KEY_ID: minioadmin, AWS_SECRET_ACCESS_KEY: minioadmin}\n    backup: {source: [/work/source], schedule: '*-*-* 03:00:00'}\n    copy:\n      repository: sftp:backupuser@backup-e2e-sftp:/upload/s3-to-sftp\n      password: e2e-password\n      initialize: true\nEOF\nbackup --config /work/config.yml --profiles /work/profiles.yml run --skip-database --skip-retention\nbackup --config /work/config.yml restore --target /work/restore-primary\n[ \"$(tree_digest /work/source)\" = \"$(tree_digest /work/restore-primary/work/source)\" ]\nbackup --config /work/config.yml --profiles /work/profiles.yml copy --profile primary\ncat >/work/sftp.yml <<'EOF'\nversion: '1.0'\nprofile: sftp\nbackup:\n  backup_type: directory\n  targets: [/work/source]\n  excludes: []\nretention: {keep_daily: 1, keep_weekly: 1, keep_monthly: 1}\nstorage:\n  primary: {backend: sftp, repository: 'sftp:backupuser@backup-e2e-sftp:/upload/s3-to-sftp', password: e2e-password}\nEOF\nbackup --config /work/sftp.yml restore --target /work/restore-secondary\n[ \"$(tree_digest /work/source)\" = \"$(tree_digest /work/restore-secondary/work/source)\" ]",
     );
-    // Both migration directions are CLI operations; each endpoint is restored and compared.
     runner(
-        "backup --config /work/config.yml --profiles /work/profiles.yml copy --profile primary --dry-run",
+        "cat >/work/sftp-primary.yml <<'EOF'\nversion: '1.0'\nprofile: sftp-primary\nbackup:\n  backup_type: directory\n  targets: [/work/source]\n  excludes: []\nretention: {keep_daily: 1, keep_weekly: 1, keep_monthly: 1}\nstorage:\n  primary: {backend: sftp, repository: 'sftp:backupuser@backup-e2e-sftp:/upload/sftp-to-s3', password: e2e-password}\nEOF\ncat >/work/sftp-primary-profiles.yml <<'EOF'\nversion: '2'\nprofiles:\n  sftp-primary:\n    repository: sftp:backupuser@backup-e2e-sftp:/upload/sftp-to-s3\n    password: e2e-password\n    initialize: true\n    env: {AWS_ACCESS_KEY_ID: minioadmin, AWS_SECRET_ACCESS_KEY: minioadmin}\n    backup: {source: [/work/source]}\n    copy:\n      repository: s3:http://backup-e2e-minio:9000/sftp-to-s3\n      password: e2e-password\n      initialize: true\nEOF\nbackup --config /work/sftp-primary.yml --profiles /work/sftp-primary-profiles.yml run --skip-database --skip-retention\nbackup --config /work/sftp-primary.yml --profiles /work/sftp-primary-profiles.yml copy --profile sftp-primary\ncat >/work/reverse.yml <<'EOF'\nversion: '1.0'\nprofile: reverse\nbackup:\n  backup_type: directory\n  targets: [/work/source]\n  excludes: []\nretention: {keep_daily: 1, keep_weekly: 1, keep_monthly: 1}\nstorage:\n  primary: {backend: s3, repository: 's3:http://backup-e2e-minio:9000/sftp-to-s3', password: e2e-password}\nEOF\nrm -rf /work/restore-reverse && backup --config /work/reverse.yml restore --target /work/restore-reverse\n[ \"$(tree_digest /work/source)\" = \"$(tree_digest /work/restore-reverse/work/source)\" ]",
     );
 
     for (host, port, database, kind, seed, query) in [
@@ -197,7 +217,7 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
             format!("postgres://postgres:pgpass@{host}:{port}/{database}")
         };
         runner(&format!(
-            "cat >/work/db.yml <<'EOF'\nversion: '1.0'\nprofile: db\nbackup:\n  backup_type: {{ dbStream: {{ dbType: {kind}, connectionUrl: '{url}' }} }}\n  targets: []\n  excludes: []\nretention: {{keep_daily: 1, keep_weekly: 1, keep_monthly: 1}}\nstorage:\n  primary: {{backend: s3, repository: 's3:http://backup-e2e-minio:9000/db-{database}', password: e2e-password}}\nEOF\nrestic -r s3:http://backup-e2e-minio:9000/db-{database} --password-command 'printf e2e-password' init\n{command} --host={host} --port={port} --username={} --dbname={database} -c \"{seed}\"\nbackup --config /work/db.yml database\n{command} --host={host} --port={port} --username={} --dbname={database} -c 'DROP TABLE {};'\nrm -rf /work/db-restore && backup --config /work/db.yml restore --target /work/db-restore\n{command} --host={host} --port={port} --username={} --dbname={database} < \"$(find /work/db-restore -name '{database}.sql' -print -quit)\"\n{command} --host={host} --port={port} --username={} --dbname={database} -N -e \"{query}\" | grep -q '{}'",
+            "cat >/work/db.yml <<'EOF'\nversion: '1.0'\nprofile: db\nbackup:\n  backupType: !dbStream\n    db_type: {kind}\n    connection_url: '{url}'\n  targets: []\n  excludes: []\nretention: {{keepDaily: 1, keepWeekly: 1, keepMonthly: 1}}\nstorage:\n  primary: {{backend: s3, repository: 's3:http://backup-e2e-minio:9000/db-{database}', password: e2e-password}}\nEOF\nrestic -r s3:http://backup-e2e-minio:9000/db-{database} --password-command 'printf e2e-password' init\n{command} --host={host} --port={port} --username={} --dbname={database} -c \"{seed}\"\nbackup --config /work/db.yml database\n{command} --host={host} --port={port} --username={} --dbname={database} -c 'DROP TABLE {};'\nrm -rf /work/db-restore && backup --config /work/db.yml restore --target /work/db-restore\n{command} --host={host} --port={port} --username={} --dbname={database} < \"$(find /work/db-restore -name '{database}.sql' -print -quit)\"\n{command} --host={host} --port={port} --username={} --dbname={database} -N -e \"{query}\" | grep -q '{}'",
             if kind == "mysql" { "root" } else { "postgres" },
             if kind == "mysql" { "root" } else { "postgres" },
             if kind == "mysql" {
@@ -215,6 +235,6 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
         ));
     }
     runner(
-        "backup --config /work/config.yml --profiles /work/profiles.yml schedule enable; systemctl list-timers --all | grep -q resticprofile; backup --config /work/config.yml --profiles /work/profiles.yml schedule disable; ! systemctl list-timers --all | grep -q resticprofile",
+        "backup --config /work/config.yml --profiles /work/profiles.yml schedule enable; timer=$(systemctl list-timers --all --no-legend | awk '/resticprofile/ {print $1; exit}'); test -n \"$timer\"; systemctl is-active --quiet \"$timer\"; backup --config /work/config.yml --profiles /work/profiles.yml schedule disable; ! systemctl list-timers --all --no-legend | grep -q resticprofile",
     );
 }
