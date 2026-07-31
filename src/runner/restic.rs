@@ -174,6 +174,7 @@ impl<'a, E: CommandRunner> ResticRunner for ResticTool<'a, E> {
 pub struct MockResticRunner {
     pub exit_code: i32,
     pub response: String,
+    pub command_calls: std::sync::Mutex<Vec<(String, Vec<String>, Vec<(String, String)>)>>,
 }
 
 impl MockResticRunner {
@@ -181,6 +182,7 @@ impl MockResticRunner {
         Self {
             exit_code,
             response: response.to_string(),
+            command_calls: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -223,10 +225,17 @@ impl ResticRunner for MockResticRunner {
         _: &str,
         _: &str,
         _: &str,
-        _: &str,
-        _: &[String],
-        _: &[(&str, &str)],
+        program: &str,
+        args: &[String],
+        env: &[(&str, &str)],
     ) -> Result<String> {
+        self.command_calls.lock().unwrap().push((
+            program.into(),
+            args.to_vec(),
+            env.iter()
+                .map(|(key, value)| ((*key).into(), (*value).into()))
+                .collect(),
+        ));
         self.result()
     }
 }

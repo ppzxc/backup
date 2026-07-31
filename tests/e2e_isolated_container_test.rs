@@ -18,7 +18,8 @@ fn docker_ok(args: &[&str]) -> String {
     let output = docker(args);
     assert!(
         output.status.success(),
-        "Docker E2E command failed: {}",
+        "Docker E2E command failed. stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout).trim(),
         String::from_utf8_lossy(&output.stderr).trim()
     );
     String::from_utf8_lossy(&output.stdout).into_owned()
@@ -177,6 +178,8 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
     ]);
 
     runner("until systemctl show --property=Version --value | grep -q .; do sleep 1; done");
+    runner("mysqldump --version | grep -q 'Distrib 5.5.56'");
+    runner("pg_dump --version | grep -q 'PostgreSQL) 16.'");
     runner(
         "until curl -fsS http://backup-e2e-minio:9000/minio/health/live >/dev/null; do sleep 1; done",
     );
@@ -228,10 +231,15 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
         } else {
             "PGPASSWORD=pgpass psql"
         };
-        let query_flag = if kind == "mysql" { "-e" } else { "-c" };
+        let connection_args = if kind == "mysql" {
+            format!("--user=root --database={database}")
+        } else {
+            format!("--username=postgres --dbname={database}")
+        };
+        let execute_flag = if kind == "mysql" { "-e" } else { "-c" };
+        let rows_only_flag = if kind == "mysql" { "-N" } else { "-t" };
         runner(&format!(
-            "until {command} --host={host} --port={port} --username={} --dbname={database} -c 'SELECT 1' >/dev/null 2>&1; do sleep 1; done",
-            if kind == "mysql" { "root" } else { "postgres" },
+            "for _ in {{1..60}}; do {command} --host={host} --port={port} {connection_args} {execute_flag} 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done; {command} --host={host} --port={port} {connection_args} {execute_flag} 'SELECT 1' >/dev/null",
         ));
         let url = if kind == "mysql" {
             format!("mysql://root:rootpass@{host}:{port}/{database}")
@@ -239,24 +247,25 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
             format!("postgres://postgres:pgpass@{host}:{port}/{database}")
         };
         runner(&format!(
-            "cat >/work/db.yml <<'EOF'\nversion: '1.0'\nprofile: db\nbackup:\n  backupType: !dbStream\n    db_type: {kind}\n    connection_url: '{url}'\n  targets: []\n  excludes: []\nretention: {{keepDaily: 1, keepWeekly: 1, keepMonthly: 1}}\nstorage:\n  primary: {{backend: s3, repository: 's3:http://backup-e2e-minio:9000/db-{database}', password: e2e-password}}\nEOF\nrestic -r s3:http://backup-e2e-minio:9000/db-{database} --password-command 'printf e2e-password' init\n{command} --host={host} --port={port} --username={} --dbname={database} -c \"{seed}\"\nbackup --config /work/db.yml database\n{command} --host={host} --port={port} --username={} --dbname={database} -c 'DROP TABLE {};'\nrm -rf /work/db-restore && backup --config /work/db.yml restore --target /work/db-restore\n{command} --host={host} --port={port} --username={} --dbname={database} < \"$(find /work/db-restore -name '{database}.sql' -print -quit)\"\n{command} --host={host} --port={port} --username={} --dbname={database} -N {query_flag} \"{query}\" | grep -q '{}'",
-            if kind == "mysql" { "root" } else { "postgres" },
-            if kind == "mysql" { "root" } else { "postgres" },
-            if kind == "mysql" {
+            "cat >/work/db.yml <<'EOF'\nversion: '1.0'\nprofile: db\nbackup:\n  backupType: !dbStream\n    db_type: {kind}\n    connection_url: '{url}'\n  targets: []\n  excludes: []\nretention: {{keepDaily: 1, keepWeekly: 1, keepMonthly: 1}}\nstorage:\n  primary: {{backend: s3, repository: 's3:http://backup-e2e-minio:9000/db-{database}', password: e2e-password}}\nEOF\nrestic -r s3:http://backup-e2e-minio:9000/db-{database} --password-command 'printf e2e-password' init\n{command} --host={host} --port={port} {connection_args} {execute_flag} \"{seed}\"\nbackup --config /work/db.yml database\n{command} --host={host} --port={port} {connection_args} {execute_flag} 'DROP TABLE {table};'\nrm -rf /work/db-restore && backup --config /work/db.yml restore --target /work/db-restore\n{command} --host={host} --port={port} {connection_args} < \"$(find /work/db-restore -name '{database}.sql' -print -quit)\"\n{command} --host={host} --port={port} {connection_args} {rows_only_flag} {execute_flag} \"{query}\" | grep -q '{expected}'",
+            table = if kind == "mysql" {
                 "users"
             } else {
                 "audit_events"
             },
-            if kind == "mysql" { "root" } else { "postgres" },
-            if kind == "mysql" { "root" } else { "postgres" },
-            if kind == "mysql" {
+            expected = if kind == "mysql" {
                 "Maria"
             } else {
                 "Postgres16"
-            }
+            },
         ));
     }
+    runner("backup --config /work/config.yml --profiles /work/profiles.yml schedule enable");
     runner(
-        "backup --config /work/config.yml --profiles /work/profiles.yml schedule enable; timer=$(systemctl list-timers --all --no-legend | awk '/resticprofile/ {print $NF; exit}'); test -n \"$timer\"; systemctl is-active --quiet \"$timer\"; backup --config /work/config.yml --profiles /work/profiles.yml schedule disable; ! systemctl list-timers --all --no-legend | grep -q resticprofile",
+        "timer=resticprofile-backup@profile-primary.timer; systemctl list-timers --all --no-legend | grep -Fq \"$timer\"; systemctl is-active --quiet \"$timer\"",
+    );
+    runner("backup --config /work/config.yml --profiles /work/profiles.yml schedule disable");
+    runner(
+        "! systemctl list-timers --all --no-legend | grep -Fq resticprofile-backup@profile-primary.timer",
     );
 }

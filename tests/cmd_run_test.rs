@@ -67,6 +67,22 @@ fn database_stream_rejects_missing_connection_url() {
 }
 
 #[test]
+fn mysql_database_stream_uses_portable_dump_arguments() {
+    let mut config = BackupConfig::default();
+    config.backup.backup_type = BackupType::DbStream {
+        db_type: DatabaseType::Mysql,
+        connection_url: Some("mysql://root:secret@db:3306/app".into()),
+    };
+    let runner = MockResticRunner::new(0, "streamed");
+
+    execute_database_backup(&config, &runner, false).unwrap();
+
+    let calls = runner.command_calls.lock().unwrap();
+    assert_eq!(calls[0].0, "mysqldump");
+    assert!(!calls[0].1.contains(&"--skip-generated-columns".to_string()));
+}
+
+#[test]
 fn database_stream_rejects_url_without_database_name() {
     let mut config = BackupConfig::default();
     config.backup.backup_type = BackupType::DbStream {

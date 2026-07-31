@@ -7,13 +7,28 @@ RUN cargo build --release --locked --bin backup
 FROM golang:1-bookworm AS resticprofile
 RUN go install github.com/creativeprojects/resticprofile@latest
 
+FROM restic/restic:0.17.3 AS restic
+
+FROM mariadb:5.5.56 AS mariadb55_client
+
+FROM postgres:16-bookworm AS postgres16_client
+
 FROM debian:bookworm
 ENV DEBIAN_FRONTEND=noninteractive \
     container=docker
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl mariadb-client postgresql-client restic rclone openssh-client systemd \
+    ca-certificates curl mariadb-client postgresql-client rclone openssh-client systemd \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /workspace/target/release/backup /usr/local/bin/backup
 COPY --from=resticprofile /go/bin/resticprofile /usr/local/bin/resticprofile
+COPY --from=restic /usr/bin/restic /usr/local/bin/restic
+COPY --from=mariadb55_client /usr/bin/mysqldump /opt/mariadb55/bin/mysqldump
+COPY --from=mariadb55_client /usr/lib/x86_64-linux-gnu/libssl.so.1.0.0 /opt/mariadb55/lib/libssl.so.1.0.0
+COPY --from=mariadb55_client /usr/lib/x86_64-linux-gnu/libcrypto.so.1.0.0 /opt/mariadb55/lib/libcrypto.so.1.0.0
+RUN printf '%s\n' '#!/bin/sh' 'LD_LIBRARY_PATH=/opt/mariadb55/lib exec /opt/mariadb55/bin/mysqldump "$@"' \
+    > /usr/local/bin/mysqldump && chmod 755 /usr/local/bin/mysqldump
+COPY --from=postgres16_client /usr/lib/postgresql/16/bin/pg_dump /opt/postgres16/bin/pg_dump
+RUN printf '%s\n' '#!/bin/sh' 'exec /opt/postgres16/bin/pg_dump "$@"' \
+    > /usr/local/bin/pg_dump && chmod 755 /usr/local/bin/pg_dump
 STOPSIGNAL SIGRTMIN+3
 CMD ["/lib/systemd/systemd"]
