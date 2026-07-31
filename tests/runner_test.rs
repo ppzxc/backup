@@ -113,6 +113,37 @@ fn test_restic_tool_with_mock_executor() {
 }
 
 #[test]
+fn restic_database_stream_forwards_credentials_only_through_environment() {
+    let mock = MockExecutor::new();
+    mock.push_output(
+        "restic",
+        CommandOutput {
+            status_code: 0,
+            stdout: "streamed".into(),
+            stderr: String::new(),
+        },
+    );
+    let restic = ResticTool::new(&mock);
+
+    restic
+        .backup_command_with_env(
+            "local:/repo",
+            "repository-password",
+            "app.sql",
+            "pg_dump",
+            &["--dbname=app".into()],
+            &[("PGPASSWORD", "database-password")],
+        )
+        .unwrap();
+
+    assert_eq!(mock.get_calls()[0].1.last(), Some(&"--dbname=app".into()));
+    assert_eq!(
+        mock.get_environment_calls(),
+        vec![vec![("PGPASSWORD".into(), "database-password".into())]]
+    );
+}
+
+#[test]
 fn test_rclone_tool_with_mock_executor() {
     let mock = MockExecutor::new();
     mock.push_output(

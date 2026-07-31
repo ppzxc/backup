@@ -6,6 +6,12 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "backup", version)]
 struct Cli {
+    /// Backup Environment configuration file path.
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
+    /// Backup Profile configuration file path.
+    #[arg(long, global = true, value_name = "PATH")]
+    profiles: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -122,10 +128,14 @@ fn main() -> anyhow::Result<()> {
     let localized_cmd = backup::i18n::CliHelp::get(lang).apply_to_command(base_cmd);
     let matches = localized_cmd.get_matches();
     let cli = Cli::from_arg_matches(&matches).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    let default_profiles_path = std::path::Path::new(backup::config::model::DEFAULT_PROFILES_PATH);
-    let default_config_path = std::path::Path::new(backup::config::model::DEFAULT_CONFIG_PATH);
-    let config = backup::config::model::BackupConfig::load_from_path(default_config_path)
-        .unwrap_or_default();
+    let profiles_path = cli
+        .profiles
+        .unwrap_or_else(|| PathBuf::from(backup::config::model::DEFAULT_PROFILES_PATH));
+    let config_path = cli
+        .config
+        .unwrap_or_else(|| PathBuf::from(backup::config::model::DEFAULT_CONFIG_PATH));
+    let config =
+        backup::config::model::BackupConfig::load_from_path(&config_path).unwrap_or_default();
     let executor = backup::runner::executor::SystemExecutor;
     let rclone = backup::runner::rclone::RcloneTool::new(&executor);
     let resticprofile = backup::runner::resticprofile::ResticProfileTool::new(&executor);
@@ -142,22 +152,23 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", out);
             }
             Some(SetupAction::BackendInit) => {
-                if let Ok(parsed) = backup::config::model::ResticProfileConfig::load_from_path(
-                    default_profiles_path,
-                ) {
+                if let Ok(parsed) =
+                    backup::config::model::ResticProfileConfig::load_from_path(&profiles_path)
+                {
                     let names = parsed.profile_names();
                     for name in names {
                         println!(
                             "=== Initializing Backend Storage for Profile: [{}] ===",
                             name
                         );
-                        match resticprofile.init(default_profiles_path, &name) {
+                        match resticprofile.init(&profiles_path, &name) {
                             Ok(res) => println!("{}", res.trim_end()),
                             Err(err) => println!("Repository initialization note ({})", err),
                         }
                     }
                     init_secondary_backend_if_present(
-                        default_profiles_path,
+                        &profiles_path,
+                        &config_path,
                         &resticprofile,
                         &executor,
                         true,
@@ -170,26 +181,27 @@ fn main() -> anyhow::Result<()> {
                 let prompter = backup::commands::setup::InquirePrompter;
                 let lang_opt = lang.as_deref().map(backup::i18n::Language::from_str);
                 if let Err(err) = backup::commands::setup::run_setup_with_prompter(
-                    default_profiles_path,
+                    &profiles_path,
                     &prompter,
                     non_interactive,
                     lang_opt,
                 ) {
                     println!(
                         "Setup initialized (Config target: {}, status: {})",
-                        default_config_path.display(),
+                        config_path.display(),
                         err
                     );
                 } else {
                     println!("Setup completed successfully.");
-                    if let Ok(parsed) = backup::config::model::ResticProfileConfig::load_from_path(
-                        default_profiles_path,
-                    ) {
+                    if let Ok(parsed) =
+                        backup::config::model::ResticProfileConfig::load_from_path(&profiles_path)
+                    {
                         for name in parsed.profile_names() {
-                            let _ = resticprofile.init(default_profiles_path, &name);
+                            let _ = resticprofile.init(&profiles_path, &name);
                         }
                         init_secondary_backend_if_present(
-                            default_profiles_path,
+                            &profiles_path,
+                            &config_path,
                             &resticprofile,
                             &executor,
                             false,
@@ -203,7 +215,7 @@ fn main() -> anyhow::Result<()> {
             let target_profile = profile.as_deref().unwrap_or("default");
             match backup::commands::copy::execute_copy(
                 &resticprofile,
-                default_profiles_path,
+                &profiles_path,
                 target_profile,
                 dry_run,
             ) {
@@ -229,7 +241,7 @@ fn main() -> anyhow::Result<()> {
             let profiles_to_run = if let Some(p) = profile {
                 vec![p]
             } else if let Ok(parsed) =
-                backup::config::model::ResticProfileConfig::load_from_path(default_profiles_path)
+                backup::config::model::ResticProfileConfig::load_from_path(&profiles_path)
             {
                 let names = parsed.profile_names();
                 if names.is_empty() {
@@ -257,7 +269,7 @@ fn main() -> anyhow::Result<()> {
             for target_profile in &profiles_to_run {
                 println!("=== Running Backup Profile: [{}] ===", target_profile);
                 let out = backup::commands::run::execute_run_profile(
-                    default_profiles_path,
+                    &profiles_path,
                     target_profile,
                     &opts,
                     &resticprofile,
@@ -271,8 +283,7 @@ fn main() -> anyhow::Result<()> {
         ),
 
         Commands::Doctor => {
-            let out =
-                backup::commands::doctor::run_doctor_checks(&rclone, Some(default_config_path))?;
+            let out = backup::commands::doctor::run_doctor_checks(&rclone, Some(&config_path))?;
             println!("{}", out);
         }
         Commands::Report {
@@ -286,21 +297,21 @@ fn main() -> anyhow::Result<()> {
         Commands::Schedule { action } => match action {
             ScheduleAction::Enable => {
                 let out = backup::commands::schedule::execute_schedule_enable(
-                    default_profiles_path,
+                    &profiles_path,
                     &resticprofile,
                 )?;
                 println!("{}", out);
             }
             ScheduleAction::Disable => {
                 let out = backup::commands::schedule::execute_schedule_disable(
-                    default_profiles_path,
+                    &profiles_path,
                     &resticprofile,
                 )?;
                 println!("{}", out);
             }
             ScheduleAction::Status => {
                 let out = backup::commands::schedule::execute_schedule_status(
-                    default_profiles_path,
+                    &profiles_path,
                     &resticprofile,
                 )?;
                 println!("{}", out);
@@ -322,7 +333,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Status { profile } => {
             let out = backup::commands::status::execute_status_from_profiles_config(
-                default_profiles_path,
+                &profiles_path,
                 profile.as_deref(),
                 &resticprofile,
             )?;
@@ -337,7 +348,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Uninstall { yes, purge } => {
             let out = backup::commands::uninstall::perform_uninstall(
-                default_config_path,
+                &config_path,
                 &resticprofile,
                 yes,
                 purge,
@@ -352,19 +363,18 @@ fn init_secondary_backend_if_present<
     R: ResticProfileRunner,
     E: backup::runner::executor::CommandRunner,
 >(
+    profiles_path: &std::path::Path,
     config_path: &std::path::Path,
     resticprofile: &R,
     executor: &E,
     verbose: bool,
 ) {
-    if let Ok(parsed) = backup::config::model::ResticProfileConfig::load_from_path(config_path) {
+    if let Ok(parsed) = backup::config::model::ResticProfileConfig::load_from_path(profiles_path) {
         if let Some(sec_profile) = parsed.profiles.get("secondary") {
             let repo = sec_profile.repository.as_deref().unwrap_or("");
             if repo.starts_with("sftp:") {
-                let backup_config = backup::config::model::BackupConfig::load_from_path(
-                    std::path::Path::new(backup::config::model::DEFAULT_CONFIG_PATH),
-                )
-                .ok();
+                let backup_config =
+                    backup::config::model::BackupConfig::load_from_path(config_path).ok();
                 let sftp_conf = backup_config
                     .as_ref()
                     .and_then(|c| c.storage.secondary.as_ref())
@@ -393,7 +403,7 @@ fn init_secondary_backend_if_present<
             if verbose {
                 println!("=== Initializing Secondary Backend Storage for Profile: [secondary] ===");
             }
-            match resticprofile.init(config_path, "secondary") {
+            match resticprofile.init(profiles_path, "secondary") {
                 Ok(res) => {
                     if verbose && !res.trim().is_empty() {
                         println!("{}", res.trim_end());

@@ -60,6 +60,7 @@ impl CommandRunner for SystemExecutor {
 pub struct MockExecutor {
     responses: Arc<Mutex<HashMap<String, Vec<CommandOutput>>>>,
     calls: Arc<Mutex<Vec<(String, Vec<String>)>>>,
+    environment_calls: Arc<Mutex<Vec<Vec<(String, String)>>>>,
 }
 
 impl MockExecutor {
@@ -79,6 +80,10 @@ impl MockExecutor {
 
     pub fn get_calls(&self) -> Vec<(String, Vec<String>)> {
         self.calls.lock().unwrap().clone()
+    }
+
+    pub fn get_environment_calls(&self) -> Vec<Vec<(String, String)>> {
+        self.environment_calls.lock().unwrap().clone()
     }
 }
 
@@ -102,5 +107,19 @@ impl CommandRunner for MockExecutor {
             stdout: String::new(),
             stderr: String::new(),
         })
+    }
+
+    fn run_with_env(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> Result<CommandOutput> {
+        self.environment_calls.lock().unwrap().push(
+            env.iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect(),
+        );
+        self.run(program, args)
     }
 }

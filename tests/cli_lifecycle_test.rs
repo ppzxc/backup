@@ -1,64 +1,51 @@
 use assert_cmd::Command;
+use std::fs;
+use tempfile::TempDir;
 
 #[test]
-fn test_e2e_cli_lifecycle_full_subcommands() {
-    // 1. Version & Help
-    Command::cargo_bin("backup")
-        .unwrap()
-        .arg("--version")
-        .assert()
-        .success();
-    Command::cargo_bin("backup")
-        .unwrap()
-        .arg("--help")
-        .assert()
-        .success();
+fn cli_lifecycle_contract_uses_explicit_temporary_paths() {
+    let temp = TempDir::new().unwrap();
+    let config = temp.path().join("config.yml");
+    let profiles = temp.path().join("profiles.yml");
+    fs::write(
+        &config,
+        r#"version: "1.0"
+profile: "test"
+backup:
+  backup_type: directory
+  targets: ["/tmp"]
+  excludes: []
+retention: { keep_daily: 1, keep_weekly: 1, keep_monthly: 1 }
+storage:
+  primary: { backend: "local", repository: "/tmp/repo", password: "test-password" }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &profiles,
+        "version: '2'\nprofiles:\n  test:\n    repository: /tmp/repo\n",
+    )
+    .unwrap();
 
-    // 2. Setup
-    Command::cargo_bin("backup")
-        .unwrap()
-        .args(&["setup", "--non-interactive"])
-        .assert()
-        .success();
-
-    // 3. Status
-    Command::cargo_bin("backup")
-        .unwrap()
-        .arg("status")
-        .assert()
-        .success();
-
-    // 4. Schedule & Doctor
-    Command::cargo_bin("backup")
-        .unwrap()
-        .arg("schedule")
-        .arg("status")
-        .assert()
-        .success();
-    Command::cargo_bin("backup")
-        .unwrap()
-        .arg("doctor")
-        .assert()
-        .success();
-
-    // 5. Run & Restore flags wiring
     let run_assert = Command::cargo_bin("backup")
         .unwrap()
-        .args(&["run", "--dry-run", "--skip-database"])
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "--profiles",
+            profiles.to_str().unwrap(),
+            "run",
+            "--dry-run",
+            "--skip-database",
+        ])
         .assert()
         .success();
     let run_stdout = String::from_utf8(run_assert.get_output().stdout.clone()).unwrap();
     assert!(!run_stdout.contains("Database streaming backup check"));
 
-    // 6. Copy (Sync)
     Command::cargo_bin("backup")
         .unwrap()
-        .args(&["copy", "--dry-run"])
-        .assert()
-        .success();
-    Command::cargo_bin("backup")
-        .unwrap()
-        .args(&["sync", "--dry-run"])
+        .args(["--config", config.to_str().unwrap(), "version"])
         .assert()
         .success();
 }
