@@ -28,14 +28,18 @@ pub fn execute_status_from_profiles_config<R: crate::runner::resticprofile::Rest
     runner: &R,
 ) -> Result<String> {
     if !config_path.exists() {
-        return Ok(format!("Configuration file not found at {}", config_path.display()));
+        return Ok(format!(
+            "Configuration file not found at {}",
+            config_path.display()
+        ));
     }
 
     let restic_config = crate::config::model::ResticProfileConfig::load_from_path(config_path)?;
-    let resolved_profiles = crate::config::profile_resolver::ProfileResolver::resolve_all_or_filtered(
-        &restic_config,
-        profile_filter,
-    );
+    let resolved_profiles =
+        crate::config::profile_resolver::ProfileResolver::resolve_all_or_filtered(
+            &restic_config,
+            profile_filter,
+        );
 
     if resolved_profiles.is_empty() {
         return Ok("No active backup profiles found in configuration.".to_string());
@@ -101,10 +105,7 @@ pub fn execute_status_with_runner<E: CommandRunner>(
             }
         }
         Err(err) => {
-            output_str.push_str(&format!(
-                "\n[WARN] Failed to fetch snapshots: {}",
-                err
-            ));
+            output_str.push_str(&format!("\n[WARN] Failed to fetch snapshots: {}", err));
         }
     }
 
@@ -119,13 +120,26 @@ fn query_snapshots<E: CommandRunner>(
     let pass_file = create_temp_password_file(password)?;
     let pass_path = pass_file.path().to_string_lossy();
 
-    let output = runner.run("restic", &["-r", repo, "--password-file", &pass_path, "snapshots", "--json"])?;
+    let output = runner.run(
+        "restic",
+        &[
+            "-r",
+            repo,
+            "--password-file",
+            &pass_path,
+            "snapshots",
+            "--json",
+        ],
+    )?;
 
     if output.status_code != 0 {
         let err_msg = if !output.stderr.trim().is_empty() {
             output.stderr.trim().to_string()
         } else {
-            format!("restic snapshots failed with exit code {}", output.status_code)
+            format!(
+                "restic snapshots failed with exit code {}",
+                output.status_code
+            )
         };
         anyhow::bail!("{}", err_msg);
     }

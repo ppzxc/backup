@@ -48,7 +48,6 @@ fn test_system_executor_run_success_and_invalid_program() {
     assert!(err.is_err());
 }
 
-
 #[test]
 fn test_restic_tool_with_mock_executor() {
     let mock = MockExecutor::new();
@@ -203,8 +202,20 @@ fn test_resticprofile_tool_with_mock_executor() {
     let calls = mock.get_calls();
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0].0, "resticprofile");
-    assert_eq!(calls[0].1, vec!["--config", "/etc/backup/profiles.yaml", "--name", "self", "backup"]);
-    assert_eq!(calls[1].1, vec!["--config", "/etc/backup/profiles.yaml", "schedule", "--all"]);
+    assert_eq!(
+        calls[0].1,
+        vec![
+            "--config",
+            "/etc/backup/profiles.yaml",
+            "--name",
+            "self",
+            "backup"
+        ]
+    );
+    assert_eq!(
+        calls[1].1,
+        vec!["--config", "/etc/backup/profiles.yaml", "schedule", "--all"]
+    );
 }
 
 #[test]
@@ -232,10 +243,47 @@ fn test_resticprofile_tool_all_methods() {
 
     let calls = mock.get_calls();
     assert_eq!(calls.len(), 5);
-    assert_eq!(calls[0].1, vec!["--config", "/etc/backup/profiles.yaml", "unschedule", "--all"]);
-    assert_eq!(calls[1].1, vec!["--config", "/etc/backup/profiles.yaml", "status", "--all"]);
-    assert_eq!(calls[2].1, vec!["--config", "/etc/backup/profiles.yaml", "--name", "self", "snapshots"]);
-    assert_eq!(calls[3].1, vec!["--config", "/etc/backup/profiles.yaml", "--name", "self", "prune"]);
-    assert_eq!(calls[4].1, vec!["--config", "/etc/backup/profiles.yaml", "--name", "self", "check"]);
+    assert_eq!(
+        calls[0].1,
+        vec![
+            "--config",
+            "/etc/backup/profiles.yaml",
+            "unschedule",
+            "--all"
+        ]
+    );
+    assert_eq!(
+        calls[1].1,
+        vec!["--config", "/etc/backup/profiles.yaml", "status", "--all"]
+    );
+    assert_eq!(
+        calls[2].1,
+        vec![
+            "--config",
+            "/etc/backup/profiles.yaml",
+            "--name",
+            "self",
+            "snapshots"
+        ]
+    );
+    assert_eq!(
+        calls[3].1,
+        vec![
+            "--config",
+            "/etc/backup/profiles.yaml",
+            "--name",
+            "self",
+            "prune"
+        ]
+    );
+    assert_eq!(
+        calls[4].1,
+        vec![
+            "--config",
+            "/etc/backup/profiles.yaml",
+            "--name",
+            "self",
+            "check"
+        ]
+    );
 }
-

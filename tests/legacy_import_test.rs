@@ -39,4 +39,3 @@ RCLONE_CONFIG_SYNO_BACKUP_KEY_FILE='/home/user/.ssh/id_rsa'
         Some("/home/user/.ssh/id_rsa".into())
     );
 }
-

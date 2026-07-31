@@ -466,7 +466,10 @@ fn render_environment_html(data: &RealReportData) -> String {
         COMMON_REPORT_CSS,
         data.timestamp,
         data.hostname,
-        data.audit.system_manager.as_deref().unwrap_or("시스템 운영팀"),
+        data.audit
+            .system_manager
+            .as_deref()
+            .unwrap_or("시스템 운영팀"),
         data.hostname,
         data.config.backup.targets.join(","),
         data.config.retention.keep_daily,
@@ -674,5 +677,3 @@ pub fn render_html(report_type: ReportType, _results: &AuditDiagnosticResults) -
     let data = RealReportData::collect(&config);
     render_html_real(report_type, &data)
 }
-
-

@@ -1,5 +1,5 @@
-use anyhow::Result;
 use crate::runner::executor::CommandRunner;
+use anyhow::Result;
 
 pub trait RcloneRunner {
     fn check_connectivity(&self, remote: &str) -> Result<String>;
@@ -59,5 +59,3 @@ impl RcloneRunner for MockRcloneRunner {
         Ok(self.response.clone())
     }
 }
-
-

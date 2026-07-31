@@ -9,22 +9,32 @@ use testcontainers::{GenericImage, ImageExt};
 fn test_e2e_s3_primary_sftp_secondary_backup_copy_restore() {
     // 0. Verify setup dependencies CLI check
     let mut setup_cmd = Command::cargo_bin("backup").unwrap();
-    setup_cmd.arg("setup").arg("dependencies").assert().success();
+    setup_cmd
+        .arg("setup")
+        .arg("dependencies")
+        .assert()
+        .success();
 
     // 1. Start S3 (MinIO) Primary Storage Container
     let minio_image = GenericImage::new("minio/minio", "RELEASE.2024-01-16T16-07-38Z")
         .with_env_var("MINIO_ROOT_USER", "minioadmin")
         .with_env_var("MINIO_ROOT_PASSWORD", "minioadmin")
         .with_cmd(vec!["server", "/data"]);
-    let minio_node = minio_image.start().expect("Failed to start MinIO container");
-    let s3_port = minio_node.get_host_port_ipv4(9000).expect("Failed to get MinIO port");
+    let minio_node = minio_image
+        .start()
+        .expect("Failed to start MinIO container");
+    let s3_port = minio_node
+        .get_host_port_ipv4(9000)
+        .expect("Failed to get MinIO port");
     assert!(s3_port > 0);
 
     // 2. Start SFTP Secondary Storage Container
-    let sftp_image = GenericImage::new("atmoz/sftp", "alpine")
-        .with_cmd(vec!["backupuser:backuppass:::upload"]);
+    let sftp_image =
+        GenericImage::new("atmoz/sftp", "alpine").with_cmd(vec!["backupuser:backuppass:::upload"]);
     let sftp_node = sftp_image.start().expect("Failed to start SFTP container");
-    let sftp_port = sftp_node.get_host_port_ipv4(22).expect("Failed to get SFTP port");
+    let sftp_port = sftp_node
+        .get_host_port_ipv4(22)
+        .expect("Failed to get SFTP port");
     assert!(sftp_port > 0);
 
     // 3. Create mock files and directories for backup
@@ -47,8 +57,14 @@ fn test_e2e_s3_primary_sftp_secondary_backup_copy_restore() {
     let restored_bytes = fs::read(&restored_file_path).unwrap();
     let restored_checksum: u64 = restored_bytes.iter().map(|&b| b as u64).sum();
 
-    assert_eq!(orig_bytes, restored_bytes, "Restored file content must match original byte-for-byte!");
-    assert_eq!(orig_checksum, restored_checksum, "Restored file checksum must match original 100%!");
+    assert_eq!(
+        orig_bytes, restored_bytes,
+        "Restored file content must match original byte-for-byte!"
+    );
+    assert_eq!(
+        orig_checksum, restored_checksum,
+        "Restored file checksum must match original 100%!"
+    );
 
     // 4. Verify CLI executable interacts with status
     let mut status_cmd = Command::cargo_bin("backup").unwrap();
@@ -59,10 +75,12 @@ fn test_e2e_s3_primary_sftp_secondary_backup_copy_restore() {
 #[test]
 fn test_e2e_sftp_primary_s3_secondary_migration() {
     // 1. Start SFTP Primary Storage Container
-    let sftp_image = GenericImage::new("atmoz/sftp", "alpine")
-        .with_cmd(vec!["backupuser:backuppass:::upload"]);
+    let sftp_image =
+        GenericImage::new("atmoz/sftp", "alpine").with_cmd(vec!["backupuser:backuppass:::upload"]);
     let sftp_node = sftp_image.start().expect("Failed to start SFTP container");
-    let sftp_port = sftp_node.get_host_port_ipv4(22).expect("Failed to get SFTP port");
+    let sftp_port = sftp_node
+        .get_host_port_ipv4(22)
+        .expect("Failed to get SFTP port");
     assert!(sftp_port > 0);
 
     // 2. Start S3 (MinIO) Secondary Storage Container
@@ -70,8 +88,12 @@ fn test_e2e_sftp_primary_s3_secondary_migration() {
         .with_env_var("MINIO_ROOT_USER", "minioadmin")
         .with_env_var("MINIO_ROOT_PASSWORD", "minioadmin")
         .with_cmd(vec!["server", "/data"]);
-    let minio_node = minio_image.start().expect("Failed to start MinIO container");
-    let s3_port = minio_node.get_host_port_ipv4(9000).expect("Failed to get MinIO port");
+    let minio_node = minio_image
+        .start()
+        .expect("Failed to start MinIO container");
+    let s3_port = minio_node
+        .get_host_port_ipv4(9000)
+        .expect("Failed to get MinIO port");
     assert!(s3_port > 0);
 
     // 3. Setup temporary file fixture
@@ -94,7 +116,10 @@ fn test_e2e_sftp_primary_s3_secondary_migration() {
     let restored_bytes = fs::read(&restored_file).unwrap();
     let restored_checksum: u64 = restored_bytes.iter().map(|&b| b as u64).sum();
 
-    assert_eq!(orig_checksum, restored_checksum, "SFTP restore checksum must match original!");
+    assert_eq!(
+        orig_checksum, restored_checksum,
+        "SFTP restore checksum must match original!"
+    );
 
     let mut doctor_cmd = Command::cargo_bin("backup").unwrap();
     doctor_cmd.arg("doctor").assert().success();

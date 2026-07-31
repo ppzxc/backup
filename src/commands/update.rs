@@ -1,5 +1,5 @@
-use anyhow::{anyhow, Result};
 use crate::runner::executor::{CommandRunner, SystemExecutor};
+use anyhow::{Result, anyhow};
 
 /// 시맨틱 버전 수치 파싱 (예: "v0.1.5" -> Some((0, 1, 5)))
 pub fn parse_version(v: &str) -> Option<(u32, u32, u32)> {
@@ -25,7 +25,9 @@ pub fn is_newer_version(current: &str, latest: &str) -> bool {
 }
 
 /// GitHub Releases API를 조회하여 최신 태그명과 다운로드 URL을 가져옵니다.
-pub fn fetch_latest_release_info_with_runner<R: CommandRunner>(runner: &R) -> Result<(String, String)> {
+pub fn fetch_latest_release_info_with_runner<R: CommandRunner>(
+    runner: &R,
+) -> Result<(String, String)> {
     let output = runner.run(
         "curl",
         &[
@@ -39,7 +41,9 @@ pub fn fetch_latest_release_info_with_runner<R: CommandRunner>(runner: &R) -> Re
     )?;
 
     if output.status_code != 0 {
-        return Err(anyhow!("Failed to fetch release info from GitHub Releases API"));
+        return Err(anyhow!(
+            "Failed to fetch release info from GitHub Releases API"
+        ));
     }
 
     let json: serde_json::Value = serde_json::from_str(&output.stdout)?;
@@ -81,7 +85,10 @@ pub fn fetch_latest_release_info() -> Result<(String, String)> {
 }
 
 /// 현재 실행 바이너리를 다운로드한 새 바이너리로 교체합니다.
-pub fn perform_self_replace_with_runner<R: CommandRunner>(download_url: &str, runner: &R) -> Result<()> {
+pub fn perform_self_replace_with_runner<R: CommandRunner>(
+    download_url: &str,
+    runner: &R,
+) -> Result<()> {
     let current_exe = std::env::current_exe()?;
     let tmp_dir = tempfile::tempdir()?;
     let archive_path = tmp_dir.path().join("backup_update.tar.gz");
@@ -91,7 +98,10 @@ pub fn perform_self_replace_with_runner<R: CommandRunner>(download_url: &str, ru
     // 1. 다운로드
     let out = runner.run("curl", &["-fsSL", download_url, "-o", archive_path_str])?;
     if out.status_code != 0 {
-        return Err(anyhow!("Failed to download update package from {}", download_url));
+        return Err(anyhow!(
+            "Failed to download update package from {}",
+            download_url
+        ));
     }
 
     // 2. 압축 해제
@@ -126,7 +136,10 @@ pub fn perform_self_replace(download_url: &str) -> Result<()> {
 }
 
 /// 자가 업데이트 실행 및 결과 메시지를 반환합니다.
-pub fn execute_update_check_with_runner<R: CommandRunner>(current_version: &str, runner: &R) -> Result<String> {
+pub fn execute_update_check_with_runner<R: CommandRunner>(
+    current_version: &str,
+    runner: &R,
+) -> Result<String> {
     match fetch_latest_release_info_with_runner(runner) {
         Ok((latest_tag, download_url)) => {
             if is_newer_version(current_version, &latest_tag) {
@@ -142,7 +155,10 @@ pub fn execute_update_check_with_runner<R: CommandRunner>(current_version: &str,
                     ))
                 }
             } else {
-                Ok(format!("Current version is {}. Already up to date.", current_version))
+                Ok(format!(
+                    "Current version is {}. Already up to date.",
+                    current_version
+                ))
             }
         }
         Err(e) => Ok(format!(

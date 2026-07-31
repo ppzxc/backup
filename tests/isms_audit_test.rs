@@ -1,6 +1,8 @@
-use backup::commands::report::{execute_report_file_export, render_html_isms_report_with_type, AuditReportMeta, ReportType};
-use tempfile::tempdir;
+use backup::commands::report::{
+    AuditReportMeta, ReportType, execute_report_file_export, render_html_isms_report_with_type,
+};
 use std::fs;
+use tempfile::tempdir;
 
 #[test]
 fn test_isms_environment_audit_report_format() {

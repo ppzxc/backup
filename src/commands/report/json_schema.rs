@@ -168,7 +168,11 @@ pub fn render_json_real(report_type: ReportType, data: &RealReportData) -> Resul
                 hostname: data.hostname.clone(),
                 timestamp: data.timestamp.clone(),
                 report_type: "daily_backup_review".into(),
-                tester: data.audit.system_manager.clone().unwrap_or_else(|| "시스템 운영팀".into()),
+                tester: data
+                    .audit
+                    .system_manager
+                    .clone()
+                    .unwrap_or_else(|| "시스템 운영팀".into()),
                 backup_policy: serde_json::json!({
                     "backend": "sftp",
                     "repository": format!("rclone:syno_backup:/backup/{}", data.hostname),
@@ -232,9 +236,18 @@ pub fn render_json_real(report_type: ReportType, data: &RealReportData) -> Resul
                 timestamp: data.timestamp.clone(),
                 report_type: "restore_drill".into(),
                 test_date,
-                tester: data.audit.system_manager.clone().unwrap_or_else(|| "시스템 운영팀".into()),
-                ciso: data.audit.security_officer.clone().unwrap_or_else(|| "정보보안책임자".into()),
-                target_snapshot_id: "58afba4bb29c368bb3a3cb45c18d3da8a1b09709cd19df9aeda1b722eb825ce1".into(),
+                tester: data
+                    .audit
+                    .system_manager
+                    .clone()
+                    .unwrap_or_else(|| "시스템 운영팀".into()),
+                ciso: data
+                    .audit
+                    .security_officer
+                    .clone()
+                    .unwrap_or_else(|| "정보보안책임자".into()),
+                target_snapshot_id:
+                    "58afba4bb29c368bb3a3cb45c18d3da8a1b09709cd19df9aeda1b722eb825ce1".into(),
                 target_snapshot_time: data.timestamp.clone(),
                 target_directory: "/tmp/restore_test".into(),
                 recovery_results: RecoveryResultsJson {
@@ -262,5 +275,3 @@ pub fn render_json(report_type: ReportType, _results: &AuditDiagnosticResults) -
     let data = RealReportData::collect(&config);
     render_json_real(report_type, &data)
 }
-
-

@@ -1,8 +1,8 @@
-use anyhow::Result;
-use std::path::Path;
-use secrecy::SecretString;
 use crate::config::model::*;
-use crate::i18n::{Language, I18nMessages};
+use crate::i18n::{I18nMessages, Language};
+use anyhow::Result;
+use secrecy::SecretString;
+use std::path::Path;
 
 #[derive(Clone)]
 pub struct SetupParams {
@@ -18,7 +18,11 @@ pub struct SetupParams {
 }
 
 pub trait SetupPrompter {
-    fn prompt_setup_params(&self, lang_opt: Option<Language>, config_dir: &Path) -> Result<SetupParams>;
+    fn prompt_setup_params(
+        &self,
+        lang_opt: Option<Language>,
+        config_dir: &Path,
+    ) -> Result<SetupParams>;
 }
 
 pub struct InquirePrompter;
@@ -44,7 +48,11 @@ fn prompt_text_with_default(msg: &str, default_val: &str, lang: Language) -> Res
 pub const DEFAULT_BACKUP_TARGET: &str = "/var/log";
 
 impl SetupPrompter for InquirePrompter {
-    fn prompt_setup_params(&self, lang_opt: Option<Language>, config_dir: &Path) -> Result<SetupParams> {
+    fn prompt_setup_params(
+        &self,
+        lang_opt: Option<Language>,
+        config_dir: &Path,
+    ) -> Result<SetupParams> {
         let lang = lang_opt.unwrap_or(Language::En);
         let msg = I18nMessages::get(lang);
 
@@ -53,28 +61,37 @@ impl SetupPrompter for InquirePrompter {
         let backup_type_choice = inquire::Select::new(
             msg.select_backup_type,
             vec![msg.dir_batch_backup, msg.db_stream_backup],
-        ).prompt()?;
+        )
+        .prompt()?;
 
         let (backup_type, targets) = if backup_type_choice.starts_with("[1]") {
             let t = prompt_text_with_default(msg.enter_target_dir, DEFAULT_BACKUP_TARGET, lang)?;
-            let target_list: Vec<String> = t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            let target_list: Vec<String> = t
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
             (BackupType::Directory, target_list)
         } else {
-            let db_kind = inquire::Select::new(msg.select_db_type, vec!["mysql", "postgres"]).prompt()?;
+            let db_kind =
+                inquire::Select::new(msg.select_db_type, vec!["mysql", "postgres"]).prompt()?;
             let db_type: DatabaseType = db_kind.parse()?;
             let conn = inquire::Text::new(msg.enter_conn_url).prompt_skippable()?;
             (
                 BackupType::DbStream {
-                    db_type: db_type.to_string(),
+                    db_type,
                     connection_url: conn.filter(|s| !s.is_empty()),
-                    dump_command: None,
                 },
                 vec![format!("db-stream:{}", db_type)],
             )
         };
 
         let excludes_str = prompt_text_with_default(msg.enter_exclude_patterns, "", lang)?;
-        let excludes: Vec<String> = excludes_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        let excludes: Vec<String> = excludes_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
 
         // Retention defaults depending on type
         let retention_defaults = match backup_type {
@@ -107,18 +124,23 @@ impl SetupPrompter for InquirePrompter {
             None
         };
 
-        let primary_prof = existing_restic.as_ref().and_then(|c| c.profiles.get("primary"));
+        let primary_prof = existing_restic
+            .as_ref()
+            .and_then(|c| c.profiles.get("primary"));
         let reuse_storage = if let Some(p) = primary_prof {
             if let Some(ref repo) = p.repository {
-                let sec_repo = existing_restic.as_ref()
+                let sec_repo = existing_restic
+                    .as_ref()
                     .and_then(|c| c.profiles.get("secondary"))
                     .and_then(|s| s.repository.as_deref())
                     .unwrap_or("-");
                 let prompt_label = format!(
                     "{} ({}: {}, {}: {}) — {}",
                     msg.reuse_existing_storage_label,
-                    msg.reuse_primary_label, repo,
-                    msg.reuse_secondary_label, sec_repo,
+                    msg.reuse_primary_label,
+                    repo,
+                    msg.reuse_secondary_label,
+                    sec_repo,
                     msg.reuse_existing_storage_prompt
                 );
                 inquire::Confirm::new(&prompt_label)
@@ -151,43 +173,53 @@ impl SetupPrompter for InquirePrompter {
                 s3: None,
             };
 
-            let secondary = existing_restic.as_ref().and_then(|c| c.profiles.get("secondary")).map(|sec_prof| {
-                let sec_repo = sec_prof.repository.clone().unwrap_or_default();
-                let sec_backend = if sec_repo.starts_with("s3:") {
-                    "s3"
-                } else if sec_repo.starts_with("sftp:") {
-                    "sftp"
-                } else {
-                    "local"
-                };
-                let sec_pwd = sec_prof.password.clone().unwrap_or_default();
-                SecondaryStorageTarget {
-                    enabled: true,
-                    backend: sec_backend.to_string(),
-                    repository: sec_repo,
-                    password: SecretString::new(sec_pwd),
-                    sftp: None,
-                    s3: None,
-                }
-            });
+            let secondary = existing_restic
+                .as_ref()
+                .and_then(|c| c.profiles.get("secondary"))
+                .map(|sec_prof| {
+                    let sec_repo = sec_prof.repository.clone().unwrap_or_default();
+                    let sec_backend = if sec_repo.starts_with("s3:") {
+                        "s3"
+                    } else if sec_repo.starts_with("sftp:") {
+                        "sftp"
+                    } else {
+                        "local"
+                    };
+                    let sec_pwd = sec_prof.password.clone().unwrap_or_default();
+                    SecondaryStorageTarget {
+                        enabled: true,
+                        backend: sec_backend.to_string(),
+                        repository: sec_repo,
+                        password: SecretString::new(sec_pwd),
+                        sftp: None,
+                        s3: None,
+                    }
+                });
 
             (primary, secondary)
         } else {
-            let backend = inquire::Select::new(msg.primary_storage_backend, vec!["sftp", "s3", "local"])
-                .prompt()?;
+            let backend =
+                inquire::Select::new(msg.primary_storage_backend, vec!["sftp", "s3", "local"])
+                    .prompt()?;
 
             let (repository, sftp_config, s3_config) = if backend == "sftp" {
                 let runner = SystemExecutor;
-                let (repo_uri, conf) = prompt_sftp_storage(msg, lang, config_dir, "id_ed25519", &runner)?;
+                let (repo_uri, conf) =
+                    prompt_sftp_storage(msg, lang, config_dir, "id_ed25519", &runner)?;
                 (repo_uri, Some(conf), None)
             } else if backend == "s3" {
                 let mode_choice = inquire::Select::new(
                     msg.s3_mode_select,
                     vec![msg.s3_mode_detailed, msg.s3_mode_uri_only],
-                ).prompt()?;
+                )
+                .prompt()?;
 
                 if mode_choice.starts_with("[1]") {
-                    let endpoint = prompt_text_with_default(msg.s3_endpoint, "https://s3.amazonaws.com", lang)?;
+                    let endpoint = prompt_text_with_default(
+                        msg.s3_endpoint,
+                        "https://s3.amazonaws.com",
+                        lang,
+                    )?;
                     let access_key_id = inquire::Text::new(msg.s3_access_key_id).prompt()?;
                     let secret_access_key_str = inquire::Password::new(msg.s3_secret_access_key)
                         .without_confirmation()
@@ -219,7 +251,8 @@ impl SetupPrompter for InquirePrompter {
                     (repo_uri, None, None)
                 }
             } else {
-                let repo_uri = prompt_text_with_default(msg.primary_repo_uri, "/data/backup", lang)?;
+                let repo_uri =
+                    prompt_text_with_default(msg.primary_repo_uri, "/data/backup", lang)?;
                 (repo_uri, None, None)
             };
 
@@ -267,28 +300,44 @@ impl SetupPrompter for InquirePrompter {
                 .prompt()?;
 
             let secondary = if enable_sec {
-                let sec_backend = inquire::Select::new(msg.secondary_backend, vec!["sftp", "s3", "local"]).prompt()?;
+                let sec_backend =
+                    inquire::Select::new(msg.secondary_backend, vec!["sftp", "s3", "local"])
+                        .prompt()?;
                 let (sec_repo, sec_pass, sec_sftp, sec_s3) = if sec_backend == "sftp" {
                     let runner = SystemExecutor;
-                    let (repo_uri, sec_sftp_conf) = prompt_sftp_storage(msg, lang, config_dir, "id_ed25519_secondary", &runner)?;
+                    let (repo_uri, sec_sftp_conf) = prompt_sftp_storage(
+                        msg,
+                        lang,
+                        config_dir,
+                        "id_ed25519_secondary",
+                        &runner,
+                    )?;
                     (repo_uri, String::new(), Some(sec_sftp_conf), None)
                 } else if sec_backend == "s3" {
                     let mode_choice = inquire::Select::new(
                         msg.s3_mode_select,
                         vec![msg.s3_mode_detailed, msg.s3_mode_uri_only],
-                    ).prompt()?;
+                    )
+                    .prompt()?;
 
                     if mode_choice.starts_with("[1]") {
-                        let endpoint = prompt_text_with_default(msg.s3_endpoint, "https://s3.amazonaws.com", lang)?;
+                        let endpoint = prompt_text_with_default(
+                            msg.s3_endpoint,
+                            "https://s3.amazonaws.com",
+                            lang,
+                        )?;
                         let access_key_id = inquire::Text::new(msg.s3_access_key_id).prompt()?;
-                        let secret_access_key_str = inquire::Password::new(msg.s3_secret_access_key)
-                            .without_confirmation()
-                            .prompt()?;
+                        let secret_access_key_str =
+                            inquire::Password::new(msg.s3_secret_access_key)
+                                .without_confirmation()
+                                .prompt()?;
                         let _region = prompt_text_with_default(msg.s3_region, "", lang)?;
-                        let bucket = prompt_text_with_default(msg.s3_bucket, "my-backup-bucket", lang)?;
+                        let bucket =
+                            prompt_text_with_default(msg.s3_bucket, "my-backup-bucket", lang)?;
                         let subfolder = prompt_text_with_default(msg.s3_path, "", lang)?;
 
-                        let clean_endpoint = endpoint.trim_start_matches("s3:").trim_end_matches('/');
+                        let clean_endpoint =
+                            endpoint.trim_start_matches("s3:").trim_end_matches('/');
                         let clean_subfolder = subfolder.trim_matches('/');
                         let repo_uri = if clean_subfolder.is_empty() {
                             format!("s3:{}/{}", clean_endpoint, bucket)
@@ -308,12 +357,16 @@ impl SetupPrompter for InquirePrompter {
                             "s3:https://s3.amazonaws.com/my-backup-bucket/backup",
                             lang,
                         )?;
-                        let sec_p = inquire::Password::new(msg.secondary_password).without_confirmation().prompt()?;
+                        let sec_p = inquire::Password::new(msg.secondary_password)
+                            .without_confirmation()
+                            .prompt()?;
                         (sec_r, sec_p, None, None)
                     }
                 } else {
                     let sec_r = inquire::Text::new(msg.secondary_repo_uri).prompt()?;
-                    let sec_p = inquire::Password::new(msg.secondary_password).without_confirmation().prompt()?;
+                    let sec_p = inquire::Password::new(msg.secondary_password)
+                        .without_confirmation()
+                        .prompt()?;
                     (sec_r, sec_p, None, None)
                 };
                 Some(SecondaryStorageTarget {
@@ -338,8 +391,9 @@ impl SetupPrompter for InquirePrompter {
 
         let report_dir_path = "/data/backup/reports";
         let reports = if enable_reports {
-            let output_dir = prompt_text_with_default(msg.report_export_dir, report_dir_path, lang)?;
-            let _ = std::fs::create_dir_all(&output_dir);
+            let output_dir =
+                prompt_text_with_default(msg.report_export_dir, report_dir_path, lang)?;
+            crate::config::model::create_secure_dir(Path::new(&output_dir))?;
             ReportsConfig {
                 output_dir,
                 enable_daily_reports: true,
@@ -388,7 +442,13 @@ impl SetupPrompter for InquirePrompter {
     }
 }
 
-pub fn create_default_config_file(path: &Path, profile: &str, target: &str, repo: &str, pwd: &str) -> Result<()> {
+pub fn create_default_config_file(
+    path: &Path,
+    profile: &str,
+    target: &str,
+    repo: &str,
+    pwd: &str,
+) -> Result<()> {
     let config = BackupConfig {
         version: "1.0".into(),
         profile: profile.into(),
@@ -397,7 +457,11 @@ pub fn create_default_config_file(path: &Path, profile: &str, target: &str, repo
             targets: vec![target.into()],
             excludes: vec![],
         },
-        retention: RetentionPolicy { keep_daily: 7, keep_weekly: 4, keep_monthly: 12 },
+        retention: RetentionPolicy {
+            keep_daily: 7,
+            keep_weekly: 4,
+            keep_monthly: 12,
+        },
         storage: StorageConfig {
             primary: StorageTarget {
                 backend: "sftp".into(),
@@ -435,17 +499,18 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
     let pub_path = key_dir.join(format!("{}.pub", key_name));
     let key_path_str = key_path.to_string_lossy().to_string();
 
-    if let Err(e) = std::fs::create_dir_all(key_dir) {
-        eprintln!("Warning: Failed to create directory {:?}: {}", key_dir, e);
-    }
+    crate::config::model::create_secure_dir(key_dir)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(key_dir, std::fs::Permissions::from_mode(0o700));
+        std::fs::set_permissions(key_dir, std::fs::Permissions::from_mode(0o700))?;
     }
 
     let generate_key = if key_path.exists() {
-        let options = vec![msg.sftp_key_choice_use_existing, msg.sftp_key_choice_generate_new];
+        let options = vec![
+            msg.sftp_key_choice_use_existing,
+            msg.sftp_key_choice_generate_new,
+        ];
         let selection_idx = inquire::Select::new(msg.sftp_key_choice_prompt, options.clone())
             .raw_prompt()?
             .index;
@@ -455,33 +520,49 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
     };
 
     if generate_key {
-        let _ = std::fs::remove_file(&key_path);
-        let _ = std::fs::remove_file(&pub_path);
-        let _ = runner.run("ssh-keygen", &["-t", "ed25519", "-N", "", "-f", &key_path_str]);
+        if key_path.exists() {
+            std::fs::remove_file(&key_path)?;
+        }
+        if pub_path.exists() {
+            std::fs::remove_file(&pub_path)?;
+        }
+        let output = runner.run(
+            "ssh-keygen",
+            &["-t", "ed25519", "-N", "", "-f", &key_path_str],
+        )?;
+        if output.status_code != 0 {
+            anyhow::bail!("ssh-keygen failed: {}", output.stderr);
+        }
     }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         if key_path.exists() {
-            let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
         }
         if pub_path.exists() {
-            let _ = std::fs::set_permissions(&pub_path, std::fs::Permissions::from_mode(0o600));
+            std::fs::set_permissions(&pub_path, std::fs::Permissions::from_mode(0o600))?;
         }
     }
 
     if let Ok(pub_key) = std::fs::read_to_string(&pub_path) {
-        println!("\n================================================================================");
+        println!(
+            "\n================================================================================"
+        );
         println!("{}", msg.sftp_pubkey_notice);
-        println!("================================================================================");
+        println!(
+            "================================================================================"
+        );
         println!("{}\n", pub_key.trim());
     }
 
     let _ = inquire::Text::new(msg.sftp_press_enter).prompt_skippable()?;
 
     let mut host = prompt_text_with_default(msg.sftp_host, "192.168.1.100", lang)?;
-    let mut port = inquire::CustomType::<u16>::new(msg.sftp_port).with_default(22).prompt()?;
+    let mut port = inquire::CustomType::<u16>::new(msg.sftp_port)
+        .with_default(22)
+        .prompt()?;
     let mut user = prompt_text_with_default(msg.sftp_user, "backup", lang)?;
     let mut path = prompt_text_with_default(msg.sftp_path, "/backup", lang)?;
 
@@ -520,7 +601,9 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
             1 => {
                 // Re-enter credentials
                 host = prompt_text_with_default(msg.sftp_host, &host, lang)?;
-                port = inquire::CustomType::<u16>::new(msg.sftp_port).with_default(port).prompt()?;
+                port = inquire::CustomType::<u16>::new(msg.sftp_port)
+                    .with_default(port)
+                    .prompt()?;
                 user = prompt_text_with_default(msg.sftp_user, &user, lang)?;
                 path = prompt_text_with_default(msg.sftp_path, &path, lang)?;
             }
@@ -585,7 +668,13 @@ pub fn format_sftp_repository_url(user: &str, host: &str, port: u16, path: &str)
     if port == 22 {
         format!("sftp:{}@{}:{}", user, host, clean_path)
     } else if clean_path.starts_with('/') {
-        format!("sftp://{}@{}:{}//{}", user, host, port, clean_path.trim_start_matches('/'))
+        format!(
+            "sftp://{}@{}:{}//{}",
+            user,
+            host,
+            port,
+            clean_path.trim_start_matches('/')
+        )
     } else {
         format!("sftp://{}@{}:{}/{}", user, host, port, clean_path)
     }
@@ -595,7 +684,8 @@ pub struct SetupEngine;
 
 impl SetupEngine {
     pub fn validate_and_build(params: SetupParams) -> Result<BackupConfig> {
-        let password_len = secrecy::ExposeSecret::expose_secret(&params.primary_storage.password).len();
+        let password_len =
+            secrecy::ExposeSecret::expose_secret(&params.primary_storage.password).len();
         if password_len < 12 {
             anyhow::bail!("ISMS Compliance Error: Password must be at least 12 characters long.");
         }
@@ -608,7 +698,9 @@ impl SetupEngine {
                 .and_then(|s| s.key_file.as_deref())
                 .unwrap_or("");
             if key_file.trim().is_empty() {
-                anyhow::bail!("ISMS Compliance Error: SFTP requires SSH key_file path for passwordless key-based authentication.");
+                anyhow::bail!(
+                    "ISMS Compliance Error: SFTP requires SSH key_file path for passwordless key-based authentication."
+                );
             }
         }
 
@@ -647,26 +739,35 @@ impl SetupEngine {
             config_path
         };
 
-        let _ = std::fs::create_dir_all(config_dir);
+        crate::config::model::create_secure_dir(config_dir)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(config_dir, std::fs::Permissions::from_mode(0o700));
+            std::fs::set_permissions(config_dir, std::fs::Permissions::from_mode(0o700))?;
         }
 
         if !non_interactive {
             let params = prompter.prompt_setup_params(lang_opt, config_dir)?;
             let config = Self::validate_and_build(params)?;
-            crate::config::registry::ConfigurationRegistry::save_profile_config(&config, config_dir)?;
+            crate::config::registry::ConfigurationRegistry::save_profile_config(
+                &config, config_dir,
+            )?;
         } else {
-            create_default_config_file(config_path, "default", DEFAULT_BACKUP_TARGET, "sftp:backup@192.168.1.100:/backup", &generate_secure_password())?;
+            create_default_config_file(
+                config_path,
+                "default",
+                DEFAULT_BACKUP_TARGET,
+                "sftp:backup@192.168.1.100:/backup",
+                &generate_secure_password(),
+            )?;
         }
 
-        let profiles_yaml_path = if config_path.ends_with(crate::config::model::DEFAULT_PROFILES_FILENAME) {
-            config_path.to_path_buf()
-        } else {
-            config_dir.join(crate::config::model::DEFAULT_PROFILES_FILENAME)
-        };
+        let profiles_yaml_path =
+            if config_path.ends_with(crate::config::model::DEFAULT_PROFILES_FILENAME) {
+                config_path.to_path_buf()
+            } else {
+                config_dir.join(crate::config::model::DEFAULT_PROFILES_FILENAME)
+            };
 
         if profiles_yaml_path.exists() {
             let _ = runner.schedule_enable(&profiles_yaml_path);
@@ -676,7 +777,10 @@ impl SetupEngine {
     }
 }
 
-pub fn run_setup_with_prompter_and_runner<P: SetupPrompter, R: crate::runner::resticprofile::ResticProfileRunner>(
+pub fn run_setup_with_prompter_and_runner<
+    P: SetupPrompter,
+    R: crate::runner::resticprofile::ResticProfileRunner,
+>(
     config_path: &Path,
     prompter: &P,
     non_interactive: bool,
@@ -684,7 +788,13 @@ pub fn run_setup_with_prompter_and_runner<P: SetupPrompter, R: crate::runner::re
     runner: &R,
 ) -> Result<()> {
     let resolved_lang = lang_opt.or_else(|| Some(Language::detect()));
-    SetupEngine::run(config_path, prompter, non_interactive, resolved_lang, runner)
+    SetupEngine::run(
+        config_path,
+        prompter,
+        non_interactive,
+        resolved_lang,
+        runner,
+    )
 }
 
 pub fn run_setup_with_prompter<P: SetupPrompter>(
@@ -707,9 +817,18 @@ use crate::runner::executor::{CommandRunner, SystemExecutor};
 
 pub fn build_download_command(bin: &str, url: &str, target_dir: &str) -> String {
     match bin {
-        "restic" => format!("curl -fsSL {} | bunzip2 > {}/restic && chmod +x {}/restic", url, target_dir, target_dir),
-        "rclone" => format!("curl -fsSL {} -o /tmp/rclone.zip && unzip -q /tmp/rclone.zip -d /tmp && cp /tmp/rclone-*-linux-amd64/rclone {}/rclone && chmod +x {}/rclone && rm -rf /tmp/rclone*", url, target_dir, target_dir),
-        "resticprofile" => format!("curl -fsSL {} -o /tmp/rp.tar.gz && tar -xzf /tmp/rp.tar.gz -C /tmp && cp /tmp/resticprofile {}/resticprofile && chmod +x {}/resticprofile && rm -rf /tmp/rp*", url, target_dir, target_dir),
+        "restic" => format!(
+            "curl -fsSL {} | bunzip2 > {}/restic && chmod +x {}/restic",
+            url, target_dir, target_dir
+        ),
+        "rclone" => format!(
+            "curl -fsSL {} -o /tmp/rclone.zip && unzip -q /tmp/rclone.zip -d /tmp && cp /tmp/rclone-*-linux-amd64/rclone {}/rclone && chmod +x {}/rclone && rm -rf /tmp/rclone*",
+            url, target_dir, target_dir
+        ),
+        "resticprofile" => format!(
+            "curl -fsSL {} -o /tmp/rp.tar.gz && tar -xzf /tmp/rp.tar.gz -C /tmp && cp /tmp/resticprofile {}/resticprofile && chmod +x {}/resticprofile && rm -rf /tmp/rp*",
+            url, target_dir, target_dir
+        ),
         _ => format!("echo Unknown binary {}", bin),
     }
 }
@@ -728,18 +847,30 @@ pub fn run_setup_dependencies_with_runner<R: CommandRunner>(runner: &R) -> Resul
     let mut report = String::new();
     report.push_str("Checking binary dependencies...\n");
 
-    let home_bin = std::env::var("HOME").map(|h| format!("{}/.local/bin", h)).unwrap_or_else(|_| "/tmp".into());
-    let install_target_dir = if Path::new("/usr/local/bin").is_dir() && is_dir_writable("/usr/local/bin") {
-        "/usr/local/bin".to_string()
-    } else {
-        let _ = std::fs::create_dir_all(&home_bin);
-        home_bin
-    };
+    let home_bin = std::env::var("HOME")
+        .map(|h| format!("{}/.local/bin", h))
+        .unwrap_or_else(|_| "/tmp".into());
+    let install_target_dir =
+        if Path::new("/usr/local/bin").is_dir() && is_dir_writable("/usr/local/bin") {
+            "/usr/local/bin".to_string()
+        } else {
+            std::fs::create_dir_all(&home_bin)?;
+            home_bin
+        };
 
     let binaries = [
-        ("restic", "https://github.com/restic/restic/releases/download/v0.16.4/restic_0.16.4_linux_amd64.bz2"),
-        ("rclone", "https://downloads.rclone.org/rclone-current-linux-amd64.zip"),
-        ("resticprofile", "https://github.com/creativeprojects/resticprofile/releases/download/v0.28.0/resticprofile_0.28.0_linux_amd64.tar.gz"),
+        (
+            "restic",
+            "https://github.com/restic/restic/releases/download/v0.16.4/restic_0.16.4_linux_amd64.bz2",
+        ),
+        (
+            "rclone",
+            "https://downloads.rclone.org/rclone-current-linux-amd64.zip",
+        ),
+        (
+            "resticprofile",
+            "https://github.com/creativeprojects/resticprofile/releases/download/v0.28.0/resticprofile_0.28.0_linux_amd64.tar.gz",
+        ),
     ];
 
     for (bin, url) in &binaries {
@@ -753,7 +884,10 @@ pub fn run_setup_dependencies_with_runner<R: CommandRunner>(runner: &R) -> Resul
                 report.push_str(&format!("{}: MISSING -> Installing from {}\n", bin, url));
                 let cmd = build_download_command(bin, url, &install_target_dir);
                 let _ = runner.run("sh", &["-c", &cmd]);
-                report.push_str(&format!("{}: Installed to {}/{}\n", bin, install_target_dir, bin));
+                report.push_str(&format!(
+                    "{}: Installed to {}/{}\n",
+                    bin, install_target_dir, bin
+                ));
             }
         }
     }
@@ -762,22 +896,33 @@ pub fn run_setup_dependencies_with_runner<R: CommandRunner>(runner: &R) -> Resul
 
 pub fn generate_secure_password() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
     let charset = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()_+-=";
     let mut state = seed;
     let mut password = String::with_capacity(32);
 
     // 대문자, 소문자, 숫자, 특수문자 각 1개 이상 보장
     password.push(('A' as u8 + (state % 26) as u8) as char);
-    state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     password.push(('a' as u8 + (state % 26) as u8) as char);
-    state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     password.push(('0' as u8 + (state % 10) as u8) as char);
-    state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     password.push(b"!@#$%^&*()_+-="[(state % 14) as usize] as char);
 
     for _ in 4..32 {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let idx = (state as usize) % charset.len();
         password.push(charset[idx] as char);
     }
@@ -802,7 +947,7 @@ pub fn save_encryption_keyfile(path: &Path, password: &str) -> Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
         }
     }
 
@@ -811,7 +956,7 @@ pub fn save_encryption_keyfile(path: &Path, password: &str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
 
     Ok(())
@@ -821,8 +966,3 @@ pub fn run_setup_dependencies() -> Result<String> {
     let runner = SystemExecutor;
     run_setup_dependencies_with_runner(&runner)
 }
-
-
-
-
-

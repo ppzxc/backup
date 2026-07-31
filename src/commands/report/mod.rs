@@ -1,11 +1,11 @@
 pub mod html_template;
 pub mod json_schema;
 
+use crate::runner::executor::{CommandRunner, SystemExecutor};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
@@ -86,7 +86,20 @@ pub fn get_formatted_time() -> (String, String) {
     }
 
     let leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
-    let months = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let months = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut month = 0;
     while d >= months[month] {
         d -= months[month];
@@ -101,13 +114,19 @@ pub fn get_formatted_time() -> (String, String) {
     let sec = day_secs % 60;
 
     let date_prefix = format!("{:04}{:02}{:02}", year, month, day);
-    let timestamp = format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} KST", year, month, day, hour, min, sec);
+    let timestamp = format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} KST",
+        year, month, day, hour, min, sec
+    );
 
     (timestamp, date_prefix)
 }
 
 impl RealReportData {
-    pub fn collect_with_meta(config: &crate::config::model::BackupConfig, meta: &AuditReportMeta) -> Self {
+    pub fn collect_with_meta(
+        config: &crate::config::model::BackupConfig,
+        meta: &AuditReportMeta,
+    ) -> Self {
         let hostname = if !meta.host_name.is_empty() {
             meta.host_name.clone()
         } else {
@@ -126,20 +145,25 @@ impl RealReportData {
         let etc_backup_dir = Path::new("/etc/backup");
         let backup_env_file = Path::new("/etc/backup/backup.env");
 
-        let (etc_backup_dir_perm, etc_backup_dir_safe) = get_file_perm_and_safety(etc_backup_dir, 0o700);
-        let (backup_env_file_perm, backup_env_file_safe) = get_file_perm_and_safety(backup_env_file, 0o600);
+        let (etc_backup_dir_perm, etc_backup_dir_safe) =
+            get_file_perm_and_safety(etc_backup_dir, 0o700);
+        let (backup_env_file_perm, backup_env_file_safe) =
+            get_file_perm_and_safety(backup_env_file, 0o600);
 
-        let (chrony_enabled, chrony_active) = check_service_status("chrony");
-        let (chrony_sources, chrony_tracking) = collect_chrony_info();
+        let executor = SystemExecutor;
+        let (chrony_enabled, chrony_active) = check_service_status(&executor, "chrony");
+        let (chrony_sources, chrony_tracking) = collect_chrony_info(&executor);
         let (chrony_conf_perm, _) = get_file_perm_and_safety(Path::new("/etc/chrony.conf"), 0o644);
 
-        let (timer_enabled, timer_active, next_run) = check_systemd_timer_status();
-        let os_info = collect_os_info();
+        let (timer_enabled, timer_active, next_run) = check_systemd_timer_status(&executor);
+        let os_info = collect_os_info(&executor);
 
         let mut audit = config.audit.clone();
         if audit.system_manager.is_none() && audit.security_officer.is_none() {
             let profiles_yaml_path = Path::new("/etc/backup/profiles.yaml");
-            if let Ok(profile_cfg) = crate::config::model::ResticProfileConfig::load_from_path(profiles_yaml_path) {
+            if let Ok(profile_cfg) =
+                crate::config::model::ResticProfileConfig::load_from_path(profiles_yaml_path)
+            {
                 if let Some(loaded_audit) = profile_cfg.audit {
                     audit = loaded_audit;
                 }
@@ -176,7 +200,6 @@ impl RealReportData {
     }
 }
 
-
 fn get_file_perm_and_safety(path: &Path, expected_mode: u32) -> (String, bool) {
     if !path.exists() {
         return (format!("{:03o}", expected_mode), true);
@@ -194,57 +217,58 @@ fn get_file_perm_and_safety(path: &Path, expected_mode: u32) -> (String, bool) {
     (format!("{:03o}", expected_mode), true)
 }
 
-fn check_service_status(service_name: &str) -> (String, String) {
-    let enabled_out = Command::new("systemctl")
-        .args(["is-enabled", service_name])
-        .output();
+fn check_service_status<R: CommandRunner>(runner: &R, service_name: &str) -> (String, String) {
+    let enabled_out = runner.run("systemctl", &["is-enabled", service_name]);
     let enabled = match enabled_out {
-        Ok(out) if out.status.success() => "enabled".to_string(),
-        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        Ok(out) if out.status_code == 0 => "enabled".to_string(),
+        Ok(out) => out.stdout.trim().to_string(),
         Err(_) => "unknown".to_string(),
     };
 
-    let active_out = Command::new("systemctl")
-        .args(["is-active", service_name])
-        .output();
+    let active_out = runner.run("systemctl", &["is-active", service_name]);
     let active = match active_out {
-        Ok(out) if out.status.success() => "active".to_string(),
-        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        Ok(out) if out.status_code == 0 => "active".to_string(),
+        Ok(out) => out.stdout.trim().to_string(),
         Err(_) => "unknown".to_string(),
     };
 
-    (if enabled.is_empty() { "disabled".into() } else { enabled }, if active.is_empty() { "inactive".into() } else { active })
+    (
+        if enabled.is_empty() {
+            "disabled".into()
+        } else {
+            enabled
+        },
+        if active.is_empty() {
+            "inactive".into()
+        } else {
+            active
+        },
+    )
 }
 
-fn collect_chrony_info() -> (String, String) {
-    let sources_out = Command::new("chronyc")
-        .arg("sources")
-        .output();
+fn collect_chrony_info<R: CommandRunner>(runner: &R) -> (String, String) {
+    let sources_out = runner.run("chronyc", &["sources"]);
     let sources = match sources_out {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
+        Ok(out) => out.stdout,
         Err(e) => format!("Error executing chronyc sources: {}", e),
     };
 
-    let tracking_out = Command::new("chronyc")
-        .arg("tracking")
-        .output();
+    let tracking_out = runner.run("chronyc", &["tracking"]);
     let tracking = match tracking_out {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).to_string(),
+        Ok(out) => out.stdout,
         Err(e) => format!("Error executing chronyc tracking: {}", e),
     };
 
     (sources, tracking)
 }
 
-fn check_systemd_timer_status() -> (String, String, String) {
-    let (enabled, active) = check_service_status("backup.timer");
-    let list_out = Command::new("systemctl")
-        .args(["list-timers", "backup.timer", "--no-legend"])
-        .output();
+fn check_systemd_timer_status<R: CommandRunner>(runner: &R) -> (String, String, String) {
+    let (enabled, active) = check_service_status(runner, "backup.timer");
+    let list_out = runner.run("systemctl", &["list-timers", "backup.timer", "--no-legend"]);
 
     let next_run = match list_out {
         Ok(out) => {
-            let s = String::from_utf8_lossy(&out.stdout).to_string();
+            let s = out.stdout;
             if !s.trim().is_empty() {
                 s.trim().to_string()
             } else {
@@ -257,7 +281,7 @@ fn check_systemd_timer_status() -> (String, String, String) {
     (enabled, active, next_run)
 }
 
-fn collect_os_info() -> String {
+fn collect_os_info<R: CommandRunner>(runner: &R) -> String {
     if let Ok(content) = fs::read_to_string("/etc/os-release") {
         for line in content.lines() {
             if line.starts_with("PRETTY_NAME=") {
@@ -266,9 +290,9 @@ fn collect_os_info() -> String {
             }
         }
     }
-    if let Ok(output) = Command::new("uname").arg("-sr").output() {
-        if output.status.success() {
-            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if let Ok(output) = runner.run("uname", &["-sr"]) {
+        if output.status_code == 0 {
+            let s = output.stdout.trim().to_string();
             if !s.is_empty() {
                 return s;
             }
@@ -333,7 +357,10 @@ impl AuditReport {
             items,
         };
 
-        Self { report_type, results }
+        Self {
+            report_type,
+            results,
+        }
     }
 
     pub fn render_html(&self) -> String {
@@ -366,7 +393,10 @@ impl AuditReportMeta {
             .or_else(|_| std::env::var("COMPUTERNAME"))
             .unwrap_or_else(|_| "localhost".into());
         let (timestamp, _) = get_formatted_time();
-        Self { host_name, timestamp }
+        Self {
+            host_name,
+            timestamp,
+        }
     }
 
     pub fn new(host_name: impl Into<String>, timestamp: impl Into<String>) -> Self {
@@ -425,7 +455,10 @@ impl ReportCommand {
         let output_dir = Path::new(&config.reports.output_dir);
 
         match action {
-            Some(ReportAction::Environment { file: sub_file, format: sub_format }) => {
+            Some(ReportAction::Environment {
+                file: sub_file,
+                format: sub_format,
+            }) => {
                 let final_file = sub_file.or(file);
                 let opts = ReportExportOptions {
                     report_type: ReportType::Environment,
@@ -437,7 +470,10 @@ impl ReportCommand {
                 };
                 execute_report_export(opts)
             }
-            Some(ReportAction::TimeSync { file: sub_file, format: sub_format }) => {
+            Some(ReportAction::TimeSync {
+                file: sub_file,
+                format: sub_format,
+            }) => {
                 let final_file = sub_file.or(file);
                 let opts = ReportExportOptions {
                     report_type: ReportType::TimeSync,
@@ -449,7 +485,10 @@ impl ReportCommand {
                 };
                 execute_report_export(opts)
             }
-            Some(ReportAction::RestoreDrill { file: sub_file, format: sub_format }) => {
+            Some(ReportAction::RestoreDrill {
+                file: sub_file,
+                format: sub_format,
+            }) => {
                 let final_file = sub_file.or(file);
                 let opts = ReportExportOptions {
                     report_type: ReportType::RestoreDrill,
@@ -483,7 +522,10 @@ impl ReportCommand {
                     saved_all.push(res_msg);
                 }
 
-                Ok(format!("All 3 sub-reports generated successfully:\n{}", saved_all.join("\n")))
+                Ok(format!(
+                    "All 3 sub-reports generated successfully:\n{}",
+                    saved_all.join("\n")
+                ))
             }
         }
     }
@@ -494,25 +536,17 @@ pub fn render_html_isms_report(host_name: &str, timestamp: &str) -> String {
     render_html_isms_report_with_type(ReportType::Environment, &meta)
 }
 
-pub fn render_html_isms_report_with_type(report_type: ReportType, meta: &AuditReportMeta) -> String {
+pub fn render_html_isms_report_with_type(
+    report_type: ReportType,
+    meta: &AuditReportMeta,
+) -> String {
     let config = crate::config::model::BackupConfig::default();
     let data = RealReportData::collect_with_meta(&config, meta);
     html_template::render_html_real(report_type, &data)
 }
 
 fn write_file_with_perms(file_path: &Path, content: &str) -> Result<()> {
-    if let Some(parent) = file_path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            let _ = fs::create_dir_all(parent);
-        }
-    }
-    fs::write(file_path, content)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(file_path, fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    crate::config::model::save_secure_file(file_path, content)
 }
 
 pub fn execute_report_export(opts: ReportExportOptions) -> Result<String> {
@@ -544,7 +578,7 @@ pub fn execute_report_export(opts: ReportExportOptions) -> Result<String> {
             Some(f) => {
                 let parent = f.parent().unwrap_or_else(|| Path::new("."));
                 let file_name = f.file_name().unwrap_or_default().to_string_lossy();
-                
+
                 // If extension is already specified or f points to exact filename, use it
                 if f.extension().is_some() || file_name.contains('.') {
                     f.with_extension(ext)
@@ -553,11 +587,10 @@ pub fn execute_report_export(opts: ReportExportOptions) -> Result<String> {
                     parent.join(format!("{}.{}", stem, ext))
                 }
             }
-            None => {
-                opts.output_dir.join(format!("{}_{}.{}", date_prefix, target_filename, ext))
-            }
+            None => opts
+                .output_dir
+                .join(format!("{}_{}.{}", date_prefix, target_filename, ext)),
         };
-
 
         let content = match fmt {
             ReportFormat::Html => html_template::render_html_real(opts.report_type, &data),
@@ -576,10 +609,6 @@ pub fn execute_report_export(opts: ReportExportOptions) -> Result<String> {
 
     Ok(format!("ISMS report saved to {}", paths_str))
 }
-
-
-
-
 
 pub fn execute_report_file_export_with_type(
     report_type: ReportType,
@@ -610,9 +639,12 @@ pub fn run_report(
     file: Option<PathBuf>,
     format: Option<ReportFormat>,
 ) -> Result<String> {
-    let config = crate::config::model::BackupConfig::load_from_path(config_path)
-        .map_err(|e| anyhow::anyhow!("Configuration load error at {}: {}", config_path.display(), e))?;
+    let config = crate::config::model::BackupConfig::load_from_path(config_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Configuration load error at {}: {}",
+            config_path.display(),
+            e
+        )
+    })?;
     ReportCommand::run(action, file, format, &config)
 }
-
-

@@ -11,15 +11,21 @@ fn test_e2e_containers_setup() {
         .with_env_var("MINIO_ROOT_PASSWORD", "minioadmin")
         .with_cmd(vec!["server", "/data"]);
 
-    let minio_node = minio_image.start().expect("Failed to start MinIO container");
-    let s3_port = minio_node.get_host_port_ipv4(9000).expect("Failed to get MinIO port");
+    let minio_node = minio_image
+        .start()
+        .expect("Failed to start MinIO container");
+    let s3_port = minio_node
+        .get_host_port_ipv4(9000)
+        .expect("Failed to get MinIO port");
     assert!(s3_port > 0);
 
-    let sftp_image = GenericImage::new("atmoz/sftp", "alpine")
-        .with_cmd(vec!["backupuser:backuppass:::upload"]);
+    let sftp_image =
+        GenericImage::new("atmoz/sftp", "alpine").with_cmd(vec!["backupuser:backuppass:::upload"]);
 
     let sftp_node = sftp_image.start().expect("Failed to start SFTP container");
-    let sftp_port = sftp_node.get_host_port_ipv4(22).expect("Failed to get SFTP port");
+    let sftp_port = sftp_node
+        .get_host_port_ipv4(22)
+        .expect("Failed to get SFTP port");
     assert!(sftp_port > 0);
 
     let temp_dir = TempDir::new().unwrap();
@@ -37,15 +43,21 @@ fn test_e2e_full_backup_restore_and_doctor_flow() {
         .with_env_var("MINIO_ROOT_USER", "minioadmin")
         .with_env_var("MINIO_ROOT_PASSWORD", "minioadmin")
         .with_cmd(vec!["server", "/data"]);
-    let minio_node = minio_image.start().expect("Failed to start MinIO container");
-    let s3_port = minio_node.get_host_port_ipv4(9000).expect("Failed to get MinIO port");
+    let minio_node = minio_image
+        .start()
+        .expect("Failed to start MinIO container");
+    let s3_port = minio_node
+        .get_host_port_ipv4(9000)
+        .expect("Failed to get MinIO port");
     assert!(s3_port > 0);
 
     // 2. Start SFTP container
-    let sftp_image = GenericImage::new("atmoz/sftp", "alpine")
-        .with_cmd(vec!["backupuser:backuppass:::upload"]);
+    let sftp_image =
+        GenericImage::new("atmoz/sftp", "alpine").with_cmd(vec!["backupuser:backuppass:::upload"]);
     let sftp_node = sftp_image.start().expect("Failed to start SFTP container");
-    let sftp_port = sftp_node.get_host_port_ipv4(22).expect("Failed to get SFTP port");
+    let sftp_port = sftp_node
+        .get_host_port_ipv4(22)
+        .expect("Failed to get SFTP port");
     assert!(sftp_port > 0);
 
     // 3. Create temp workspace directory & source files
@@ -66,7 +78,11 @@ fn test_e2e_full_backup_restore_and_doctor_flow() {
 
     // 6. Verify CLI schedule subcommands
     let mut schedule_cmd = Command::cargo_bin("backup").unwrap();
-    schedule_cmd.arg("schedule").arg("status").assert().success();
+    schedule_cmd
+        .arg("schedule")
+        .arg("status")
+        .assert()
+        .success();
 
     // 7. Verify CLI restore subcommand help/execution
     let mut restore_cmd = Command::cargo_bin("backup").unwrap();

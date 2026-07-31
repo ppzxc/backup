@@ -379,7 +379,9 @@ impl CliHelp {
         cmd = cmd.mut_subcommand("setup", |c| {
             c.about(self.cmd_setup)
                 .mut_arg("lang", |a| a.help(self.opt_setup_lang))
-                .mut_arg("non_interactive", |a| a.help(self.opt_setup_non_interactive))
+                .mut_arg("non_interactive", |a| {
+                    a.help(self.opt_setup_non_interactive)
+                })
                 .mut_subcommand("dependencies", |s| s.about(self.cmd_setup_dependencies))
                 .mut_subcommand("backend-init", |s| s.about(self.cmd_setup_backend_init))
         });
@@ -390,18 +392,17 @@ impl CliHelp {
                 .mut_arg("dry_run", |a| a.help(self.opt_copy_dry_run))
         });
 
-
         cmd = cmd.mut_subcommand("run", |c| {
             c.about(self.cmd_run)
                 .mut_arg("skip_database", |a| a.help(self.opt_run_skip_database))
-                .mut_arg("skip_secondary_sync", |a| a.help(self.opt_run_skip_secondary_sync))
+                .mut_arg("skip_secondary_sync", |a| {
+                    a.help(self.opt_run_skip_secondary_sync)
+                })
                 .mut_arg("skip_retention", |a| a.help(self.opt_run_skip_retention))
                 .mut_arg("dry_run", |a| a.help(self.opt_run_dry_run))
         });
 
-        cmd = cmd.mut_subcommand("doctor", |c| {
-            c.about(self.cmd_doctor)
-        });
+        cmd = cmd.mut_subcommand("doctor", |c| c.about(self.cmd_doctor));
 
         cmd = cmd.mut_subcommand("report", |c| {
             c.about(self.cmd_report)
@@ -446,4 +447,3 @@ impl CliHelp {
         cmd
     }
 }
-

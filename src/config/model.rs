@@ -1,8 +1,8 @@
 use anyhow::Result;
-use std::fs;
-use std::path::Path;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize, Serializer};
+use std::fs;
+use std::path::Path;
 
 pub const DEFAULT_PROFILES_FILENAME: &str = "profiles.yaml";
 pub const DEFAULT_PROFILES_PATH: &str = "/etc/backup/profiles.yaml";
@@ -71,11 +71,21 @@ pub fn save_secure_file(path: &Path, content: &str) -> Result<()> {
 
 impl BackupConfig {
     pub fn validate(&self) -> Result<()> {
-        if self.storage.primary.password.expose_secret().trim().is_empty() {
+        if self
+            .storage
+            .primary
+            .password
+            .expose_secret()
+            .trim()
+            .is_empty()
+        {
             anyhow::bail!("Primary storage password cannot be empty");
         }
         if let Some(ref sec) = self.storage.secondary {
-            if sec.enabled && sec.backend != "sftp" && sec.password.expose_secret().trim().is_empty() {
+            if sec.enabled
+                && sec.backend != "sftp"
+                && sec.password.expose_secret().trim().is_empty()
+            {
                 anyhow::bail!("Secondary storage password cannot be empty");
             }
         }
@@ -101,7 +111,11 @@ impl BackupConfig {
         Ok(())
     }
 
-    pub fn resolve_storage_password(&self, config_dir: &Path, is_secondary: bool) -> Result<(Option<String>, Option<String>)> {
+    pub fn resolve_storage_password(
+        &self,
+        config_dir: &Path,
+        is_secondary: bool,
+    ) -> Result<(Option<String>, Option<String>)> {
         let enc_path = config_dir.join("enc");
         if enc_path.is_file() {
             return Ok((Some(enc_path.to_string_lossy().to_string()), None));
@@ -141,12 +155,14 @@ impl BackupConfig {
 
         let profiles_yaml_path = config_dir.join(DEFAULT_PROFILES_FILENAME);
         let mut restic_config = if profiles_yaml_path.exists() {
-            ResticProfileConfig::load_from_path(&profiles_yaml_path).unwrap_or_else(|_| ResticProfileConfig {
-                version: "2".into(),
-                audit: None,
-                global: None,
-                groups: None,
-                profiles: std::collections::BTreeMap::new(),
+            ResticProfileConfig::load_from_path(&profiles_yaml_path).unwrap_or_else(|_| {
+                ResticProfileConfig {
+                    version: "2".into(),
+                    audit: None,
+                    global: None,
+                    groups: None,
+                    profiles: std::collections::BTreeMap::new(),
+                }
             })
         } else {
             ResticProfileConfig {
@@ -167,7 +183,9 @@ impl BackupConfig {
             default_profile.description = Some("Global common options".into());
         }
         default_profile.insecure_tls = Some(true);
-        restic_config.profiles.insert("default".into(), default_profile);
+        restic_config
+            .profiles
+            .insert("default".into(), default_profile);
 
         // 2. Populate primary profile (1st storage configuration)
         let mut primary_profile = restic_config.profiles.remove("primary").unwrap_or_default();
@@ -182,7 +200,10 @@ impl BackupConfig {
         if let Some(ref s3) = self.storage.primary.s3 {
             let mut env_map = primary_profile.env.unwrap_or_default();
             env_map.insert("AWS_ACCESS_KEY_ID".into(), s3.access_key_id.clone());
-            env_map.insert("AWS_SECRET_ACCESS_KEY".into(), s3.secret_access_key.expose_secret().to_string());
+            env_map.insert(
+                "AWS_SECRET_ACCESS_KEY".into(),
+                s3.secret_access_key.expose_secret().to_string(),
+            );
             primary_profile.env = Some(env_map);
         }
         if let Some(ref sftp) = self.storage.primary.sftp {
@@ -192,12 +213,17 @@ impl BackupConfig {
                 primary_profile.option = Some(opt_map);
             }
         }
-        restic_config.profiles.insert("primary".into(), primary_profile);
+        restic_config
+            .profiles
+            .insert("primary".into(), primary_profile);
 
         // 3. Populate secondary profile (if enabled)
         if let Some(ref sec) = self.storage.secondary {
             if sec.enabled {
-                let mut secondary_profile = restic_config.profiles.remove("secondary").unwrap_or_default();
+                let mut secondary_profile = restic_config
+                    .profiles
+                    .remove("secondary")
+                    .unwrap_or_default();
                 if secondary_profile.description.is_none() {
                     secondary_profile.description = Some("Secondary Storage configuration".into());
                 }
@@ -209,7 +235,10 @@ impl BackupConfig {
                 if let Some(ref s3) = sec.s3 {
                     let mut env_map = secondary_profile.env.unwrap_or_default();
                     env_map.insert("AWS_ACCESS_KEY_ID".into(), s3.access_key_id.clone());
-                    env_map.insert("AWS_SECRET_ACCESS_KEY".into(), s3.secret_access_key.expose_secret().to_string());
+                    env_map.insert(
+                        "AWS_SECRET_ACCESS_KEY".into(),
+                        s3.secret_access_key.expose_secret().to_string(),
+                    );
                     secondary_profile.env = Some(env_map);
                 }
                 if let Some(ref sftp) = sec.sftp {
@@ -219,7 +248,9 @@ impl BackupConfig {
                         secondary_profile.option = Some(opt_map);
                     }
                 }
-                restic_config.profiles.insert("secondary".into(), secondary_profile);
+                restic_config
+                    .profiles
+                    .insert("secondary".into(), secondary_profile);
             }
         }
 
@@ -247,7 +278,11 @@ impl BackupConfig {
             insecure_tls: None,
             backup: Some(BackupCommandSection {
                 source: Some(self.backup.targets.clone()),
-                exclude: if self.backup.excludes.is_empty() { None } else { Some(self.backup.excludes.clone()) },
+                exclude: if self.backup.excludes.is_empty() {
+                    None
+                } else {
+                    Some(self.backup.excludes.clone())
+                },
                 tag: Some(vec![self.profile.clone()]),
                 schedule: Some("*-*-* 03:00:00".into()),
                 schedule_permission: None,
@@ -295,7 +330,9 @@ impl BackupConfig {
             copy: copy_section,
         };
 
-        restic_config.profiles.insert(self.profile.clone(), profile_section);
+        restic_config
+            .profiles
+            .insert(self.profile.clone(), profile_section);
 
         let yaml_content = serde_yaml::to_string(&restic_config)?;
         save_secure_file(&profiles_yaml_path, &yaml_content)?;
@@ -309,7 +346,11 @@ impl BackupConfig {
     }
 
     pub fn render(&self, format: &str, redacted: bool) -> Result<String> {
-        let target = if redacted { self.redacted() } else { self.clone() };
+        let target = if redacted {
+            self.redacted()
+        } else {
+            self.clone()
+        };
         if format == "json" {
             Ok(serde_json::to_string_pretty(&target)?)
         } else {
@@ -349,7 +390,6 @@ impl Default for BackupConfig {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DatabaseType {
@@ -383,9 +423,8 @@ impl std::fmt::Display for DatabaseType {
 pub enum BackupType {
     Directory,
     DbStream {
-        db_type: String, // "mysql" or "postgres"
+        db_type: DatabaseType,
         connection_url: Option<String>,
-        dump_command: Option<String>,
     },
 }
 
@@ -533,7 +572,9 @@ impl ResticProfileConfig {
     pub fn profile_names(&self) -> Vec<String> {
         self.profiles
             .keys()
-            .filter(|k| k.as_str() != "default" && k.as_str() != "primary" && k.as_str() != "secondary")
+            .filter(|k| {
+                k.as_str() != "default" && k.as_str() != "primary" && k.as_str() != "secondary"
+            })
             .cloned()
             .collect()
     }
@@ -735,4 +776,3 @@ pub struct HeaderEntry {
     pub name: String,
     pub value: String,
 }
-

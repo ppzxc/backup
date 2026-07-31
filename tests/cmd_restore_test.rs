@@ -1,7 +1,7 @@
 use backup::commands::restore::execute_restore;
 use backup::commands::snapshots::execute_snapshots;
-use backup::runner::restic::MockResticRunner;
 use backup::config::model::*;
+use backup::runner::restic::MockResticRunner;
 use secrecy::SecretString;
 
 #[test]
@@ -15,7 +15,11 @@ fn test_execute_snapshots() {
             targets: vec!["/tmp".into()],
             excludes: vec![],
         },
-        retention: RetentionPolicy { keep_daily: 7, keep_weekly: 4, keep_monthly: 12 },
+        retention: RetentionPolicy {
+            keep_daily: 7,
+            keep_weekly: 4,
+            keep_monthly: 12,
+        },
         storage: StorageConfig {
             primary: StorageTarget {
                 backend: "sftp".into(),
@@ -35,7 +39,15 @@ fn test_execute_snapshots() {
 
 #[test]
 fn test_execute_restore() {
-    let result = execute_restore("12345678", "/tmp/restore").unwrap();
-    assert!(result.contains("Restored snapshot 12345678 to /tmp/restore"));
+    let config = BackupConfig::default();
+    let dir = tempfile::tempdir().unwrap();
+    let result = execute_restore(
+        &config,
+        &MockResticRunner::new(0, "restored"),
+        "12345678",
+        dir.path().to_str().unwrap(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(result, "restored");
 }
-

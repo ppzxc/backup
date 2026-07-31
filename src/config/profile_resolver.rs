@@ -18,13 +18,25 @@ impl ProfileResolver {
             .repository
             .as_deref()
             .or_else(|| {
-                profile_section
-                    .inherit
-                    .as_ref()
-                    .and_then(|p| config.profiles.get(p).and_then(|sec| sec.repository.as_deref()))
+                profile_section.inherit.as_ref().and_then(|p| {
+                    config
+                        .profiles
+                        .get(p)
+                        .and_then(|sec| sec.repository.as_deref())
+                })
             })
-            .or_else(|| config.profiles.get("primary").and_then(|p| p.repository.as_deref()))
-            .or_else(|| config.profiles.get("default").and_then(|p| p.repository.as_deref()))
+            .or_else(|| {
+                config
+                    .profiles
+                    .get("primary")
+                    .and_then(|p| p.repository.as_deref())
+            })
+            .or_else(|| {
+                config
+                    .profiles
+                    .get("default")
+                    .and_then(|p| p.repository.as_deref())
+            })
             .unwrap_or("unknown")
             .to_string();
 
@@ -76,11 +88,7 @@ impl ProfileResolver {
             vec![p.to_string()]
         } else {
             let names = config.profile_names();
-            if names.is_empty() {
-                Vec::new()
-            } else {
-                names
-            }
+            if names.is_empty() { Vec::new() } else { names }
         };
 
         target_profile_names

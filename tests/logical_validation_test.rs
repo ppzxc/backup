@@ -1,9 +1,9 @@
 use backup::config::model::ResticProfileConfig;
 use backup::runner::executor::{CommandOutput, MockExecutor};
 use backup::runner::resticprofile::{ResticProfileRunner, ResticProfileTool};
-use tempfile::tempdir;
 use std::fs;
 use std::path::Path;
+use tempfile::tempdir;
 
 #[test]
 fn test_permission_failure_detection() {

@@ -1,7 +1,7 @@
+use crate::runner::executor::CommandRunner;
 use anyhow::Result;
 use std::io::Write;
 use tempfile::NamedTempFile;
-use crate::runner::executor::CommandRunner;
 
 pub trait ResticRunner {
     fn init_repo(&self, repo: &str, password: &str) -> Result<String>;
@@ -13,6 +13,15 @@ pub trait ResticRunner {
         excludes: &[String],
     ) -> Result<String>;
     fn list_snapshots(&self, repo: &str, password: &str) -> Result<String>;
+    fn restore(&self, repo: &str, password: &str, snapshot: &str, target: &str) -> Result<String>;
+    fn backup_command(
+        &self,
+        repo: &str,
+        password: &str,
+        filename: &str,
+        program: &str,
+        args: &[String],
+    ) -> Result<String>;
 }
 
 pub struct ResticTool<'a, E: CommandRunner> {
@@ -36,7 +45,10 @@ impl<'a, E: CommandRunner> ResticRunner for ResticTool<'a, E> {
     fn init_repo(&self, repo: &str, password: &str) -> Result<String> {
         let pass_file = create_temp_password_file(password)?;
         let pass_path = pass_file.path().to_string_lossy();
-        let output = self.executor.run("restic", &["-r", repo, "--password-file", &pass_path, "init"])?;
+        let output = self.executor.run(
+            "restic",
+            &["-r", repo, "--password-file", &pass_path, "init"],
+        )?;
         Ok(output.stdout)
     }
 
@@ -64,8 +76,56 @@ impl<'a, E: CommandRunner> ResticRunner for ResticTool<'a, E> {
     fn list_snapshots(&self, repo: &str, password: &str) -> Result<String> {
         let pass_file = create_temp_password_file(password)?;
         let pass_path = pass_file.path().to_string_lossy();
-        let output = self.executor.run("restic", &["-r", repo, "--password-file", &pass_path, "snapshots"])?;
+        let output = self.executor.run(
+            "restic",
+            &["-r", repo, "--password-file", &pass_path, "snapshots"],
+        )?;
         Ok(output.stdout)
+    }
+    fn restore(&self, repo: &str, password: &str, snapshot: &str, target: &str) -> Result<String> {
+        let pass_file = create_temp_password_file(password)?;
+        let pass_path = pass_file.path().to_string_lossy();
+        Ok(self
+            .executor
+            .run(
+                "restic",
+                &[
+                    "-r",
+                    repo,
+                    "--password-file",
+                    &pass_path,
+                    "restore",
+                    snapshot,
+                    "--target",
+                    target,
+                ],
+            )?
+            .stdout)
+    }
+    fn backup_command(
+        &self,
+        repo: &str,
+        password: &str,
+        filename: &str,
+        program: &str,
+        args: &[String],
+    ) -> Result<String> {
+        let pass_file = create_temp_password_file(password)?;
+        let pass_path = pass_file.path().to_string_lossy();
+        let mut command = vec![
+            "-r",
+            repo,
+            "--password-file",
+            &pass_path,
+            "backup",
+            "--stdin-from-command",
+            "--stdin-filename",
+            filename,
+            "--",
+            program,
+        ];
+        command.extend(args.iter().map(String::as_str));
+        Ok(self.executor.run("restic", &command)?.stdout)
     }
 }
 
@@ -99,5 +159,10 @@ impl ResticRunner for MockResticRunner {
     fn list_snapshots(&self, _repo: &str, _password: &str) -> Result<String> {
         Ok(self.response.clone())
     }
+    fn restore(&self, _: &str, _: &str, _: &str, _: &str) -> Result<String> {
+        Ok(self.response.clone())
+    }
+    fn backup_command(&self, _: &str, _: &str, _: &str, _: &str, _: &[String]) -> Result<String> {
+        Ok(self.response.clone())
+    }
 }
-

@@ -30,8 +30,12 @@
 * **비고**: `notification_${type}_${action}` 형태로 함수가 명명되며, 메인 디스패처 `dispatch_notification`는 각 어댑터의 세부 전송 방식에 의존하지 않고 다형적으로 호출합니다.
 
 ### 6. Database Backup Adapter (데이터베이스 백업 어댑터)
-* **설명**: MySQL, MariaDB, PostgreSQL, Custom 등 각 데이터베이스 엔진에 알맞은 기본 백업(dump) 명령어 제공, 설정 검증, 복원 시 백업본의 무결성(헤더 검사 등)을 추상화한 다형성 모듈.
-* **비고**: `database_${db_type}_${action}` 형태로 함수가 명명되며, 백업 실행기 및 복원 훈련 단계의 핵심 세임(Seam) 역할을 수행합니다.
+* **설명**: MySQL/MariaDB 또는 PostgreSQL 엔진에 알맞은 기본 백업(dump) 명령어 제공, 설정 검증, 복원 시 백업본의 무결성(헤더 검사 등)을 추상화한 다형성 모듈.
+* **비고**: `database_${db_type}_${action}` 형태로 함수가 명명되며, 백업 실행기 및 복원 훈련 단계의 핵심 세임(Seam) 역할을 수행합니다. 임의 셸 명령은 Database Backup Adapter의 입력이 아닙니다.
+
+### 6-1. Database Stream (데이터베이스 스트림)
+* **설명**: Database Backup Adapter가 생성한 데이터베이스 덤프를 평문 임시 파일로 남기지 않고 BackupEngine Interface에 직접 전달하여 백업 스냅샷으로 보관하는 데이터 흐름.
+* **비고**: Database Stream은 독립적인 데이터베이스 백업과 전체 Backup Pipeline 모두에서 같은 도메인 동작으로 사용됩니다.
 
 ### 7. BackupEngine Interface (통합 백업 엔진 실행기)
 * **설명**: 외부 바이너리(`restic`, `resticprofile`, `rclone`) 프로세스 호출, 명령줄 플래그 생성, 임시 파일 관리, 출력 파싱을 모두 심하게 은닉하는 Trait 세임(Seam).
@@ -53,11 +57,6 @@
 * **`backup setup dependencies`**: 필수 바이너리 의존성(`restic`, `rclone`, `resticprofile`) 검증 및 자동 설치
 * **`backup setup backend-init`**: 1차/2차 **Backend Adapter** 저장소(`restic init`) 연결 점검 및 초기화
 
-### 2. `backup config` (백업 설정 관리)
-* **`backup config show`**: **Backup Environment** 및 **Backup Profile** 설정값 출력 (SecretString 마스킹)
-* **`backup config edit`**: 설정 파일 직접 편집 및 **Configuration Registry** 유효성 검증
-* **`backup config import-legacy [--file <path>]`**: 구버전 Bash `backup.env` 파일을 현재 규격으로 이관
-
 ### 3. `backup copy` (저장소 간 스냅샷 동기화 및 복사)
 * **`backup copy [--profile <profile_name>] [--dry-run]`**: 1차 **Backend Adapter** 저장소의 스냅샷 데이터를 2차 **Backend Adapter** 저장소로 동기화/복사 (별칭: `backup sync`)
 
@@ -68,6 +67,10 @@
 * **`--skip-retention`**: Retention/Prune 정리 단계 건너뛰기
 * **`--dry-run`**: 실제 실행 없는 명령어 및 대상 시뮬레이션
 
+### 4-1. `backup database` (데이터베이스 백업 실행)
+* **`backup database`**: 현재 Backup Environment의 Database Backup Adapter를 실행하여 Database Stream 스냅샷을 생성
+* **관계**: 독립 실행 진입점이지만, Database Backup Adapter가 설정된 경우 `backup run`도 동일한 동작을 파이프라인의 데이터베이스 단계로 실행. Adapter가 없으면 `backup database`는 설정 오류로 종료하고, `backup run`은 파일 백업 파이프라인을 계속 실행합니다.
+
 ### 5. `backup doctor` (시스템 및 백업 종합 진단)
 * **`backup doctor`**: 백업 바이너리, 설정파일/보안 권한(`700`/`600`), 저장소 네트워크 연결성, NTP 시각 동기화, 타이머 스케줄러 헬스체크 종합 진단 및 문제 조치 가이드 제공
 
@@ -75,7 +78,7 @@
 * **`backup report [subcommand] [--file <path>] [--format <html|json>]`**: 서브 커맨드 미지정 시 전체 검사 항목(`environment`, `time-sync`, `restore-drill`)을 순환 실행하여 통합 보고서를 생성하며, `--file` 미지정 시 `BackupConfig.reports.output_dir` (기본값: `/data/backup/reports`) 내 타임스탬프 파일로 기록됨. `--format` 미지정 시 HTML 및 JSON 포맷 보고서 2종을 모두 생성하며, 지정 시 해당 포맷 파일만 단독 생성됨.
 * **`backup report environment [--file <path>] [--format <html|json>]`**: **Backup Environment** 권한 및 보안 규정 검증 보고서 생성
 * **`backup report time-sync [--file <path>] [--format <html|json>]`**: NTP/Chrony 시각 동기화 검증 및 ISMS 증적 보고서 생성
-* **`backup report restore-drill [--file <path>] [--format <html|json>]`**: 스냅샷 복구 모의훈련 실행, RTO 측정 및 DB 무결성 검증 보고서 생성
+* **`backup report restore-drill [--file <path>] [--format <html|json>]`**: 스냅샷을 임시 복구 대상에 실제로 복원하는 비파괴 모의훈련을 실행하고, RTO 및 DB 덤프 무결성 검증 보고서를 생성. 운영 데이터베이스에는 dump를 import하지 않습니다.
 
 ### 7. `backup schedule` (스케줄러 관리)
 * **`backup schedule enable`**: Systemd Timer (또는 Cron Fallback) 자동 백업 스케줄 등록
@@ -83,10 +86,8 @@
 * **`backup schedule status`**: 타이머/스케줄러 현재 동작 상태 조회
 
 ### 7. 기타 운영 커맨드
-* **`backup restore`**: 백업 데이터 및 DB 복원 실행
-* **`backup snapshots`**: 1차/2차 저장소 스냅샷 목록 조회
+* **`backup restore --target <path>`**: 백업 데이터 및 DB dump를 지정한 복구 대상으로 실행. 대상은 기본값 없이 명시해야 하며, 비어 있지 않은 대상에 대한 덮어쓰기는 명시적인 강제 확인이 필요합니다.
+* **`backup snapshots`**: 1차/2차 저장소 스냅샷 목록을 저장소별로 구분해 조회. Primary Backend Adapter 조회 실패는 명령 실패이며, Secondary Backend Adapter 조회 실패는 primary 결과와 경고를 함께 출력합니다.
 * **`backup status [--profile <name>]`**: 백업 프로필별 저장소 위치, 최신 스냅샷(ID/시각/용량) 및 파이프라인 상태 종합 동적 조회 (조회 실패 시 Graceful Fallback 경고 표기)
 * **`backup update`**: 자기 자신(Rust 바이너리) 및 설정 갱신
 * **`backup uninstall [--purge]`**: 스케줄 해제 및 바이너리 삭제 (`--purge` 시 설정/캐시 완전 제거)
-
-

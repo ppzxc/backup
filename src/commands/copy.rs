@@ -1,6 +1,6 @@
+use crate::runner::resticprofile::ResticProfileRunner;
 use anyhow::Result;
 use std::path::Path;
-use crate::runner::resticprofile::ResticProfileRunner;
 
 pub fn execute_copy<R: ResticProfileRunner>(
     runner: &R,
@@ -9,5 +9,8 @@ pub fn execute_copy<R: ResticProfileRunner>(
     dry_run: bool,
 ) -> Result<String> {
     let out = runner.copy(config_path, profile, dry_run)?;
-    Ok(format!("Snapshot copy completed for profile [{}]:\n{}", profile, out))
+    Ok(format!(
+        "Snapshot copy completed for profile [{}]:\n{}",
+        profile, out
+    ))
 }

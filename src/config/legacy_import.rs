@@ -1,7 +1,7 @@
+use crate::config::model::*;
 use anyhow::Result;
 use secrecy::SecretString;
 use std::collections::HashMap;
-use crate::config::model::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LegacyEnvKey {
@@ -65,7 +65,9 @@ impl LegacyEnvMap {
     }
 
     pub fn get_parsed<T: std::str::FromStr>(&self, key: LegacyEnvKey, default: T) -> T {
-        self.get(key).and_then(|v| v.parse().ok()).unwrap_or(default)
+        self.get(key)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
     }
 }
 
@@ -76,7 +78,11 @@ pub fn parse_legacy_env(content: &str) -> Result<BackupConfig> {
     let repo = env_map.get_or_default(LegacyEnvKey::ResticRepository, "");
     let pwd = env_map.get_or_default(LegacyEnvKey::ResticPassword, "");
     let targets_str = env_map.get_or_default(LegacyEnvKey::BackupTargetsKey, "");
-    let targets = targets_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    let targets = targets_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     let config = BackupConfig {
         version: "1.0".to_string(),
@@ -100,7 +106,9 @@ pub fn parse_legacy_env(content: &str) -> Result<BackupConfig> {
                     host: env_map.get_or_default(LegacyEnvKey::StorageHost, ""),
                     port: env_map.get_parsed(LegacyEnvKey::StoragePort, 22),
                     user: env_map.get_or_default(LegacyEnvKey::StorageUser, ""),
-                    key_file: env_map.get(LegacyEnvKey::StorageKeyFile).map(|s| s.to_string()),
+                    key_file: env_map
+                        .get(LegacyEnvKey::StorageKeyFile)
+                        .map(|s| s.to_string()),
                 }),
                 s3: None,
             },

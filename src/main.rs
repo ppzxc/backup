@@ -1,7 +1,7 @@
-use std::path::PathBuf;
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use backup::i18n::Language;
 use backup::runner::resticprofile::ResticProfileRunner;
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "backup", version)]
@@ -45,6 +45,11 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Create a Database Stream snapshot / 데이터베이스 스트림 백업 실행
+    Database {
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Comprehensive system settings, dependencies, and health check diagnostics / 시스템 설정, 의존성 및 헬스체크 종합 진단
     Doctor,
     /// ISMS-P audit evidence and report generation / ISMS-P 감사 증적 및 레포트 생성
@@ -69,6 +74,8 @@ enum Commands {
         snapshot: String,
         #[arg(long, default_value = "/tmp/restore")]
         target: String,
+        #[arg(long)]
+        force: bool,
     },
     /// List snapshots across primary and secondary storage targets / 스냅샷 목록 조회
     Snapshots,
@@ -99,8 +106,6 @@ enum SetupAction {
     BackendInit,
 }
 
-
-
 #[derive(Subcommand)]
 enum ScheduleAction {
     /// Enable systemd timers / cron fallback
@@ -116,58 +121,91 @@ fn main() -> anyhow::Result<()> {
     let base_cmd = Cli::command();
     let localized_cmd = backup::i18n::CliHelp::get(lang).apply_to_command(base_cmd);
     let matches = localized_cmd.get_matches();
-    let cli = Cli::from_arg_matches(&matches)
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let cli = Cli::from_arg_matches(&matches).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let default_config_path = std::path::Path::new(backup::config::model::DEFAULT_PROFILES_PATH);
-    let config = backup::config::model::BackupConfig::load_from_path(default_config_path).unwrap_or_default();
+    let config = backup::config::model::BackupConfig::load_from_path(default_config_path)
+        .unwrap_or_default();
     let executor = backup::runner::executor::SystemExecutor;
     let rclone = backup::runner::rclone::RcloneTool::new(&executor);
     let resticprofile = backup::runner::resticprofile::ResticProfileTool::new(&executor);
     let restic = backup::runner::restic::ResticTool::new(&executor);
 
     match cli.command {
-        Commands::Setup { lang, non_interactive, action } => {
-            match action {
-                Some(SetupAction::Dependencies) => {
-                    let out = backup::commands::setup::run_setup_dependencies()?;
-                    println!("{}", out);
-                }
-                Some(SetupAction::BackendInit) => {
-                    if let Ok(parsed) = backup::config::model::ResticProfileConfig::load_from_path(default_config_path) {
-                        let names = parsed.profile_names();
-                        for name in names {
-                            println!("=== Initializing Backend Storage for Profile: [{}] ===", name);
-                            match resticprofile.init(default_config_path, &name) {
-                                Ok(res) => println!("{}", res.trim_end()),
-                                Err(err) => println!("Repository initialization note ({})", err),
-                            }
+        Commands::Setup {
+            lang,
+            non_interactive,
+            action,
+        } => match action {
+            Some(SetupAction::Dependencies) => {
+                let out = backup::commands::setup::run_setup_dependencies()?;
+                println!("{}", out);
+            }
+            Some(SetupAction::BackendInit) => {
+                if let Ok(parsed) =
+                    backup::config::model::ResticProfileConfig::load_from_path(default_config_path)
+                {
+                    let names = parsed.profile_names();
+                    for name in names {
+                        println!(
+                            "=== Initializing Backend Storage for Profile: [{}] ===",
+                            name
+                        );
+                        match resticprofile.init(default_config_path, &name) {
+                            Ok(res) => println!("{}", res.trim_end()),
+                            Err(err) => println!("Repository initialization note ({})", err),
                         }
-                        init_secondary_backend_if_present(default_config_path, &resticprofile, &executor, true);
-                    } else {
-                        println!("Backend storage repository initialization initiated.");
                     }
+                    init_secondary_backend_if_present(
+                        default_config_path,
+                        &resticprofile,
+                        &executor,
+                        true,
+                    );
+                } else {
+                    println!("Backend storage repository initialization initiated.");
                 }
-                None => {
-                    let prompter = backup::commands::setup::InquirePrompter;
-                    let lang_opt = lang.as_deref().map(backup::i18n::Language::from_str);
-                    if let Err(err) = backup::commands::setup::run_setup_with_prompter(default_config_path, &prompter, non_interactive, lang_opt) {
-                        println!("Setup initialized (Config target: {}, status: {})", default_config_path.display(), err);
-                    } else {
-                        println!("Setup completed successfully.");
-                        if let Ok(parsed) = backup::config::model::ResticProfileConfig::load_from_path(default_config_path) {
-                            for name in parsed.profile_names() {
-                                let _ = resticprofile.init(default_config_path, &name);
-                            }
-                            init_secondary_backend_if_present(default_config_path, &resticprofile, &executor, false);
+            }
+            None => {
+                let prompter = backup::commands::setup::InquirePrompter;
+                let lang_opt = lang.as_deref().map(backup::i18n::Language::from_str);
+                if let Err(err) = backup::commands::setup::run_setup_with_prompter(
+                    default_config_path,
+                    &prompter,
+                    non_interactive,
+                    lang_opt,
+                ) {
+                    println!(
+                        "Setup initialized (Config target: {}, status: {})",
+                        default_config_path.display(),
+                        err
+                    );
+                } else {
+                    println!("Setup completed successfully.");
+                    if let Ok(parsed) = backup::config::model::ResticProfileConfig::load_from_path(
+                        default_config_path,
+                    ) {
+                        for name in parsed.profile_names() {
+                            let _ = resticprofile.init(default_config_path, &name);
                         }
+                        init_secondary_backend_if_present(
+                            default_config_path,
+                            &resticprofile,
+                            &executor,
+                            false,
+                        );
                     }
                 }
             }
-        }
+        },
 
         Commands::Copy { profile, dry_run } => {
             let target_profile = profile.as_deref().unwrap_or("default");
-            match backup::commands::copy::execute_copy(&resticprofile, default_config_path, target_profile, dry_run) {
+            match backup::commands::copy::execute_copy(
+                &resticprofile,
+                default_config_path,
+                target_profile,
+                dry_run,
+            ) {
                 Ok(out) => println!("{}", out),
                 Err(err) => println!("Copy completed with warning ({})", err),
             }
@@ -189,7 +227,9 @@ fn main() -> anyhow::Result<()> {
 
             let profiles_to_run = if let Some(p) = profile {
                 vec![p]
-            } else if let Ok(parsed) = backup::config::model::ResticProfileConfig::load_from_path(default_config_path) {
+            } else if let Ok(parsed) =
+                backup::config::model::ResticProfileConfig::load_from_path(default_config_path)
+            {
                 let names = parsed.profile_names();
                 if names.is_empty() {
                     vec!["default".to_string()]
@@ -202,6 +242,17 @@ fn main() -> anyhow::Result<()> {
                 vec!["default".to_string()]
             };
 
+            if !skip_database
+                && matches!(
+                    config.backup.backup_type,
+                    backup::config::model::BackupType::DbStream { .. }
+                )
+            {
+                println!(
+                    "{}",
+                    backup::commands::database::execute_database_backup(&config, &restic, dry_run)?
+                );
+            }
             for target_profile in &profiles_to_run {
                 println!("=== Running Backup Profile: [{}] ===", target_profile);
                 let out = backup::commands::run::execute_run_profile(
@@ -213,31 +264,55 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", out.trim_end());
             }
         }
+        Commands::Database { dry_run } => println!(
+            "{}",
+            backup::commands::database::execute_database_backup(&config, &restic, dry_run)?
+        ),
 
         Commands::Doctor => {
-            let out = backup::commands::doctor::run_doctor_checks(&rclone, Some(default_config_path))?;
+            let out =
+                backup::commands::doctor::run_doctor_checks(&rclone, Some(default_config_path))?;
             println!("{}", out);
         }
-        Commands::Report { action, file, format } => {
+        Commands::Report {
+            action,
+            file,
+            format,
+        } => {
             let out = backup::commands::report::ReportCommand::run(action, file, format, &config)?;
             println!("{}", out);
         }
         Commands::Schedule { action } => match action {
             ScheduleAction::Enable => {
-                let out = backup::commands::schedule::execute_schedule_enable(default_config_path, &resticprofile)?;
+                let out = backup::commands::schedule::execute_schedule_enable(
+                    default_config_path,
+                    &resticprofile,
+                )?;
                 println!("{}", out);
             }
             ScheduleAction::Disable => {
-                let out = backup::commands::schedule::execute_schedule_disable(default_config_path, &resticprofile)?;
+                let out = backup::commands::schedule::execute_schedule_disable(
+                    default_config_path,
+                    &resticprofile,
+                )?;
                 println!("{}", out);
             }
             ScheduleAction::Status => {
-                let out = backup::commands::schedule::execute_schedule_status(default_config_path, &resticprofile)?;
+                let out = backup::commands::schedule::execute_schedule_status(
+                    default_config_path,
+                    &resticprofile,
+                )?;
                 println!("{}", out);
             }
         },
-        Commands::Restore { snapshot, target } => {
-            let out = backup::commands::restore::execute_restore(&snapshot, &target)?;
+        Commands::Restore {
+            snapshot,
+            target,
+            force,
+        } => {
+            let out = backup::commands::restore::execute_restore(
+                &config, &restic, &snapshot, &target, force,
+            )?;
             println!("{}", out);
         }
         Commands::Snapshots => {
@@ -260,14 +335,22 @@ fn main() -> anyhow::Result<()> {
             println!("backup {}", env!("CARGO_PKG_VERSION"));
         }
         Commands::Uninstall { yes, purge } => {
-            let out = backup::commands::uninstall::perform_uninstall(default_config_path, &resticprofile, yes, purge)?;
+            let out = backup::commands::uninstall::perform_uninstall(
+                default_config_path,
+                &resticprofile,
+                yes,
+                purge,
+            )?;
             println!("{}", out);
         }
     }
     Ok(())
 }
 
-fn init_secondary_backend_if_present<R: ResticProfileRunner, E: backup::runner::executor::CommandRunner>(
+fn init_secondary_backend_if_present<
+    R: ResticProfileRunner,
+    E: backup::runner::executor::CommandRunner,
+>(
     config_path: &std::path::Path,
     resticprofile: &R,
     executor: &E,
@@ -277,16 +360,27 @@ fn init_secondary_backend_if_present<R: ResticProfileRunner, E: backup::runner::
         if let Some(sec_profile) = parsed.profiles.get("secondary") {
             let repo = sec_profile.repository.as_deref().unwrap_or("");
             if repo.starts_with("sftp:") {
-                let config_dir = config_path.parent().unwrap_or_else(|| std::path::Path::new("."));
-                let backup_config = backup::config::model::BackupConfig::load_from_path(config_path).ok();
-                let sftp_conf = backup_config.as_ref().and_then(|c| c.storage.secondary.as_ref()).and_then(|s| s.sftp.as_ref());
-                
+                let backup_config =
+                    backup::config::model::BackupConfig::load_from_path(config_path).ok();
+                let sftp_conf = backup_config
+                    .as_ref()
+                    .and_then(|c| c.storage.secondary.as_ref())
+                    .and_then(|s| s.sftp.as_ref());
+
                 if let Some(sftp) = sftp_conf {
                     let key_path = sftp.key_file.as_deref().unwrap_or("");
                     if !key_path.is_empty() {
-                        if let Err(reason) = backup::commands::setup::verify_sftp_connection(&sftp.user, &sftp.host, sftp.port, key_path, executor) {
-                            println!("[Notice] Secondary SFTP storage connection verification skipped init: {}", reason);
-                            println!("[Notice] Register public key ({}.pub) in {}@{}:~/.ssh/authorized_keys and run 'backup setup backend-init'", key_path, sftp.user, sftp.host);
+                        if let Err(reason) = backup::commands::setup::verify_sftp_connection(
+                            &sftp.user, &sftp.host, sftp.port, key_path, executor,
+                        ) {
+                            println!(
+                                "[Notice] Secondary SFTP storage connection verification skipped init: {}",
+                                reason
+                            );
+                            println!(
+                                "[Notice] Register public key ({}.pub) in {}@{}:~/.ssh/authorized_keys and run 'backup setup backend-init'",
+                                key_path, sftp.user, sftp.host
+                            );
                             return;
                         }
                     }
@@ -302,11 +396,11 @@ fn init_secondary_backend_if_present<R: ResticProfileRunner, E: backup::runner::
                         println!("{}", res.trim_end());
                     }
                 }
-                Err(err) => println!("[Warning] Secondary storage repository initialization failed ({})", err),
+                Err(err) => println!(
+                    "[Warning] Secondary storage repository initialization failed ({})",
+                    err
+                ),
             }
         }
     }
 }
-
-
-

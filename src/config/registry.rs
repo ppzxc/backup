@@ -1,6 +1,6 @@
+use crate::config::model::BackupConfig;
 use anyhow::Result;
 use std::path::Path;
-use crate::config::model::BackupConfig;
 
 pub struct ConfigurationRegistry;
 
@@ -25,4 +25,3 @@ impl ConfigurationRegistry {
         Self::save_profile(config, config_dir)
     }
 }
-

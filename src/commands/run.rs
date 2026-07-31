@@ -1,9 +1,9 @@
-use anyhow::Result;
-use std::path::Path;
-use secrecy::ExposeSecret;
 use crate::config::model::BackupConfig;
 use crate::runner::restic::ResticRunner;
 use crate::runner::resticprofile::ResticProfileRunner;
+use anyhow::Result;
+use secrecy::ExposeSecret;
+use std::path::Path;
 
 #[derive(Debug, Clone, Default)]
 pub struct PipelineOptions {
@@ -24,7 +24,12 @@ impl<'a, R: ResticProfileRunner> PipelineEngine<'a, R> {
         Self { runner }
     }
 
-    pub fn execute(&self, config_path: &Path, profile: &str, opts: &PipelineOptions) -> Result<String> {
+    pub fn execute(
+        &self,
+        config_path: &Path,
+        profile: &str,
+        opts: &PipelineOptions,
+    ) -> Result<String> {
         let mut output = String::new();
         if !opts.skip_database {
             if opts.dry_run {
@@ -36,7 +41,10 @@ impl<'a, R: ResticProfileRunner> PipelineEngine<'a, R> {
         match self.runner.backup(config_path, profile, opts.dry_run) {
             Ok(profile_res) => output.push_str(&profile_res),
             Err(err) if opts.dry_run => {
-                output.push_str(&format!("[Pipeline] [Dry-Run] resticprofile backup simulated ({})\n", err));
+                output.push_str(&format!(
+                    "[Pipeline] [Dry-Run] resticprofile backup simulated ({})\n",
+                    err
+                ));
             }
             Err(err) => return Err(err),
         }
@@ -72,5 +80,3 @@ pub fn execute_run_profile<R: ResticProfileRunner>(
     let engine = PipelineEngine::new(runner);
     engine.execute(config_path, profile, opts)
 }
-
-

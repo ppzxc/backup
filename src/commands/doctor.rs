@@ -1,8 +1,8 @@
+use crate::runner::executor::{CommandRunner, SystemExecutor};
+use crate::runner::rclone::RcloneRunner;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use crate::runner::executor::{CommandRunner, SystemExecutor};
-use crate::runner::rclone::RcloneRunner;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DoctorStatus {
@@ -38,7 +38,10 @@ pub struct SystemHealthSnapshot {
 pub struct SystemHealthDiagnoser;
 
 impl SystemHealthDiagnoser {
-    pub fn diagnose<R: RcloneRunner>(rclone: &R, config_path: Option<&Path>) -> SystemHealthSnapshot {
+    pub fn diagnose<R: RcloneRunner>(
+        rclone: &R,
+        config_path: Option<&Path>,
+    ) -> SystemHealthSnapshot {
         Self::diagnose_with_runner(rclone, &SystemExecutor, config_path)
     }
 
@@ -52,8 +55,9 @@ impl SystemHealthDiagnoser {
             .unwrap_or_else(|_| "localhost".into());
         let timestamp = format!("{:?}", std::time::SystemTime::now());
 
-        let target_config = config_path.unwrap_or_else(|| Path::new(crate::config::model::DEFAULT_PROFILES_PATH));
-        
+        let target_config =
+            config_path.unwrap_or_else(|| Path::new(crate::config::model::DEFAULT_PROFILES_PATH));
+
         let mut items = Vec::new();
 
         // 1. Dependency & Config Permissions Item
@@ -64,20 +68,35 @@ impl SystemHealthDiagnoser {
                 if let Ok(meta) = target_config.metadata() {
                     let mode = meta.permissions().mode() & 0o777;
                     if mode <= 0o600 {
-                        (DoctorStatus::Pass, format!("0700 / 0600 ({:#o} safe)", mode))
+                        (
+                            DoctorStatus::Pass,
+                            format!("0700 / 0600 ({:#o} safe)", mode),
+                        )
                     } else {
-                        (DoctorStatus::Fail, format!("{:#o} > 0o600 (chmod 600 required)", mode))
+                        (
+                            DoctorStatus::Fail,
+                            format!("{:#o} > 0o600 (chmod 600 required)", mode),
+                        )
                     }
                 } else {
-                    (DoctorStatus::Pass, "0700 / 0600 (****** Masked)".to_string())
+                    (
+                        DoctorStatus::Pass,
+                        "0700 / 0600 (****** Masked)".to_string(),
+                    )
                 }
             }
             #[cfg(not(unix))]
             {
-                (DoctorStatus::Pass, "0700 / 0600 (****** Masked)".to_string())
+                (
+                    DoctorStatus::Pass,
+                    "0700 / 0600 (****** Masked)".to_string(),
+                )
             }
         } else {
-            (DoctorStatus::Pass, "0700 / 0600 (****** Masked)".to_string())
+            (
+                DoctorStatus::Fail,
+                "Backup Environment is missing".to_string(),
+            )
         };
 
         items.push(DoctorItem {
@@ -88,11 +107,18 @@ impl SystemHealthDiagnoser {
         });
 
         // 2. Storage & Connectivity Item
-        let rclone_pass = rclone.check_connectivity("default").is_ok() || rclone.check_connectivity("syno_backup").is_ok();
+        let rclone_pass = rclone.check_connectivity("default").is_ok()
+            || rclone.check_connectivity("syno_backup").is_ok();
         let (rclone_status, rclone_result) = if rclone_pass {
-            (DoctorStatus::Pass, "Rclone connectivity active (Remote OK)".into())
+            (
+                DoctorStatus::Pass,
+                "Rclone connectivity active (Remote OK)".into(),
+            )
         } else {
-            (DoctorStatus::Fail, "Rclone connectivity failed (Remote unreachable)".into())
+            (
+                DoctorStatus::Fail,
+                "Rclone connectivity failed (Remote unreachable)".into(),
+            )
         };
 
         items.push(DoctorItem {
@@ -118,12 +144,21 @@ impl SystemHealthDiagnoser {
 
         let (rto_status, rto_detail) = if let Ok(out) = restic_res {
             if out.status_code == 0 {
-                (DoctorStatus::Pass, format!("{:.1}s (Header Signature Valid)", elapsed))
+                (
+                    DoctorStatus::Pass,
+                    format!("{:.1}s (Header Signature Valid)", elapsed),
+                )
             } else {
-                (DoctorStatus::Warn, format!("{:.1}s (Header check returned non-zero code)", elapsed))
+                (
+                    DoctorStatus::Warn,
+                    format!("{:.1}s (Header check returned non-zero code)", elapsed),
+                )
             }
         } else {
-            (DoctorStatus::Pass, "0.1s (Header Signature Valid - Dry execution)".into())
+            (
+                DoctorStatus::Fail,
+                format!("{elapsed:.1}s (restic check could not execute)"),
+            )
         };
 
         items.push(DoctorItem {
@@ -150,19 +185,42 @@ pub fn check_ntp_sync() -> (DoctorStatus, String) {
 
 pub fn check_ntp_sync_with_runner<C: CommandRunner>(runner: &C) -> (DoctorStatus, String) {
     if let Ok(out) = runner.run("chronyc", &["tracking"]) {
-        if out.status_code == 0 && (out.stdout.contains("Reference ID") || out.stdout.contains("System time") || out.stdout.contains("Leap status")) {
-            return (DoctorStatus::Pass, format!("chronyd active ({})", out.stdout.lines().next().unwrap_or("synced")));
+        if out.status_code == 0
+            && (out.stdout.contains("Reference ID")
+                || out.stdout.contains("System time")
+                || out.stdout.contains("Leap status"))
+        {
+            return (
+                DoctorStatus::Pass,
+                format!(
+                    "chronyd active ({})",
+                    out.stdout.lines().next().unwrap_or("synced")
+                ),
+            );
         }
     }
     if let Ok(out) = runner.run("timedatectl", &["status"]) {
-        if out.status_code == 0 && (out.stdout.contains("NTP service: active") || out.stdout.contains("System clock synchronized: yes") || out.stdout.contains("Local time:")) {
-            return (DoctorStatus::Pass, "timedatectl clock synchronized".to_string());
+        if out.status_code == 0
+            && (out.stdout.contains("NTP service: active")
+                || out.stdout.contains("System clock synchronized: yes")
+                || out.stdout.contains("Local time:"))
+        {
+            return (
+                DoctorStatus::Pass,
+                "timedatectl clock synchronized".to_string(),
+            );
         }
     }
-    (DoctorStatus::Warn, "NTP synchronization status unknown or inactive".to_string())
+    (
+        DoctorStatus::Warn,
+        "NTP synchronization status unknown or inactive".to_string(),
+    )
 }
 
-pub fn run_doctor_checks<R: RcloneRunner>(rclone: &R, config_path: Option<&Path>) -> Result<String> {
+pub fn run_doctor_checks<R: RcloneRunner>(
+    rclone: &R,
+    config_path: Option<&Path>,
+) -> Result<String> {
     run_doctor_checks_with_runner(rclone, &SystemExecutor, config_path)
 }
 
@@ -175,16 +233,24 @@ pub fn run_doctor_checks_with_runner<R: RcloneRunner, C: CommandRunner>(
     let mut report = String::new();
     report.push_str("Checking dependencies...\n");
     report.push_str("Restic binary: OK\n");
-    
+
     for item in &snapshot.items {
         match item.category {
             DoctorCategory::Storage => {
-                let status = if item.status == DoctorStatus::Pass { "OK" } else { "FAILED (Check remote configuration and network)" };
+                let status = if item.status == DoctorStatus::Pass {
+                    "OK"
+                } else {
+                    "FAILED (Check remote configuration and network)"
+                };
                 report.push_str(&format!("Rclone connectivity: {}\n", status));
             }
             DoctorCategory::System => {
                 if item.criterion.contains("시각 동기화") {
-                    let status = if item.status == DoctorStatus::Pass { "OK" } else { "FAILED" };
+                    let status = if item.status == DoctorStatus::Pass {
+                        "OK"
+                    } else {
+                        "FAILED"
+                    };
                     report.push_str(&format!("NTP Time Sync: {}\n", status));
                 } else {
                     let status = match item.status {

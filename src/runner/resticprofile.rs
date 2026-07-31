@@ -1,6 +1,6 @@
+use crate::runner::executor::{CommandOutput, CommandRunner};
 use anyhow::Result;
 use std::path::Path;
-use crate::runner::executor::{CommandOutput, CommandRunner};
 
 pub trait ResticProfileRunner {
     fn backup(&self, config_path: &Path, profile: &str, dry_run: bool) -> Result<String>;
@@ -56,43 +56,64 @@ impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {
 
     fn init(&self, config_path: &Path, profile: &str) -> Result<String> {
         let config_str = config_path.to_string_lossy();
-        let output = self.executor.run("resticprofile", &["--config", &config_str, "--name", profile, "init"])?;
+        let output = self.executor.run(
+            "resticprofile",
+            &["--config", &config_str, "--name", profile, "init"],
+        )?;
         self.check_output(output)
     }
 
     fn schedule_enable(&self, config_path: &Path) -> Result<String> {
         let config_str = config_path.to_string_lossy();
-        let output = self.executor.run("resticprofile", &["--config", &config_str, "schedule", "--all"])?;
+        let output = self.executor.run(
+            "resticprofile",
+            &["--config", &config_str, "schedule", "--all"],
+        )?;
         self.check_output(output)
     }
 
     fn schedule_disable(&self, config_path: &Path) -> Result<String> {
         let config_str = config_path.to_string_lossy();
-        let output = self.executor.run("resticprofile", &["--config", &config_str, "unschedule", "--all"])?;
+        let output = self.executor.run(
+            "resticprofile",
+            &["--config", &config_str, "unschedule", "--all"],
+        )?;
         self.check_output(output)
     }
 
     fn schedule_status(&self, config_path: &Path) -> Result<String> {
         let config_str = config_path.to_string_lossy();
-        let output = self.executor.run("resticprofile", &["--config", &config_str, "status", "--all"])?;
+        let output = self.executor.run(
+            "resticprofile",
+            &["--config", &config_str, "status", "--all"],
+        )?;
         self.check_output(output)
     }
 
     fn list_snapshots(&self, config_path: &Path, profile: &str) -> Result<String> {
         let config_str = config_path.to_string_lossy();
-        let output = self.executor.run("resticprofile", &["--config", &config_str, "--name", profile, "snapshots"])?;
+        let output = self.executor.run(
+            "resticprofile",
+            &["--config", &config_str, "--name", profile, "snapshots"],
+        )?;
         self.check_output(output)
     }
 
     fn prune(&self, config_path: &Path, profile: &str) -> Result<String> {
         let config_str = config_path.to_string_lossy();
-        let output = self.executor.run("resticprofile", &["--config", &config_str, "--name", profile, "prune"])?;
+        let output = self.executor.run(
+            "resticprofile",
+            &["--config", &config_str, "--name", profile, "prune"],
+        )?;
         self.check_output(output)
     }
 
     fn check(&self, config_path: &Path, profile: &str) -> Result<String> {
         let config_str = config_path.to_string_lossy();
-        let output = self.executor.run("resticprofile", &["--config", &config_str, "--name", profile, "check"])?;
+        let output = self.executor.run(
+            "resticprofile",
+            &["--config", &config_str, "--name", profile, "check"],
+        )?;
         self.check_output(output)
     }
 
@@ -126,63 +147,90 @@ impl MockResticProfileRunner {
 
 impl ResticProfileRunner for MockResticProfileRunner {
     fn backup(&self, config_path: &Path, _profile: &str, _dry_run: bool) -> Result<String> {
-        self.calls.lock().unwrap().push(("backup".into(), config_path.to_string_lossy().into()));
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("backup".into(), config_path.to_string_lossy().into()));
         if self.exit_code != 0 {
             anyhow::bail!("mock error: {}", self.response);
         }
         Ok(self.response.clone())
     }
     fn init(&self, config_path: &Path, _profile: &str) -> Result<String> {
-        self.calls.lock().unwrap().push(("init".into(), config_path.to_string_lossy().into()));
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("init".into(), config_path.to_string_lossy().into()));
         if self.exit_code != 0 {
             anyhow::bail!("mock error: {}", self.response);
         }
         Ok(self.response.clone())
     }
     fn schedule_enable(&self, config_path: &Path) -> Result<String> {
-        self.calls.lock().unwrap().push(("schedule_enable".into(), config_path.to_string_lossy().into()));
+        self.calls.lock().unwrap().push((
+            "schedule_enable".into(),
+            config_path.to_string_lossy().into(),
+        ));
         if self.exit_code != 0 {
             anyhow::bail!("mock error: {}", self.response);
         }
         Ok(self.response.clone())
     }
     fn schedule_disable(&self, config_path: &Path) -> Result<String> {
-        self.calls.lock().unwrap().push(("schedule_disable".into(), config_path.to_string_lossy().into()));
+        self.calls.lock().unwrap().push((
+            "schedule_disable".into(),
+            config_path.to_string_lossy().into(),
+        ));
         if self.exit_code != 0 {
             anyhow::bail!("mock error: {}", self.response);
         }
         Ok(self.response.clone())
     }
     fn schedule_status(&self, config_path: &Path) -> Result<String> {
-        self.calls.lock().unwrap().push(("schedule_status".into(), config_path.to_string_lossy().into()));
+        self.calls.lock().unwrap().push((
+            "schedule_status".into(),
+            config_path.to_string_lossy().into(),
+        ));
         if self.exit_code != 0 {
             anyhow::bail!("mock error: {}", self.response);
         }
         Ok(self.response.clone())
     }
     fn list_snapshots(&self, config_path: &Path, _profile: &str) -> Result<String> {
-        self.calls.lock().unwrap().push(("list_snapshots".into(), config_path.to_string_lossy().into()));
+        self.calls.lock().unwrap().push((
+            "list_snapshots".into(),
+            config_path.to_string_lossy().into(),
+        ));
         if self.exit_code != 0 {
             anyhow::bail!("mock error: {}", self.response);
         }
         Ok(self.response.clone())
     }
     fn prune(&self, config_path: &Path, _profile: &str) -> Result<String> {
-        self.calls.lock().unwrap().push(("prune".into(), config_path.to_string_lossy().into()));
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("prune".into(), config_path.to_string_lossy().into()));
         if self.exit_code != 0 {
             anyhow::bail!("mock error: {}", self.response);
         }
         Ok(self.response.clone())
     }
     fn check(&self, config_path: &Path, _profile: &str) -> Result<String> {
-        self.calls.lock().unwrap().push(("check".into(), config_path.to_string_lossy().into()));
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("check".into(), config_path.to_string_lossy().into()));
         if self.exit_code != 0 {
             anyhow::bail!("mock error: {}", self.response);
         }
         Ok(self.response.clone())
     }
     fn copy(&self, config_path: &Path, _profile: &str, _dry_run: bool) -> Result<String> {
-        self.calls.lock().unwrap().push(("copy".into(), config_path.to_string_lossy().into()));
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("copy".into(), config_path.to_string_lossy().into()));
         if self.exit_code != 0 {
             anyhow::bail!("mock error: {}", self.response);
         }

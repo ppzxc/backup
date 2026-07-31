@@ -1,7 +1,7 @@
 use backup::config::model::BackupConfig;
 use secrecy::ExposeSecret;
-use tempfile::tempdir;
 use std::fs;
+use tempfile::tempdir;
 
 #[test]
 fn test_parse_yaml_config() {
@@ -88,7 +88,10 @@ storage:
     );
 
     // Original should remain unchanged
-    assert_eq!(config.storage.primary.password.expose_secret(), "secret_password");
+    assert_eq!(
+        config.storage.primary.password.expose_secret(),
+        "secret_password"
+    );
 }
 
 #[test]
@@ -214,7 +217,10 @@ profiles:
     assert_eq!(self_prof.inherit.as_deref(), Some("default"));
 
     let backup_sec = self_prof.backup.as_ref().unwrap();
-    assert_eq!(backup_sec.source.as_ref().unwrap(), &vec!["/var/www".to_string()]);
+    assert_eq!(
+        backup_sec.source.as_ref().unwrap(),
+        &vec!["/var/www".to_string()]
+    );
     assert_eq!(backup_sec.schedule_ignore_on_battery_less_than, Some(20));
     assert_eq!(
         backup_sec.send_after_fail.as_ref().unwrap().url,
@@ -369,7 +375,10 @@ storage:
 
     let content2 = fs::read_to_string(&profiles_file).unwrap();
     // Both log and db profiles must exist
-    assert!(content2.contains("log:"), "Original 'log' profile must be preserved");
+    assert!(
+        content2.contains("log:"),
+        "Original 'log' profile must be preserved"
+    );
     assert!(content2.contains("db:"), "New 'db' profile must be merged");
 }
 
@@ -413,18 +422,27 @@ storage:
     assert!(restic_config.profiles.contains_key("web-data"));
 
     let primary_prof = restic_config.profiles.get("primary").unwrap();
-    assert_eq!(primary_prof.repository.as_deref(), Some("s3:https://s3.amazonaws.com/primary-bucket"));
+    assert_eq!(
+        primary_prof.repository.as_deref(),
+        Some("s3:https://s3.amazonaws.com/primary-bucket")
+    );
     assert_eq!(primary_prof.inherit.as_deref(), Some("default"));
 
     let secondary_prof = restic_config.profiles.get("secondary").unwrap();
-    assert_eq!(secondary_prof.repository.as_deref(), Some("s3:https://s3.amazonaws.com/secondary-bucket"));
+    assert_eq!(
+        secondary_prof.repository.as_deref(),
+        Some("s3:https://s3.amazonaws.com/secondary-bucket")
+    );
     assert_eq!(secondary_prof.inherit.as_deref(), Some("default"));
 
     let web_prof = restic_config.profiles.get("web-data").unwrap();
     assert_eq!(web_prof.inherit.as_deref(), Some("primary"));
     let copy_sec = web_prof.copy.as_ref().unwrap();
     assert_eq!(copy_sec.profile.as_deref(), Some("secondary"));
-    assert_eq!(copy_sec.repository.as_deref(), Some("s3:https://s3.amazonaws.com/secondary-bucket"));
+    assert_eq!(
+        copy_sec.repository.as_deref(),
+        Some("s3:https://s3.amazonaws.com/secondary-bucket")
+    );
     assert_eq!(copy_sec.password.as_deref(), Some("secondary_password_123"));
 }
 
@@ -503,9 +521,13 @@ storage:
     assert!(profiles_file.exists());
 
     let content = fs::read_to_string(&profiles_file).unwrap();
-    let parsed: backup::config::model::ResticProfileConfig = serde_yaml::from_str(&content).unwrap();
-    let sec_prof = parsed.profiles.get("secondary").expect("secondary profile should exist");
-    
+    let parsed: backup::config::model::ResticProfileConfig =
+        serde_yaml::from_str(&content).unwrap();
+    let sec_prof = parsed
+        .profiles
+        .get("secondary")
+        .expect("secondary profile should exist");
+
     // Deterministic check: when no enc keyfile exists in temp dir, secondary falls back to primary.password
     if !config_dir.join("enc").is_file() && !std::path::Path::new("/etc/backup/enc").is_file() {
         assert_eq!(sec_prof.password.as_deref(), Some("primary_secret_123"));

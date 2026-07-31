@@ -1,3 +1,4 @@
+use backup::commands::database::execute_database_backup;
 use backup::commands::run::{execute_run, execute_run_profile};
 use backup::commands::status::execute_status;
 use backup::config::model::*;
@@ -37,6 +38,18 @@ fn test_execute_run() {
     };
     let result = execute_run(&config, &mock_runner).unwrap();
     assert!(result.contains("backup complete"));
+}
+
+#[test]
+fn test_database_stream_uses_database_adapter() {
+    let mut config = BackupConfig::default();
+    config.backup.backup_type = BackupType::DbStream {
+        db_type: DatabaseType::Postgres,
+        connection_url: Some("postgres://postgres:secret@localhost:5432/app".into()),
+    };
+    let output =
+        execute_database_backup(&config, &MockResticRunner::new(0, "streamed"), false).unwrap();
+    assert_eq!(output, "streamed");
 }
 
 #[test]
@@ -167,7 +180,8 @@ profiles:
     let mock_table = "ID        Time                 Host        Tags        Paths\n------------------------------------------------------------------\nabc12345  2026-07-24 17:40:00  funa1                   /var/log";
 
     let mock_runner = MockResticProfileRunner::new(0, mock_table);
-    let status_res = execute_status_from_profiles_config(temp_file.path(), Some("log"), &mock_runner).unwrap();
+    let status_res =
+        execute_status_from_profiles_config(temp_file.path(), Some("log"), &mock_runner).unwrap();
 
     assert!(status_res.contains("Profile: log"));
     assert!(status_res.contains("Repository: s3:https://59.25.177.53:39000/backup/ns0327/log"));
@@ -197,7 +211,8 @@ profiles:
     std::fs::write(temp_file.path(), yaml_content).unwrap();
 
     let mock_runner = MockResticProfileRunner::new(0, "mock snapshot output");
-    let status_res = execute_status_from_profiles_config(temp_file.path(), None, &mock_runner).unwrap();
+    let status_res =
+        execute_status_from_profiles_config(temp_file.path(), None, &mock_runner).unwrap();
 
     assert!(!status_res.contains("Profile: default"));
     assert!(!status_res.contains("Profile: primary"));
@@ -222,9 +237,13 @@ profiles:
     std::fs::write(temp_file.path(), yaml_content).unwrap();
 
     let mock_runner = MockResticProfileRunner::new(0, "mock snapshot output");
-    let status_res = execute_status_from_profiles_config(temp_file.path(), None, &mock_runner).unwrap();
+    let status_res =
+        execute_status_from_profiles_config(temp_file.path(), None, &mock_runner).unwrap();
 
-    assert_eq!(status_res, "No active backup profiles found in configuration.");
+    assert_eq!(
+        status_res,
+        "No active backup profiles found in configuration."
+    );
 }
 
 #[test]
@@ -241,7 +260,6 @@ fn test_execute_run_profile() {
     let result = execute_run_profile(config_path, "self", &opts, &mock_runner).unwrap();
     assert!(result.contains("resticprofile backup complete"));
 }
-
 
 #[test]
 fn test_pipeline_engine_flag_combinations() {
@@ -302,7 +320,12 @@ fn test_copy() {
     use backup::runner::resticprofile::MockResticProfileRunner;
     use std::path::Path;
     let mock = MockResticProfileRunner::new(0, "copy ok");
-    let res = execute_copy(&mock, Path::new("/etc/backup/profiles.yaml"), "default", false).unwrap();
+    let res = execute_copy(
+        &mock,
+        Path::new("/etc/backup/profiles.yaml"),
+        "default",
+        false,
+    )
+    .unwrap();
     assert!(res.contains("Snapshot copy completed for profile [default]"));
 }
-

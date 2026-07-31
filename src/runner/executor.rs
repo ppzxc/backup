@@ -60,7 +60,10 @@ impl MockExecutor {
 impl CommandRunner for MockExecutor {
     fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput> {
         let mut calls = self.calls.lock().unwrap();
-        calls.push((program.to_string(), args.iter().map(|s| s.to_string()).collect()));
+        calls.push((
+            program.to_string(),
+            args.iter().map(|s| s.to_string()).collect(),
+        ));
 
         let mut responses = self.responses.lock().unwrap();
         if let Some(list) = responses.get_mut(program) {
