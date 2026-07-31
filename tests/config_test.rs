@@ -1,4 +1,4 @@
-use backup::config::model::BackupConfig;
+use backup::config::model::{BackupConfig, BackupType};
 use secrecy::ExposeSecret;
 use std::fs;
 use tempfile::tempdir;
@@ -502,6 +502,70 @@ profiles: {}
     let audit = config.audit.unwrap();
     assert_eq!(audit.system_manager, Some("홍길동 차장".to_string()));
     assert_eq!(audit.security_officer, Some("김보안 이사".to_string()));
+}
+
+#[test]
+fn profile_names_includes_primary_when_it_is_a_runnable_profile() {
+    use backup::config::model::ResticProfileConfig;
+
+    let config: ResticProfileConfig = serde_yaml::from_str(
+        r#"
+version: "2"
+profiles:
+  primary:
+    repository: s3:http://example.invalid/backup
+    backup: {source: ["/data"]}
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(config.profile_names(), vec!["primary"]);
+}
+
+#[test]
+fn config_accepts_legacy_snake_case_backup_and_retention_fields() {
+    let config: BackupConfig = serde_yaml::from_str(
+        r#"
+version: "1.0"
+profile: e2e
+backup:
+  backup_type: directory
+  targets: ["/data"]
+  excludes: []
+retention: {keep_daily: 1, keep_weekly: 2, keep_monthly: 3}
+storage:
+  primary: {backend: local, repository: /tmp/repository, password: test-password}
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(config.retention.keep_daily, 1);
+    assert_eq!(config.storage.primary.repository, "/tmp/repository");
+}
+
+#[test]
+fn config_accepts_legacy_snake_case_database_stream_fields() {
+    let config: BackupConfig = serde_yaml::from_str(
+        r#"
+version: "1.0"
+profile: database
+backup:
+  backupType: !dbStream
+    db_type: postgres
+    connection_url: postgres://postgres:secret@db:5432/app
+  targets: []
+  excludes: []
+retention: {keep_daily: 1, keep_weekly: 1, keep_monthly: 1}
+storage:
+  primary: {backend: local, repository: /tmp/repository, password: test-password}
+"#,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        config.backup.backup_type,
+        BackupType::DbStream { .. }
+    ));
 }
 
 #[test]

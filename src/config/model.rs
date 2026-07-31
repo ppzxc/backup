@@ -484,7 +484,7 @@ impl Default for BackupType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupTargets {
-    #[serde(default)]
+    #[serde(default, alias = "backup_type")]
     pub backup_type: BackupType,
     pub targets: Vec<String>,
     pub excludes: Vec<String>,
@@ -493,8 +493,11 @@ pub struct BackupTargets {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetentionPolicy {
+    #[serde(alias = "keep_daily")]
     pub keep_daily: u32,
+    #[serde(alias = "keep_weekly")]
     pub keep_weekly: u32,
+    #[serde(alias = "keep_monthly")]
     pub keep_monthly: u32,
 }
 
@@ -618,11 +621,12 @@ impl ResticProfileConfig {
 
     pub fn profile_names(&self) -> Vec<String> {
         self.profiles
-            .keys()
-            .filter(|k| {
-                k.as_str() != "default" && k.as_str() != "primary" && k.as_str() != "secondary"
+            .iter()
+            .filter(|(name, profile)| {
+                !matches!(name.as_str(), "default" | "primary" | "secondary")
+                    || profile.backup.is_some()
             })
-            .cloned()
+            .map(|(name, _)| name.clone())
             .collect()
     }
 }

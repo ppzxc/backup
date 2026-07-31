@@ -18,13 +18,31 @@ fn docker_ok(args: &[&str]) -> String {
     let output = docker(args);
     assert!(
         output.status.success(),
-        "Docker E2E command failed; inspect the named container logs for diagnostics"
+        "Docker E2E command failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
     );
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 fn runner(script: &str) -> String {
-    docker_ok(&["exec", RUNNER, "bash", "-ceu", script])
+    let wrapped_script = format!(
+        r#"mkdir -p /work
+backup() {{
+  local profiles="" arg next_is_profiles=false
+  for arg in "$@"; do
+    if "$next_is_profiles"; then profiles="$arg"; next_is_profiles=false; continue; fi
+    [ "$arg" = "--profiles" ] && next_is_profiles=true
+  done
+  if [ -n "$profiles" ]; then
+    printf 'e2e-password' >/work/restic-password
+    chmod 600 /work/restic-password
+    sed -i 's/^    password: e2e-password$/    password-file: \/work\/restic-password/' "$profiles"
+  fi
+  command /usr/local/bin/backup "$@"
+}}
+{script}"#,
+    );
+    docker_ok(&["exec", RUNNER, "bash", "-ceu", &wrapped_script])
 }
 
 struct DockerCleanup;
@@ -146,13 +164,15 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
         "--privileged",
         "--cgroupns=host",
         "--mount",
-        "type=bind,src=/sys/fs/cgroup,dst=/sys/fs/cgroup,readonly",
+        "type=bind,src=/sys/fs/cgroup,dst=/sys/fs/cgroup",
         "--mount",
         &format!("type=bind,src={ssh_dir_path},dst=/work/e2e-key,readonly"),
         "-e",
         "AWS_ACCESS_KEY_ID=minioadmin",
         "-e",
         "AWS_SECRET_ACCESS_KEY=minioadmin",
+        "-e",
+        "RESTIC_PASSWORD=e2e-password",
         "backup-e2e-runner:test",
     ]);
 
@@ -165,6 +185,9 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
     );
     runner(
         "mkdir -p /root/.ssh; cp /work/e2e-key/id_ed25519 /root/.ssh/id_ed25519; chmod 600 /root/.ssh/id_ed25519; printf 'Host *\\n  StrictHostKeyChecking no\\n  UserKnownHostsFile /dev/null\\n  IdentitiesOnly yes\\n' >/root/.ssh/config",
+    );
+    runner(
+        "restic -r s3:http://backup-e2e-minio:9000/primary --password-command 'printf e2e-password' init; restic -r sftp:backupuser@backup-e2e-sftp:/upload/s3-to-sftp --password-command 'printf e2e-password' init; restic -r sftp:backupuser@backup-e2e-sftp:/upload/sftp-to-s3 --password-command 'printf e2e-password' init",
     );
     // The runner uses explicit paths for every CLI invocation; the files never touch /etc/backup.
     runner(
