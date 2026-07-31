@@ -51,3 +51,37 @@ fn test_execute_restore() {
     .unwrap();
     assert_eq!(result, "restored");
 }
+
+#[test]
+fn restore_rejects_nonempty_target_without_force() {
+    let target = tempfile::tempdir().unwrap();
+    std::fs::write(target.path().join("existing.txt"), "keep").unwrap();
+
+    let error = execute_restore(
+        &BackupConfig::default(),
+        &MockResticRunner::new(0, "restored"),
+        "latest",
+        target.path().to_str().unwrap(),
+        false,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("pass --force"));
+}
+
+#[test]
+fn restore_propagates_runner_failure_after_explicit_force() {
+    let target = tempfile::tempdir().unwrap();
+    std::fs::write(target.path().join("existing.txt"), "replace").unwrap();
+
+    let error = execute_restore(
+        &BackupConfig::default(),
+        &MockResticRunner::new(1, "repository unavailable"),
+        "latest",
+        target.path().to_str().unwrap(),
+        true,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("repository unavailable"));
+}

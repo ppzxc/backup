@@ -11,6 +11,27 @@ fn test_doctor_checks() {
 }
 
 #[test]
+fn doctor_reports_missing_explicit_temporary_config_path() {
+    use backup::commands::doctor::{DoctorCategory, SystemHealthDiagnoser};
+    use backup::runner::executor::MockExecutor;
+
+    let temp = tempfile::tempdir().unwrap();
+    let missing_config = temp.path().join("missing/config.yml");
+    let snapshot = SystemHealthDiagnoser::diagnose_with_runner(
+        &MockRcloneRunner::new(0, "syno_backup"),
+        &MockExecutor::new(),
+        Some(&missing_config),
+    );
+
+    let config_item = snapshot
+        .items
+        .iter()
+        .find(|item| item.category == DoctorCategory::Config)
+        .unwrap();
+    assert_eq!(config_item.detail, "Backup Environment is missing");
+}
+
+#[test]
 fn test_doctor_status_enum_and_ntp_check() {
     use backup::commands::doctor::{DoctorCategory, DoctorItem, DoctorStatus};
     let item = DoctorItem {
