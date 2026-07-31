@@ -202,7 +202,7 @@ impl RealReportData {
 
 fn get_file_perm_and_safety(path: &Path, expected_mode: u32) -> (String, bool) {
     if !path.exists() {
-        return (format!("{:03o}", expected_mode), true);
+        return ("missing".to_string(), false);
     }
     #[cfg(unix)]
     {
@@ -489,6 +489,7 @@ impl ReportCommand {
                 file: sub_file,
                 format: sub_format,
             }) => {
+                execute_restore_drill(config)?;
                 let final_file = sub_file.or(file);
                 let opts = ReportExportOptions {
                     report_type: ReportType::RestoreDrill,
@@ -510,6 +511,9 @@ impl ReportCommand {
 
                 let mut saved_all = Vec::new();
                 for r_type in report_types {
+                    if r_type == ReportType::RestoreDrill {
+                        execute_restore_drill(config)?;
+                    }
                     let opts = ReportExportOptions {
                         report_type: r_type,
                         file: file.as_deref(),
@@ -529,6 +533,21 @@ impl ReportCommand {
             }
         }
     }
+}
+
+fn execute_restore_drill(config: &crate::config::model::BackupConfig) -> Result<()> {
+    use crate::runner::restic::{ResticRunner, ResticTool};
+    use secrecy::ExposeSecret;
+    let executor = SystemExecutor;
+    let runner = ResticTool::new(&executor);
+    let target = tempfile::tempdir()?;
+    runner.restore(
+        &config.storage.primary.repository,
+        config.storage.primary.password.expose_secret(),
+        "latest",
+        target.path().to_string_lossy().as_ref(),
+    )?;
+    Ok(())
 }
 
 pub fn render_html_isms_report(host_name: &str, timestamp: &str) -> String {

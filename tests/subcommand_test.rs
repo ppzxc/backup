@@ -88,7 +88,12 @@ fn test_report_cli_standalone_execution() {
 
     let mut cmd = Command::cargo_bin("backup").unwrap();
     let assert = cmd
-        .args(&["report", "--file", out_file.to_str().unwrap()])
+        .args(&[
+            "report",
+            "environment",
+            "--file",
+            out_file.to_str().unwrap(),
+        ])
         .assert()
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();

@@ -137,21 +137,44 @@ impl SystemHealthDiagnoser {
             detail: ntp_detail,
         });
 
-        // 4. Restore Drill RTO Item (Dynamic header/restic execution timing)
+        // 4. Restore Drill RTO Item: non-destructively restore the latest snapshot.
         let start_time = std::time::Instant::now();
-        let restic_res = runner.run("restic", &["version"]);
+        let restic_res = (|| -> anyhow::Result<_> {
+            use secrecy::ExposeSecret;
+            use std::io::Write;
+            let config = crate::config::model::BackupConfig::load_from_path(target_config)?;
+            let mut password_file = tempfile::NamedTempFile::new()?;
+            password_file.write_all(config.storage.primary.password.expose_secret().as_bytes())?;
+            password_file.flush()?;
+            let target = tempfile::tempdir()?;
+            let password_path = password_file.path().to_string_lossy();
+            let target_path = target.path().to_string_lossy();
+            runner.run(
+                "restic",
+                &[
+                    "-r",
+                    &config.storage.primary.repository,
+                    "--password-file",
+                    &password_path,
+                    "restore",
+                    "latest",
+                    "--target",
+                    &target_path,
+                ],
+            )
+        })();
         let elapsed = start_time.elapsed().as_secs_f64();
 
         let (rto_status, rto_detail) = if let Ok(out) = restic_res {
             if out.status_code == 0 {
                 (
                     DoctorStatus::Pass,
-                    format!("{:.1}s (Header Signature Valid)", elapsed),
+                    format!("{:.1}s (Latest snapshot restored and validated)", elapsed),
                 )
             } else {
                 (
                     DoctorStatus::Warn,
-                    format!("{:.1}s (Header check returned non-zero code)", elapsed),
+                    format!("{:.1}s (restore returned non-zero code)", elapsed),
                 )
             }
         } else {
