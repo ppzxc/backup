@@ -18,23 +18,31 @@ pub fn execute_database_backup<R: ResticRunner>(
     let url = connection_url
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("Database Backup Adapter requires a connection URL"))?;
-    let (program, args, filename) = dump_command(*db_type, url)?;
+    let (program, args, filename, environment) = dump_command(*db_type, url)?;
     if dry_run {
         return Ok(format!(
             "[Dry-Run] Database Stream: {} -> {}",
             program, filename
         ));
     }
-    runner.backup_command(
+    let env_refs = environment
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    runner.backup_command_with_env(
         &config.storage.primary.repository,
         config.storage.primary.password.expose_secret(),
         &filename,
         program,
         &args,
+        &env_refs,
     )
 }
 
-fn dump_command(db_type: DatabaseType, url: &str) -> Result<(&'static str, Vec<String>, String)> {
+fn dump_command(
+    db_type: DatabaseType,
+    url: &str,
+) -> Result<(&'static str, Vec<String>, String, Vec<(String, String)>)> {
     let parsed = url::Url::parse(url)?;
     let host = parsed
         .host_str()
@@ -44,18 +52,20 @@ fn dump_command(db_type: DatabaseType, url: &str) -> Result<(&'static str, Vec<S
         bail!("Database URL must contain a database name");
     }
     let user = parsed.username();
-    let password = parsed.password();
+    let password = parsed.password().unwrap_or("");
     match db_type {
         DatabaseType::Mysql => {
             let mut args = vec![format!("--host={host}"), format!("--user={user}")];
             if let Some(port) = parsed.port() {
                 args.push(format!("--port={port}"));
             }
-            if let Some(password) = password {
-                args.push(format!("--password={password}"));
-            }
             args.push(database.into());
-            Ok(("mysqldump", args, format!("{database}.sql")))
+            Ok((
+                "mysqldump",
+                args,
+                format!("{database}.sql"),
+                vec![("MYSQL_PWD".into(), password.into())],
+            ))
         }
         DatabaseType::Postgres => {
             let mut args = vec![
@@ -66,7 +76,12 @@ fn dump_command(db_type: DatabaseType, url: &str) -> Result<(&'static str, Vec<S
             if let Some(port) = parsed.port() {
                 args.push(format!("--port={port}"));
             }
-            Ok(("pg_dump", args, format!("{database}.sql")))
+            Ok((
+                "pg_dump",
+                args,
+                format!("{database}.sql"),
+                vec![("PGPASSWORD".into(), password.into())],
+            ))
         }
     }
 }

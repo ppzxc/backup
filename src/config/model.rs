@@ -6,6 +6,8 @@ use std::path::Path;
 
 pub const DEFAULT_PROFILES_FILENAME: &str = "profiles.yaml";
 pub const DEFAULT_PROFILES_PATH: &str = "/etc/backup/profiles.yaml";
+pub const DEFAULT_CONFIG_FILENAME: &str = "config.yml";
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/backup/config.yml";
 
 fn serialize_secret_string<S>(secret: &SecretString, serializer: S) -> Result<S::Ok, S::Error>
 where
@@ -101,6 +103,15 @@ impl BackupConfig {
         if let Some(ref mut sec) = masked.storage.secondary {
             sec.password = SecretString::new("******".into());
         }
+        if let BackupType::DbStream {
+            connection_url: Some(url),
+            ..
+        } = &mut masked.backup.backup_type
+        {
+            if url.contains('@') {
+                *url = "******".into();
+            }
+        }
         masked
     }
 
@@ -152,6 +163,10 @@ impl BackupConfig {
         if !config_dir.exists() {
             create_secure_dir(config_dir)?;
         }
+        save_secure_file(
+            &config_dir.join(DEFAULT_CONFIG_FILENAME),
+            &serde_yaml::to_string(self)?,
+        )?;
 
         let profiles_yaml_path = config_dir.join(DEFAULT_PROFILES_FILENAME);
         let mut restic_config = if profiles_yaml_path.exists() {

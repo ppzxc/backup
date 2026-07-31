@@ -344,9 +344,9 @@ storage:
     let config_yml = config_dir.join("config.yml");
     let profiles_file = config_dir.join("profiles.yaml");
 
-    // Only profiles.yaml should exist (no backup.env, no config.yml)
+    // Canonical config and derived resticprofile YAML should exist.
     assert!(!env_file.exists(), "backup.env should not be created");
-    assert!(!config_yml.exists(), "config.yml should not be created");
+    assert!(config_yml.exists(), "config.yml should be created");
     assert!(profiles_file.exists(), "profiles.yaml must exist");
 
     let content1 = fs::read_to_string(&profiles_file).unwrap();

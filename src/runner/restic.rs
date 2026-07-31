@@ -22,6 +22,15 @@ pub trait ResticRunner {
         program: &str,
         args: &[String],
     ) -> Result<String>;
+    fn backup_command_with_env(
+        &self,
+        repo: &str,
+        password: &str,
+        filename: &str,
+        program: &str,
+        args: &[String],
+        env: &[(&str, &str)],
+    ) -> Result<String>;
 }
 
 pub struct ResticTool<'a, E: CommandRunner> {
@@ -31,6 +40,16 @@ pub struct ResticTool<'a, E: CommandRunner> {
 impl<'a, E: CommandRunner> ResticTool<'a, E> {
     pub fn new(executor: &'a E) -> Self {
         Self { executor }
+    }
+    fn checked(output: crate::runner::executor::CommandOutput) -> Result<String> {
+        if output.status_code != 0 {
+            anyhow::bail!(
+                "restic failed with exit code {}: {}",
+                output.status_code,
+                output.stderr
+            );
+        }
+        Ok(output.stdout)
     }
 }
 
@@ -85,22 +104,19 @@ impl<'a, E: CommandRunner> ResticRunner for ResticTool<'a, E> {
     fn restore(&self, repo: &str, password: &str, snapshot: &str, target: &str) -> Result<String> {
         let pass_file = create_temp_password_file(password)?;
         let pass_path = pass_file.path().to_string_lossy();
-        Ok(self
-            .executor
-            .run(
-                "restic",
-                &[
-                    "-r",
-                    repo,
-                    "--password-file",
-                    &pass_path,
-                    "restore",
-                    snapshot,
-                    "--target",
-                    target,
-                ],
-            )?
-            .stdout)
+        Self::checked(self.executor.run(
+            "restic",
+            &[
+                "-r",
+                repo,
+                "--password-file",
+                &pass_path,
+                "restore",
+                snapshot,
+                "--target",
+                target,
+            ],
+        )?)
     }
     fn backup_command(
         &self,
@@ -125,7 +141,33 @@ impl<'a, E: CommandRunner> ResticRunner for ResticTool<'a, E> {
             program,
         ];
         command.extend(args.iter().map(String::as_str));
-        Ok(self.executor.run("restic", &command)?.stdout)
+        Self::checked(self.executor.run("restic", &command)?)
+    }
+    fn backup_command_with_env(
+        &self,
+        repo: &str,
+        password: &str,
+        filename: &str,
+        program: &str,
+        args: &[String],
+        env: &[(&str, &str)],
+    ) -> Result<String> {
+        let pass_file = create_temp_password_file(password)?;
+        let pass_path = pass_file.path().to_string_lossy();
+        let mut command = vec![
+            "-r",
+            repo,
+            "--password-file",
+            &pass_path,
+            "backup",
+            "--stdin-from-command",
+            "--stdin-filename",
+            filename,
+            "--",
+            program,
+        ];
+        command.extend(args.iter().map(String::as_str));
+        Self::checked(self.executor.run_with_env("restic", &command, env)?)
     }
 }
 
@@ -163,6 +205,17 @@ impl ResticRunner for MockResticRunner {
         Ok(self.response.clone())
     }
     fn backup_command(&self, _: &str, _: &str, _: &str, _: &str, _: &[String]) -> Result<String> {
+        Ok(self.response.clone())
+    }
+    fn backup_command_with_env(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &[String],
+        _: &[(&str, &str)],
+    ) -> Result<String> {
         Ok(self.response.clone())
     }
 }
