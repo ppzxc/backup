@@ -101,6 +101,8 @@ pub struct I18nMessages {
     pub sftp_key_choice_prompt: &'static str,
     pub sftp_key_choice_use_existing: &'static str,
     pub sftp_key_choice_generate_new: &'static str,
+    pub initializing_backend_repo: &'static str,
+    pub backend_init_failed_save_prompt: &'static str,
 }
 
 impl I18nMessages {
@@ -169,6 +171,8 @@ impl I18nMessages {
                 sftp_key_choice_prompt: "SSH Key 사용 방식을 선택하세요:",
                 sftp_key_choice_use_existing: "[1] 기존 SSH Key 사용",
                 sftp_key_choice_generate_new: "[2] 새로 SSH Key 생성",
+                initializing_backend_repo: "[INFO] 백엔드 저장소 연결 및 초기화 진행 중...",
+                backend_init_failed_save_prompt: "저장소 초기화에 실패했습니다. 실패에도 불구하고 설정을 보존하시겠습니까? (나중에 'backup setup backend-init'으로 재시도 가능)",
             },
             Language::En => Self {
                 select_language: "Select Language / 언어 선택:",
@@ -233,6 +237,8 @@ impl I18nMessages {
                 sftp_key_choice_prompt: "Select SSH key option:",
                 sftp_key_choice_use_existing: "[1] Use existing SSH key",
                 sftp_key_choice_generate_new: "[2] Generate new SSH key",
+                initializing_backend_repo: "[INFO] Connecting to backend storage and initializing repository...",
+                backend_init_failed_save_prompt: "Repository initialization failed. Save configuration anyway? (Can retry later via 'backup setup backend-init')",
             },
         }
     }

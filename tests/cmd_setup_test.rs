@@ -73,6 +73,10 @@ impl SetupPrompter for MockPrompter {
             audit: self.params.audit.clone(),
         })
     }
+
+    fn prompt_confirm_save_on_init_failure(&self, _msg: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
 }
 
 #[test]
@@ -198,6 +202,132 @@ fn test_setup_engine_validation_rules() {
     params.primary_storage.sftp.as_mut().unwrap().key_file = Some("/etc/backup/id_rsa".into());
     let config = SetupEngine::validate_and_build(params).unwrap();
     assert_eq!(config.profile, "test");
+}
+
+#[test]
+fn test_setup_engine_run_backend_init_failure_masks_secrets_in_non_interactive_mode() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("profiles.yaml");
+
+    let params = SetupParams {
+        profile: "test-s3".into(),
+        backup_type: BackupType::Directory,
+        targets: vec!["/var/log".into()],
+        excludes: vec![],
+        retention: RetentionPolicy {
+            keep_daily: 7,
+            keep_weekly: 4,
+            keep_monthly: 12,
+        },
+        primary_storage: StorageTarget {
+            backend: "s3".into(),
+            repository: "s3:https://59.25.177.53:3900/backup/log".into(),
+            password: SecretString::new("super_secret_password_123".into()),
+            sftp: None,
+            s3: Some(S3Config {
+                endpoint: "https://59.25.177.53:3900".into(),
+                access_key_id: SecretString::new("access_key_id_xyz".into()),
+                secret_access_key: SecretString::new("super_secret_s3_key_12345".into()),
+            }),
+        },
+        secondary_storage: None,
+        reports: ReportsConfig {
+            output_dir: dir.path().join("reports").to_string_lossy().into_owned(),
+            ..ReportsConfig::default()
+        },
+        audit: AuditConfig::default(),
+    };
+
+    let config = SetupEngine::validate_and_build(params.clone()).unwrap();
+    config.save_to_profiles_path(&config_path).unwrap();
+
+    let prompter = MockPrompter { params };
+    let failing_runner = MockResticProfileRunner::new(
+        1,
+        "connection timeout to https://59.25.177.53:3900 with secret super_secret_s3_key_12345",
+    );
+    let scheduler = support::MockScheduler::new(0, "scheduled");
+
+    let err = run_setup_with_prompter_and_runners(
+        &config_path,
+        &prompter,
+        true,
+        Some(Language::En),
+        &failing_runner,
+        &scheduler,
+    )
+    .unwrap_err();
+
+    let err_str = err.to_string();
+    assert!(err_str.contains("******"));
+    assert!(!err_str.contains("super_secret_s3_key_12345"));
+    assert!(!err_str.contains("super_secret_password_123"));
+}
+
+struct ConfirmSaveMockPrompter {
+    params: SetupParams,
+}
+
+impl SetupPrompter for ConfirmSaveMockPrompter {
+    fn prompt_setup_params(
+        &self,
+        _lang_opt: Option<Language>,
+        _config_dir: &std::path::Path,
+        _profiles_path: &std::path::Path,
+    ) -> anyhow::Result<SetupParams> {
+        Ok(self.params.clone())
+    }
+
+    fn prompt_confirm_save_on_init_failure(&self, _msg: &str) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
+
+#[test]
+fn test_setup_engine_saves_config_when_user_confirms_save_on_init_failure() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("profiles.yaml");
+
+    let params = SetupParams {
+        profile: "test-save-on-fail".into(),
+        backup_type: BackupType::Directory,
+        targets: vec!["/var/log".into()],
+        excludes: vec![],
+        retention: RetentionPolicy::standard_defaults(),
+        primary_storage: StorageTarget {
+            backend: "s3".into(),
+            repository: "s3:https://59.25.177.53:3900/backup/log".into(),
+            password: SecretString::new("secure_password_123".into()),
+            sftp: None,
+            s3: Some(S3Config {
+                endpoint: "https://59.25.177.53:3900".into(),
+                access_key_id: SecretString::new("access_key".into()),
+                secret_access_key: SecretString::new("secret_key".into()),
+            }),
+        },
+        secondary_storage: None,
+        reports: ReportsConfig {
+            output_dir: dir.path().join("reports").to_string_lossy().into_owned(),
+            ..ReportsConfig::default()
+        },
+        audit: AuditConfig::default(),
+    };
+
+    let prompter = ConfirmSaveMockPrompter { params };
+    let failing_runner = MockResticProfileRunner::new(1, "s3 endpoint connection timeout");
+    let scheduler = support::MockScheduler::new(0, "scheduled");
+
+    let res = run_setup_with_prompter_and_runners(
+        &config_path,
+        &prompter,
+        false,
+        Some(Language::Ko),
+        &failing_runner,
+        &scheduler,
+    );
+
+    assert!(res.is_ok());
+    assert!(config_path.exists());
 }
 
 #[test]

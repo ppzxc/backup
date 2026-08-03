@@ -24,6 +24,10 @@ pub trait SetupPrompter {
         config_dir: &Path,
         profiles_path: &Path,
     ) -> Result<SetupParams>;
+
+    fn prompt_confirm_save_on_init_failure(&self, _msg: &str) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 pub struct InquirePrompter;
@@ -49,6 +53,13 @@ fn prompt_text_with_default(msg: &str, default_val: &str, lang: Language) -> Res
 pub const DEFAULT_BACKUP_TARGET: &str = "/var/log";
 
 impl SetupPrompter for InquirePrompter {
+    fn prompt_confirm_save_on_init_failure(&self, msg: &str) -> Result<bool> {
+        Ok(inquire::Confirm::new(msg)
+            .with_default(false)
+            .prompt()
+            .unwrap_or(false))
+    }
+
     fn prompt_setup_params(
         &self,
         lang_opt: Option<Language>,
@@ -779,16 +790,63 @@ impl SetupEngine {
         config.save_to_profiles_path(&staged_profiles)?;
         configure_backend_environment(&config);
         let staged = crate::config::model::ResticProfileConfig::load_from_path(&staged_profiles)?;
-        for name in staged.profile_names() {
-            runner.init(&staged_profiles, &name)?;
-        }
-        if config
-            .storage
-            .secondary
-            .as_ref()
-            .is_some_and(|storage| storage.enabled)
-        {
-            runner.init(&staged_profiles, "secondary")?;
+        let lang = lang_opt.unwrap_or_else(Language::detect);
+        let msg = crate::i18n::I18nMessages::get(lang);
+
+        println!("\n{}", msg.initializing_backend_repo);
+
+        let init_result = (|| -> Result<()> {
+            for name in staged.profile_names() {
+                runner.init(&staged_profiles, &name)?;
+            }
+            if config
+                .storage
+                .secondary
+                .as_ref()
+                .is_some_and(|storage| storage.enabled)
+            {
+                runner.init(&staged_profiles, "secondary")?;
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = init_result {
+            let mut err_msg = error.to_string();
+            let mut secrets = vec![config.storage.primary.password.expose_secret()];
+            if let Some(s3) = &config.storage.primary.s3 {
+                secrets.push(s3.access_key_id.expose_secret());
+                secrets.push(s3.secret_access_key.expose_secret());
+            }
+            if let Some(secondary) = &config.storage.secondary {
+                secrets.push(secondary.password.expose_secret());
+                if let Some(s3) = &secondary.s3 {
+                    secrets.push(s3.access_key_id.expose_secret());
+                    secrets.push(s3.secret_access_key.expose_secret());
+                }
+            }
+            for secret in secrets {
+                let trimmed = secret.trim();
+                if !trimmed.is_empty() {
+                    err_msg = err_msg.replace(trimmed, "******");
+                }
+            }
+            eprintln!("\n[ERROR] {}", err_msg);
+
+            if !non_interactive {
+                let save_anyway = prompter
+                    .prompt_confirm_save_on_init_failure(msg.backend_init_failed_save_prompt)?;
+                if !save_anyway {
+                    return Err(anyhow::anyhow!(
+                        "Setup cancelled due to repository initialization failure: {}",
+                        err_msg
+                    ));
+                }
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Non-interactive setup failed repository initialization: {}",
+                    err_msg
+                ));
+            }
         }
         let previous = LiveConfigSnapshot::capture(profiles_path)?;
         if let Err(error) =

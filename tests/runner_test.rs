@@ -51,6 +51,22 @@ fn test_system_executor_run_success_and_invalid_program() {
 }
 
 #[test]
+fn test_system_executor_run_with_timeout_times_out() {
+    use backup::runner::executor::SystemExecutor;
+    let executor = SystemExecutor;
+    let res = executor
+        .run_with_timeout(
+            "sleep",
+            &["10"],
+            &[],
+            std::time::Duration::from_millis(200),
+        )
+        .unwrap();
+    assert_eq!(res.status_code, -1);
+    assert!(res.stderr.contains("timed out"));
+}
+
+#[test]
 fn test_restic_tool_with_mock_executor() {
     let mock = MockExecutor::new();
     mock.push_output(
