@@ -55,12 +55,7 @@ fn test_system_executor_run_with_timeout_times_out() {
     use backup::runner::executor::SystemExecutor;
     let executor = SystemExecutor;
     let res = executor
-        .run_with_timeout(
-            "sleep",
-            &["10"],
-            &[],
-            std::time::Duration::from_millis(200),
-        )
+        .run_with_timeout("sleep", &["10"], &[], std::time::Duration::from_millis(200))
         .unwrap();
     assert_eq!(res.status_code, -1);
     assert!(res.stderr.contains("timed out"));
@@ -264,6 +259,123 @@ fn test_resticprofile_tool_with_mock_executor() {
     assert_eq!(
         calls[1].1,
         vec!["--config", "/etc/backup/profiles.yaml", "schedule", "--all"]
+    );
+}
+
+#[test]
+fn resticprofile_profile_commands_share_validated_sidecar_environment() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("profiles.yaml");
+    std::fs::write(
+        &config_path,
+        "version: '2'\nprofiles:\n  primary:\n    repository: s3:s3.example/bucket\n    env:\n      AWS_ACCESS_KEY_ID: '{{ .Env.BACKUP_PRIMARY_AWS_ACCESS_KEY_ID }}'\n      AWS_SECRET_ACCESS_KEY: '{{ .Env.BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY }}'\n  archive:\n    inherit: primary\n    backup:\n      source: ['/data']\n  secondary:\n    repository: s3:s3.example/secondary\n    env:\n      AWS_ACCESS_KEY_ID: '{{ .Env.BACKUP_SECONDARY_AWS_ACCESS_KEY_ID }}'\n      AWS_SECRET_ACCESS_KEY: '{{ .Env.BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY }}'\n",
+    )
+    .unwrap();
+    for (name, value) in [
+        ("primary-aws-access-key-id", "primary-access"),
+        ("primary-aws-secret-access-key", "primary-secret"),
+        ("secondary-aws-access-key-id", "secondary-access"),
+        ("secondary-aws-secret-access-key", "secondary-secret"),
+    ] {
+        let path = directory.path().join(name);
+        std::fs::write(&path, value).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let mock = MockExecutor::new();
+    let tool = ResticProfileTool::new(&mock);
+    tool.backup(&config_path, "archive", false).unwrap();
+    tool.init(&config_path, "archive").unwrap();
+
+    let environments = mock.get_environment_calls();
+    assert_eq!(environments.len(), 2);
+    assert_eq!(environments[0], environments[1]);
+    assert_eq!(
+        environments[0],
+        vec![
+            (
+                "BACKUP_PRIMARY_AWS_ACCESS_KEY_ID".into(),
+                "primary-access".into()
+            ),
+            (
+                "BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY".into(),
+                "primary-secret".into()
+            ),
+            (
+                "BACKUP_SECONDARY_AWS_ACCESS_KEY_ID".into(),
+                "secondary-access".into()
+            ),
+            (
+                "BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY".into(),
+                "secondary-secret".into()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn resticprofile_rejects_s3_sidecars_with_insecure_permissions_before_launching() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("profiles.yaml");
+    std::fs::write(
+        &config_path,
+        "version: '2'\nprofiles:\n  primary:\n    repository: s3:s3.example/bucket\n    env:\n      AWS_ACCESS_KEY_ID: '{{ .Env.BACKUP_PRIMARY_AWS_ACCESS_KEY_ID }}'\n      AWS_SECRET_ACCESS_KEY: '{{ .Env.BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY }}'\n  archive:\n    inherit: primary\n    backup:\n      source: ['/data']\n",
+    )
+    .unwrap();
+    for name in ["primary-aws-access-key-id", "primary-aws-secret-access-key"] {
+        let path = directory.path().join(name);
+        std::fs::write(&path, "credential").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    let mock = MockExecutor::new();
+    let error = ResticProfileTool::new(&mock)
+        .backup(&config_path, "archive", false)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("0600"));
+    assert_eq!(mock.call_count("resticprofile"), 0);
+}
+
+#[test]
+fn resticprofile_rejects_missing_s3_sidecar_before_launching() {
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("profiles.yaml");
+    std::fs::write(
+        &config_path,
+        "version: '2'\nprofiles:\n  primary:\n    repository: s3:s3.example/bucket\n    env:\n      AWS_ACCESS_KEY_ID: '{{ .Env.BACKUP_PRIMARY_AWS_ACCESS_KEY_ID }}'\n      AWS_SECRET_ACCESS_KEY: '{{ .Env.BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY }}'\n  archive:\n    inherit: primary\n    backup:\n      source: ['/data']\n",
+    )
+    .unwrap();
+    let mock = MockExecutor::new();
+    assert!(
+        ResticProfileTool::new(&mock)
+            .backup(&config_path, "archive", false)
+            .is_err()
+    );
+    assert_eq!(mock.call_count("resticprofile"), 0);
+}
+
+#[test]
+fn resticprofile_sftp_backend_does_not_require_s3_sidecars() {
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("profiles.yaml");
+    std::fs::write(
+        &config_path,
+        "version: '2'\nprofiles:\n  primary:\n    repository: sftp:user@host:/repo\n  archive:\n    inherit: primary\n    backup:\n      source: ['/data']\n",
+    )
+    .unwrap();
+    let mock = MockExecutor::new();
+    ResticProfileTool::new(&mock)
+        .backup(&config_path, "archive", false)
+        .unwrap();
+    assert_eq!(mock.call_count("resticprofile"), 1);
+    assert_eq!(
+        mock.get_environment_calls(),
+        vec![Vec::<(String, String)>::new()]
     );
 }
 

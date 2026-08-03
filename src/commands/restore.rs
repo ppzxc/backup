@@ -121,3 +121,43 @@ pub fn execute_restore_from_storage<R: ResticRunner>(
     )?;
     Ok(result)
 }
+
+pub fn execute_restore_from_profiles<R: ResticRunner>(
+    config: &crate::config::model::ResticProfileConfig,
+    config_path: &Path,
+    runner: &R,
+    snapshot_id: &str,
+    target_path: &str,
+    force: bool,
+    storage: RestoreStorage,
+) -> Result<String> {
+    let target = Path::new(target_path);
+    if target.exists() && target.read_dir()?.next().is_some() && !force {
+        bail!("Restore target is not empty; pass --force to overwrite");
+    }
+    let config_dir = config_path.parent().unwrap_or(Path::new("."));
+    let owned_environment = config.sidecar_environment(config_dir)?;
+    let environment = owned_environment
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let backend = match storage {
+        RestoreStorage::Primary => "primary",
+        RestoreStorage::Secondary => "secondary",
+    };
+    let (repository, password) = config.backend_credentials(config_dir, backend)?;
+    let result = runner.restore_with_env(
+        &repository,
+        &password,
+        snapshot_id,
+        target_path,
+        &environment,
+    )?;
+    let database_stream = config
+        .application
+        .as_ref()
+        .and_then(|application| application.database.as_ref())
+        .is_some();
+    validate_restored_output(target, database_stream)?;
+    Ok(result)
+}

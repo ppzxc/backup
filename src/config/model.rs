@@ -877,6 +877,113 @@ impl ResticProfileConfig {
             .map(|(name, _)| name.clone())
             .collect()
     }
+
+    /// Resolves child-process-only S3 credentials for resticprofile commands.
+    /// The unified configuration determines which sidecars are mandatory; no
+    /// credential is retained in the configuration or process-global environment.
+    pub fn sidecar_environment(&self, config_dir: &Path) -> Result<Vec<(String, String)>> {
+        let definitions = [
+            (
+                "primary",
+                "BACKUP_PRIMARY_AWS_ACCESS_KEY_ID",
+                "primary-aws-access-key-id",
+                "BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY",
+                "primary-aws-secret-access-key",
+            ),
+            (
+                "secondary",
+                "BACKUP_SECONDARY_AWS_ACCESS_KEY_ID",
+                "secondary-aws-access-key-id",
+                "BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY",
+                "secondary-aws-secret-access-key",
+            ),
+        ];
+        let mut environment = Vec::new();
+        for (backend, access_var, access_file, secret_var, secret_file) in definitions {
+            let Some(profile) = self.profiles.get(backend) else {
+                continue;
+            };
+            let uses_s3_environment = profile.env.as_ref().is_some_and(|environment| {
+                environment
+                    .values()
+                    .any(|value| value.contains(access_var) || value.contains(secret_var))
+            });
+            let access_path = config_dir.join(access_file);
+            let secret_path = config_dir.join(secret_file);
+            if uses_s3_environment {
+                environment.push((access_var.into(), read_secure_sidecar(&access_path)?));
+                environment.push((secret_var.into(), read_secure_sidecar(&secret_path)?));
+            } else {
+                for (variable, path) in [(access_var, access_path), (secret_var, secret_path)] {
+                    if path.exists() {
+                        environment.push((variable.into(), read_secure_sidecar(&path)?));
+                    }
+                }
+            }
+        }
+        Ok(environment)
+    }
+
+    pub fn application_config(&self) -> ApplicationConfig {
+        self.application.clone().unwrap_or_default()
+    }
+
+    /// Resolves a Backend Profile through its inheritance chain without a lossy
+    /// projection into the retired operational configuration model.
+    pub fn backend_credentials(
+        &self,
+        config_dir: &Path,
+        profile: &str,
+    ) -> Result<(String, String)> {
+        let mut current = self
+            .profiles
+            .get(profile)
+            .ok_or_else(|| anyhow::anyhow!("Unknown profile '{profile}'"))?;
+        let mut repository = current.repository.clone();
+        let mut password_file = current.password_file.clone();
+        let mut remaining = self.profiles.len() + 1;
+        while (repository.is_none() || password_file.is_none()) && remaining > 0 {
+            remaining -= 1;
+            let Some(parent) = current.inherit.as_deref() else {
+                break;
+            };
+            current = self.profiles.get(parent).ok_or_else(|| {
+                anyhow::anyhow!("Profile '{profile}' inherits unknown profile '{parent}'")
+            })?;
+            repository = repository.or_else(|| current.repository.clone());
+            password_file = password_file.or_else(|| current.password_file.clone());
+        }
+        if remaining == 0 {
+            anyhow::bail!("Profile '{profile}' has a cyclic inheritance chain");
+        }
+        let repository =
+            repository.ok_or_else(|| anyhow::anyhow!("Profile '{profile}' has no repository"))?;
+        let password_file = password_file
+            .ok_or_else(|| anyhow::anyhow!("Profile '{profile}' has no password-file"))?;
+        let password_path = Path::new(&password_file);
+        let password_path = if password_path.is_absolute() {
+            password_path.to_path_buf()
+        } else {
+            config_dir.join(password_path)
+        };
+        Ok((repository, read_secure_sidecar(&password_path)?))
+    }
+
+    pub fn secure_sidecar_value(config_dir: &Path, name: &str) -> Result<String> {
+        read_secure_sidecar(&config_dir.join(name))
+    }
+}
+
+fn read_secure_sidecar(path: &Path) -> Result<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path)?.permissions().mode() & 0o777;
+        if mode != 0o600 {
+            anyhow::bail!("credential sidecar {} must have mode 0600", path.display());
+        }
+    }
+    Ok(fs::read_to_string(path)?)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

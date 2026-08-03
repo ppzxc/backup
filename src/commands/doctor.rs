@@ -164,20 +164,26 @@ impl SystemHealthDiagnoser {
         // 4. Restore Drill RTO Item: non-destructively restore the latest snapshot.
         let start_time = std::time::Instant::now();
         let restic_res = (|| -> anyhow::Result<_> {
-            use secrecy::ExposeSecret;
             use std::io::Write;
-            let config = crate::config::model::BackupConfig::load_from_path(target_config)?;
+            let config = crate::config::model::ResticProfileConfig::load_from_path(target_config)?;
+            let config_dir = target_config.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let (repository, password) = config.backend_credentials(config_dir, "primary")?;
             let mut password_file = tempfile::NamedTempFile::new()?;
-            password_file.write_all(config.storage.primary.password.expose_secret().as_bytes())?;
+            password_file.write_all(password.as_bytes())?;
             password_file.flush()?;
             let target = tempfile::tempdir()?;
             let password_path = password_file.path().to_string_lossy();
             let target_path = target.path().to_string_lossy();
-            let output = runner.run(
+            let owned_environment = config.sidecar_environment(config_dir)?;
+            let environment = owned_environment
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<Vec<_>>();
+            let output = runner.run_with_env(
                 "restic",
                 &[
                     "-r",
-                    &config.storage.primary.repository,
+                    &repository,
                     "--password-file",
                     &password_path,
                     "restore",
@@ -185,16 +191,18 @@ impl SystemHealthDiagnoser {
                     "--target",
                     &target_path,
                 ],
+                &environment,
             )?;
             if output.status_code != 0 {
                 anyhow::bail!("restic restore exited with {}", output.status_code);
             }
             crate::commands::restore::validate_restored_output(
                 target.path(),
-                matches!(
-                    config.backup.backup_type,
-                    crate::config::model::BackupType::DbStream { .. }
-                ),
+                config
+                    .application
+                    .as_ref()
+                    .and_then(|application| application.database.as_ref())
+                    .is_some(),
             )?;
             Ok(())
         })();

@@ -87,6 +87,55 @@ pub fn write_execution_report(
     Ok(path)
 }
 
+pub fn write_execution_report_from_profiles(
+    config: &crate::config::model::ResticProfileConfig,
+    config_path: &Path,
+    mut report: ExecutionReport,
+) -> Result<std::path::PathBuf> {
+    let application = config.application_config();
+    let output_dir = Path::new(&application.reports.output_dir);
+    crate::config::model::create_secure_dir(output_dir)?;
+    let config_dir = config_path.parent().unwrap_or(Path::new("."));
+    let mut secrets = config
+        .sidecar_environment(config_dir)?
+        .into_iter()
+        .map(|(_, value)| value)
+        .collect::<Vec<_>>();
+    if config
+        .application
+        .as_ref()
+        .and_then(|application| application.database.as_ref())
+        .is_some()
+    {
+        let database_url = crate::config::model::ResticProfileConfig::secure_sidecar_value(
+            config_dir,
+            "database-connection-url",
+        )?;
+        secrets.push(database_url);
+    }
+    for secret in secrets
+        .into_iter()
+        .filter(|secret| !secret.trim().is_empty())
+    {
+        for field in [
+            &mut report.primary_result,
+            &mut report.secondary_result,
+            &mut report.retention_result,
+            &mut report.error,
+        ] {
+            if let Some(value) = field {
+                *value = value.replace(&secret, "******");
+            }
+        }
+    }
+    let path = output_dir.join(format!("execution-{}.json", report.timestamp_unix_nanos));
+    crate::config::model::save_secure_file(
+        &path,
+        &String::from_utf8(serde_json::to_vec_pretty(&report)?)?,
+    )?;
+    Ok(path)
+}
+
 fn now_nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -181,13 +230,19 @@ pub fn resolve_profiles(config_path: &Path, profile: Option<&str>) -> Result<Vec
 }
 
 pub fn run_database_stage<R: ResticRunner>(
-    config: &BackupConfig,
+    config: &crate::config::model::ResticProfileConfig,
+    config_path: &Path,
     runner: &R,
     dry_run: bool,
 ) -> Result<String> {
     let _span = info_span!("database").entered();
     info!("Executing database backup stage");
-    crate::commands::database::execute_database_backup(config, runner, dry_run)
+    crate::commands::database::execute_database_backup_from_profiles(
+        config,
+        config_path,
+        runner,
+        dry_run,
+    )
 }
 
 pub fn execute_secondary_copy<R: ResticProfileRunner>(

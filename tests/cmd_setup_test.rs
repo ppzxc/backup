@@ -624,7 +624,7 @@ fn setup_restores_the_existing_configuration_when_schedule_registration_fails() 
 }
 
 #[test]
-fn setup_initialization_exposes_s3_credentials_to_the_backend_process() {
+fn setup_stages_s3_credentials_in_secure_sidecars_for_child_processes() {
     let config = BackupConfig {
         storage: StorageConfig {
             primary: StorageTarget {
@@ -642,14 +642,23 @@ fn setup_initialization_exposes_s3_credentials_to_the_backend_process() {
         },
         ..BackupConfig::default()
     };
-    backup::commands::setup::configure_backend_environment(&config);
+    let directory = tempfile::tempdir().unwrap();
+    let profiles = directory.path().join("profiles.yaml");
+    config.save_to_profiles_path(&profiles).unwrap();
+    let staged = backup::config::model::ResticProfileConfig::load_from_path(&profiles).unwrap();
+    let environment = staged.sidecar_environment(directory.path()).unwrap();
     assert_eq!(
-        std::env::var("BACKUP_PRIMARY_AWS_ACCESS_KEY_ID").unwrap(),
-        "test-access"
-    );
-    assert_eq!(
-        std::env::var("BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY").unwrap(),
-        "test-secret"
+        environment,
+        vec![
+            (
+                "BACKUP_PRIMARY_AWS_ACCESS_KEY_ID".into(),
+                "test-access".into()
+            ),
+            (
+                "BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY".into(),
+                "test-secret".into()
+            ),
+        ]
     );
 }
 

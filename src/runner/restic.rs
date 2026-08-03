@@ -13,7 +13,25 @@ pub trait ResticRunner {
         excludes: &[String],
     ) -> Result<String>;
     fn list_snapshots(&self, repo: &str, password: &str) -> Result<String>;
+    fn list_snapshots_with_env(
+        &self,
+        repo: &str,
+        password: &str,
+        _env: &[(&str, &str)],
+    ) -> Result<String> {
+        self.list_snapshots(repo, password)
+    }
     fn restore(&self, repo: &str, password: &str, snapshot: &str, target: &str) -> Result<String>;
+    fn restore_with_env(
+        &self,
+        repo: &str,
+        password: &str,
+        snapshot: &str,
+        target: &str,
+        _env: &[(&str, &str)],
+    ) -> Result<String> {
+        self.restore(repo, password, snapshot, target)
+    }
     fn backup_command(
         &self,
         repo: &str,
@@ -101,6 +119,20 @@ impl<'a, E: CommandRunner> ResticRunner for ResticTool<'a, E> {
         )?;
         Self::checked(output)
     }
+    fn list_snapshots_with_env(
+        &self,
+        repo: &str,
+        password: &str,
+        env: &[(&str, &str)],
+    ) -> Result<String> {
+        let pass_file = create_temp_password_file(password)?;
+        let pass_path = pass_file.path().to_string_lossy();
+        Self::checked(self.executor.run_with_env(
+            "restic",
+            &["-r", repo, "--password-file", &pass_path, "snapshots"],
+            env,
+        )?)
+    }
     fn restore(&self, repo: &str, password: &str, snapshot: &str, target: &str) -> Result<String> {
         let pass_file = create_temp_password_file(password)?;
         let pass_path = pass_file.path().to_string_lossy();
@@ -116,6 +148,31 @@ impl<'a, E: CommandRunner> ResticRunner for ResticTool<'a, E> {
                 "--target",
                 target,
             ],
+        )?)
+    }
+    fn restore_with_env(
+        &self,
+        repo: &str,
+        password: &str,
+        snapshot: &str,
+        target: &str,
+        env: &[(&str, &str)],
+    ) -> Result<String> {
+        let pass_file = create_temp_password_file(password)?;
+        let pass_path = pass_file.path().to_string_lossy();
+        Self::checked(self.executor.run_with_env(
+            "restic",
+            &[
+                "-r",
+                repo,
+                "--password-file",
+                &pass_path,
+                "restore",
+                snapshot,
+                "--target",
+                target,
+            ],
+            env,
         )?)
     }
     fn backup_command(

@@ -222,10 +222,8 @@ fn main() -> anyhow::Result<()> {
             skip_retention,
             dry_run,
         } => {
-            let config = backup::config::model::BackupConfig::load_from_path(&profiles_path)?;
             let profiles_config =
                 backup::config::model::ResticProfileConfig::load_from_path(&profiles_path)?;
-            configure_profile_environment(&config);
             let opts = backup::commands::run::PipelineOptions {
                 skip_database,
                 skip_secondary_sync,
@@ -250,14 +248,13 @@ fn main() -> anyhow::Result<()> {
                         .as_ref()
                         .and_then(|application| application.database.as_ref())
                         .is_some_and(|database| profiles_to_run.contains(&database.profile))
-                    && matches!(
-                        config.backup.backup_type,
-                        backup::config::model::BackupType::DbStream { .. }
-                    )
                 {
                     stage = "database";
                     primary_results.push(backup::commands::run::run_database_stage(
-                        &config, &restic, dry_run,
+                        &profiles_config,
+                        &profiles_path,
+                        &restic,
+                        dry_run,
                     )?);
                 }
                 let ordinary_profiles: Vec<_> = profiles_to_run
@@ -318,8 +315,9 @@ fn main() -> anyhow::Result<()> {
                     if let Some(result) = &retention {
                         println!("[Pipeline] Retention prune completed: {result}");
                     }
-                    let path = backup::commands::run::write_execution_report(
-                        &config,
+                    let path = backup::commands::run::write_execution_report_from_profiles(
+                        &profiles_config,
+                        &profiles_path,
                         backup::commands::run::ExecutionReport::success(
                             &report_profile,
                             primary,
@@ -330,8 +328,9 @@ fn main() -> anyhow::Result<()> {
                     println!("[Pipeline] Execution report: {}", path.display());
                 }
                 Err(error) => {
-                    let path = backup::commands::run::write_execution_report(
-                        &config,
+                    let path = backup::commands::run::write_execution_report_from_profiles(
+                        &profiles_config,
+                        &profiles_path,
                         backup::commands::run::ExecutionReport::failure(
                             &report_profile,
                             stage,
@@ -344,11 +343,16 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Database { dry_run } => {
-            let config = backup::config::model::BackupConfig::load_from_path(&profiles_path)?;
-            configure_profile_environment(&config);
+            let config =
+                backup::config::model::ResticProfileConfig::load_from_path(&profiles_path)?;
             println!(
                 "{}",
-                backup::commands::database::execute_database_backup(&config, &restic, dry_run)?
+                backup::commands::database::execute_database_backup_from_profiles(
+                    &config,
+                    &profiles_path,
+                    &restic,
+                    dry_run
+                )?
             );
         }
 
@@ -366,7 +370,6 @@ fn main() -> anyhow::Result<()> {
             } else {
                 backup::config::model::BackupConfig::default()
             };
-            configure_profile_environment(&config);
             let out = backup::commands::report::ReportCommand::run(action, file, format, &config)?;
             println!("{}", out);
         }
@@ -399,17 +402,27 @@ fn main() -> anyhow::Result<()> {
             force,
             storage,
         } => {
-            let config = backup::config::model::BackupConfig::load_from_path(&profiles_path)?;
-            configure_profile_environment(&config);
-            let out = backup::commands::restore::execute_restore_from_storage(
-                &config, &restic, &snapshot, &target, force, storage,
+            let config =
+                backup::config::model::ResticProfileConfig::load_from_path(&profiles_path)?;
+            let out = backup::commands::restore::execute_restore_from_profiles(
+                &config,
+                &profiles_path,
+                &restic,
+                &snapshot,
+                &target,
+                force,
+                storage,
             )?;
             println!("{}", out);
         }
         Commands::Snapshots => {
-            let config = backup::config::model::BackupConfig::load_from_path(&profiles_path)?;
-            configure_profile_environment(&config);
-            let out = backup::commands::snapshots::execute_snapshots(&config, &restic)?;
+            let config =
+                backup::config::model::ResticProfileConfig::load_from_path(&profiles_path)?;
+            let out = backup::commands::snapshots::execute_snapshots_from_profiles(
+                &config,
+                &profiles_path,
+                &restic,
+            )?;
             println!("{}", out);
         }
         Commands::Status { profile } => {
@@ -440,63 +453,17 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn configure_profile_environment(config: &backup::config::model::BackupConfig) {
-    let set_s3_environment = |prefix: &str, s3: Option<&backup::config::model::S3Config>| {
-        if let Some(s3) = s3 {
-            // SAFETY: this single-threaded CLI sets child-process inputs before starting commands.
-            unsafe {
-                std::env::set_var(
-                    format!("{prefix}_AWS_ACCESS_KEY_ID"),
-                    secrecy::ExposeSecret::expose_secret(&s3.access_key_id),
-                );
-                std::env::set_var(
-                    format!("{prefix}_AWS_SECRET_ACCESS_KEY"),
-                    secrecy::ExposeSecret::expose_secret(&s3.secret_access_key),
-                );
-            }
-        }
-    };
-    set_s3_environment("BACKUP_PRIMARY", config.storage.primary.s3.as_ref());
-    if let Some(secondary) = &config.storage.secondary {
-        set_s3_environment("BACKUP_SECONDARY", secondary.s3.as_ref());
-    }
-}
-
 fn init_secondary_backend_if_present<
     R: ResticProfileRunner,
     E: backup::runner::executor::CommandRunner,
 >(
     profiles_path: &std::path::Path,
     resticprofile: &R,
-    executor: &E,
+    _executor: &E,
     verbose: bool,
 ) -> anyhow::Result<()> {
     let parsed = backup::config::model::ResticProfileConfig::load_from_path(profiles_path)?;
-    if let Some(sec_profile) = parsed.profiles.get("secondary") {
-        let repo = sec_profile.repository.as_deref().unwrap_or("");
-        if repo.starts_with("sftp:") {
-            let backup_config = backup::config::model::BackupConfig::load_from_path(profiles_path)?;
-            let sftp_conf = backup_config
-                .storage
-                .secondary
-                .as_ref()
-                .and_then(|s| s.sftp.as_ref());
-
-            if let Some(sftp) = sftp_conf {
-                let key_path = sftp.key_file.as_deref().unwrap_or("");
-                if !key_path.is_empty() {
-                    if let Err(reason) = backup::commands::setup::verify_sftp_connection(
-                        &sftp.user, &sftp.host, sftp.port, key_path, executor,
-                    ) {
-                        anyhow::bail!(
-                            "Secondary SFTP storage connection verification failed: {}",
-                            reason
-                        );
-                    }
-                }
-            }
-        }
-
+    if parsed.profiles.contains_key("secondary") {
         if verbose {
             println!("=== Initializing Secondary Backend Storage for Profile: [secondary] ===");
         }

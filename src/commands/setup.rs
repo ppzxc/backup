@@ -804,7 +804,6 @@ impl SetupEngine {
             .path()
             .join(crate::config::model::DEFAULT_PROFILES_FILENAME);
         config.save_to_profiles_path(&staged_profiles)?;
-        configure_backend_environment(&config);
         let staged = crate::config::model::ResticProfileConfig::load_from_path(&staged_profiles)?;
         let lang = lang_opt.unwrap_or_else(Language::detect);
         let msg = crate::i18n::I18nMessages::get(lang);
@@ -881,28 +880,6 @@ impl SetupEngine {
         }
 
         Ok(())
-    }
-}
-
-pub fn configure_backend_environment(config: &BackupConfig) {
-    let set_s3_environment = |prefix: &str, s3: Option<&S3Config>| {
-        if let Some(s3) = s3 {
-            // Setup runs in a single CLI process before launching resticprofile.
-            unsafe {
-                std::env::set_var(
-                    format!("{prefix}_AWS_ACCESS_KEY_ID"),
-                    secrecy::ExposeSecret::expose_secret(&s3.access_key_id),
-                );
-                std::env::set_var(
-                    format!("{prefix}_AWS_SECRET_ACCESS_KEY"),
-                    secrecy::ExposeSecret::expose_secret(&s3.secret_access_key),
-                );
-            }
-        }
-    };
-    set_s3_environment("BACKUP_PRIMARY", config.storage.primary.s3.as_ref());
-    if let Some(secondary) = &config.storage.secondary {
-        set_s3_environment("BACKUP_SECONDARY", secondary.s3.as_ref());
     }
 }
 

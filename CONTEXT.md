@@ -17,6 +17,10 @@
 * **설명**: 사용자가 Backup Profile과 Unified Backup Configuration을 대화형으로 생성하는 `backup setup` 진입점.
 * **비고**: Setup Wizard는 1차·2차 Backend Adapter의 연결을 검증하고 비어 있는 저장소를 초기화하며, 서버 로컬 시간 기준 기본 03:00의 일별 스케줄러와 백업 실행 리포트의 파일 보관을 자동 설정합니다. 백엔드 연결 및 초기화 실행 시 사용자에게 명확한 상태 안내(Progress UX)를 제공하고 타임아웃(기본 15초)을 강제하여 무한 대기를 방지합니다. 초기화 실패 시 자격 증명을 마스킹하여 사유를 보고하고, 사용자의 선택에 따라 설정을 보존하거나 롤백합니다. 재실행 시 새 구성이 완전히 준비되기 전에는 기존 설정과 스케줄을 유지합니다. Container E2E Matrix의 저장소 조합은 Setup Wizard가 생성한 설정을 유일한 입력으로 사용하며, 테스트가 설정 파일을 직접 작성해 이를 대체하지 않습니다.
 
+### 2-2. Application Configuration (애플리케이션 메타데이터 설정)
+* **설명**: Unified Backup Configuration의 `application` 아래에 있는 backup CLI 전용 메타데이터이다.
+* **비고**: 보고서, 감사, 선택적 Database Stream만 보관하며 Backup Profile, Backend Adapter, 보존 정책 등 백업 실행 설정을 소유하지 않는다. 이전 `BackupConfig`는 운영 설정 모델로 사용하지 않는다.
+
 ### 3. Configuration Registry (설정 레지스트리)
 * **설명**: 백업 설정을 관리하는 심층 아키텍처 모듈.
 * **비고**: 메모리에 설정을 로드하고 유효성 검증을 거치는 행위(`load_and_validate_config`), 설정을 파일에 쓰고 파생 산출물(profiles.yaml, systemd 타이머 등)을 동기화하는 행위(`save_profile_config`)를 제공하여 호출자와 시스템 간의 세임(Seam) 역할을 수행합니다.

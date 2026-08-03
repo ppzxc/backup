@@ -1,6 +1,5 @@
 use crate::runner::executor::{CommandOutput, CommandRunner};
 use anyhow::Result;
-use secrecy::ExposeSecret;
 use std::path::Path;
 
 pub trait ResticProfileRunner {
@@ -48,73 +47,11 @@ impl<'a, E: CommandRunner> ResticProfileTool<'a, E> {
         profile: &str,
         args: &[&str],
     ) -> Result<CommandOutput> {
-        let config_dir = config_path.parent().unwrap_or(Path::new("."));
-        let sidecar = |name: &str| std::fs::read_to_string(config_dir.join(name)).ok();
-        let config = crate::config::model::BackupConfig::load_from_path(config_path).ok();
-        let storage = config.as_ref().and_then(|config| {
-            if profile == "secondary" {
-                config
-                    .storage
-                    .secondary
-                    .as_ref()
-                    .filter(|storage| storage.enabled)
-                    .map(|storage| (storage.s3.as_ref(), storage.password.expose_secret()))
-            } else {
-                Some((
-                    config.storage.primary.s3.as_ref(),
-                    config.storage.primary.password.expose_secret(),
-                ))
-            }
-        });
-        let mut env: Vec<(&str, &str)> = Vec::new();
-        if let Some((Some(s3), _)) = storage {
-            env.push(("AWS_ACCESS_KEY_ID", s3.access_key_id.expose_secret()));
-            env.push((
-                "AWS_SECRET_ACCESS_KEY",
-                s3.secret_access_key.expose_secret(),
-            ));
-            env.push((
-                "BACKUP_PRIMARY_AWS_ACCESS_KEY_ID",
-                s3.access_key_id.expose_secret(),
-            ));
-            env.push((
-                "BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY",
-                s3.secret_access_key.expose_secret(),
-            ));
-            if profile == "secondary" {
-                env.push((
-                    "BACKUP_SECONDARY_AWS_ACCESS_KEY_ID",
-                    s3.access_key_id.expose_secret(),
-                ));
-                env.push((
-                    "BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY",
-                    s3.secret_access_key.expose_secret(),
-                ));
-            }
-        }
-        let sidecar_values = [
-            (
-                "BACKUP_PRIMARY_AWS_ACCESS_KEY_ID",
-                sidecar("primary-aws-access-key-id"),
-            ),
-            (
-                "BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY",
-                sidecar("primary-aws-secret-access-key"),
-            ),
-            (
-                "BACKUP_SECONDARY_AWS_ACCESS_KEY_ID",
-                sidecar("secondary-aws-access-key-id"),
-            ),
-            (
-                "BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY",
-                sidecar("secondary-aws-secret-access-key"),
-            ),
-        ];
-        for (name, value) in &sidecar_values {
-            if let Some(value) = value.as_deref() {
-                env.push((name, value));
-            }
-        }
+        let owned_env = profile_sidecar_environment(config_path, profile)?;
+        let env: Vec<_> = owned_env
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
         self.executor.run_with_env("resticprofile", args, &env)
     }
 
@@ -125,64 +62,28 @@ impl<'a, E: CommandRunner> ResticProfileTool<'a, E> {
         args: &[&str],
         timeout: std::time::Duration,
     ) -> Result<CommandOutput> {
-        let config_dir = config_path.parent().unwrap_or(Path::new("."));
-        let sidecar = |name: &str| std::fs::read_to_string(config_dir.join(name)).ok();
-        let config = crate::config::model::BackupConfig::load_from_path(config_path).ok();
-        let storage = config.as_ref().and_then(|config| {
-            if profile == "secondary" {
-                config
-                    .storage
-                    .secondary
-                    .as_ref()
-                    .filter(|storage| storage.enabled)
-                    .map(|storage| (storage.s3.as_ref(), storage.password.expose_secret()))
-            } else {
-                Some((
-                    config.storage.primary.s3.as_ref(),
-                    config.storage.primary.password.expose_secret(),
-                ))
-            }
-        });
-        let mut env: Vec<(&str, &str)> = Vec::new();
-        if let Some((Some(s3), _)) = storage {
-            env.push(("AWS_ACCESS_KEY_ID", s3.access_key_id.expose_secret()));
-            env.push((
-                "AWS_SECRET_ACCESS_KEY",
-                s3.secret_access_key.expose_secret(),
-            ));
-            env.push((
-                "BACKUP_PRIMARY_AWS_ACCESS_KEY_ID",
-                s3.access_key_id.expose_secret(),
-            ));
-            env.push((
-                "BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY",
-                s3.secret_access_key.expose_secret(),
-            ));
-            if profile == "secondary" {
-                env.push((
-                    "BACKUP_SECONDARY_AWS_ACCESS_KEY_ID",
-                    s3.access_key_id.expose_secret(),
-                ));
-                env.push((
-                    "BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY",
-                    s3.secret_access_key.expose_secret(),
-                ));
-            }
-        }
-        let sidecar_values = [
-            ("BACKUP_PRIMARY_AWS_ACCESS_KEY_ID", sidecar("primary-aws-access-key-id")),
-            ("BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY", sidecar("primary-aws-secret-access-key")),
-            ("BACKUP_SECONDARY_AWS_ACCESS_KEY_ID", sidecar("secondary-aws-access-key-id")),
-            ("BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY", sidecar("secondary-aws-secret-access-key")),
-        ];
-        for (name, value) in &sidecar_values {
-            if let Some(value) = value.as_deref() {
-                env.push((name, value));
-            }
-        }
+        let owned_env = profile_sidecar_environment(config_path, profile)?;
+        let env: Vec<_> = owned_env
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
         self.executor
             .run_with_timeout("resticprofile", args, &env, timeout)
     }
+}
+
+/// Builds the secret environment for one resticprofile invocation. Credentials
+/// remain owned here until they are borrowed by `CommandRunner` at launch time.
+fn profile_sidecar_environment(
+    config_path: &Path,
+    _profile: &str,
+) -> Result<Vec<(String, String)>> {
+    if !config_path.exists() {
+        return Ok(Vec::new());
+    }
+    let config = crate::config::model::ResticProfileConfig::load_from_path(config_path)?;
+    let config_dir = config_path.parent().unwrap_or(Path::new("."));
+    config.sidecar_environment(config_dir)
 }
 
 impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {

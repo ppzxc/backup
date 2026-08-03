@@ -2,6 +2,55 @@ use crate::config::model::{BackupConfig, BackupType, DatabaseType};
 use crate::runner::restic::ResticRunner;
 use anyhow::{Result, bail};
 use secrecy::ExposeSecret;
+use std::path::Path;
+
+pub fn execute_database_backup_from_profiles<R: ResticRunner>(
+    config: &crate::config::model::ResticProfileConfig,
+    config_path: &Path,
+    runner: &R,
+    dry_run: bool,
+) -> Result<String> {
+    let database = config
+        .application
+        .as_ref()
+        .and_then(|application| application.database.as_ref())
+        .ok_or_else(|| {
+            anyhow::anyhow!("Database Backup Adapter is not configured; run backup setup first")
+        })?;
+    let config_dir = config_path.parent().unwrap_or(Path::new("."));
+    // Dry-runs render the dump command but never launch a child process, so they
+    // may inspect a fixture sidecar without treating it as an executable secret.
+    let url = if dry_run {
+        std::fs::read_to_string(config_dir.join("database-connection-url"))?
+    } else {
+        crate::config::model::ResticProfileConfig::secure_sidecar_value(
+            config_dir,
+            "database-connection-url",
+        )?
+    };
+    let (program, args, filename, environment) = dump_command(database.db_type, &url)?;
+    if dry_run {
+        return Ok(format!(
+            "[Dry-Run] Database Stream: {} -> {}",
+            program, filename
+        ));
+    }
+    let (repository, password) = config.backend_credentials(config_dir, &database.profile)?;
+    let mut owned_environment = config.sidecar_environment(config_dir)?;
+    owned_environment.extend(environment);
+    let environment = owned_environment
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    runner.backup_command_with_env(
+        &repository,
+        &password,
+        &filename,
+        program,
+        &args,
+        &environment,
+    )
+}
 
 pub fn execute_database_backup<R: ResticRunner>(
     config: &BackupConfig,

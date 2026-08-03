@@ -16,7 +16,8 @@
   * 입출력 및 외부 명령 호출이 없는 순수 함수(`resolve_*`, `validate_*`, `render_*`)는 독립적으로 실행할 수 있도록 설계하고 unit test에서 직접 검증합니다.
   * 외부 명령 호출(`restic`, `rclone`, `systemctl`, `mysqldump`, `pg_dump`)은 `CommandRunner` / `Executor` Trait (`src/runner/executor.rs`)으로 추상화하고 테스트 시 `MockExecutor`로 원격 종속성을 차단합니다.
 * **설정값 우선순위 및 단일 원천 (Single Source of Truth)**:
-  * 모든 설정값은 `BackupConfig` 단일 원천을 통해 처리됩니다.
+  * `ResticProfileConfig`가 `/etc/backup/profiles.yaml`의 통합 백업 설정을 단일 원천으로 로드·검증하고, 모든 운영 명령은 이를 통해 Backup Profile·Backend Profile·선택적 Database Stream을 해석합니다.
+  * `application`은 보고서·감사·선택적 Database Stream 메타데이터만 보관하며, 백업 실행 설정을 중복 보관하지 않습니다. `BackupConfig`는 운영 설정 모델로 사용하지 않습니다.
 
 ## 🔒 보안 및 컴플라이언스 (Security & Compliance)
 
