@@ -48,6 +48,8 @@ impl<'a, E: CommandRunner> ResticProfileTool<'a, E> {
         profile: &str,
         args: &[&str],
     ) -> Result<CommandOutput> {
+        let config_dir = config_path.parent().unwrap_or(Path::new("."));
+        let sidecar = |name: &str| std::fs::read_to_string(config_dir.join(name)).ok();
         let config = crate::config::model::BackupConfig::load_from_path(config_path).ok();
         let storage = config.as_ref().and_then(|config| {
             if profile == "secondary" {
@@ -90,6 +92,29 @@ impl<'a, E: CommandRunner> ResticProfileTool<'a, E> {
                 ));
             }
         }
+        let sidecar_values = [
+            (
+                "BACKUP_PRIMARY_AWS_ACCESS_KEY_ID",
+                sidecar("primary-aws-access-key-id"),
+            ),
+            (
+                "BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY",
+                sidecar("primary-aws-secret-access-key"),
+            ),
+            (
+                "BACKUP_SECONDARY_AWS_ACCESS_KEY_ID",
+                sidecar("secondary-aws-access-key-id"),
+            ),
+            (
+                "BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY",
+                sidecar("secondary-aws-secret-access-key"),
+            ),
+        ];
+        for (name, value) in &sidecar_values {
+            if let Some(value) = value.as_deref() {
+                env.push((name, value));
+            }
+        }
         self.executor.run_with_env("resticprofile", args, &env)
     }
 
@@ -100,6 +125,8 @@ impl<'a, E: CommandRunner> ResticProfileTool<'a, E> {
         args: &[&str],
         timeout: std::time::Duration,
     ) -> Result<CommandOutput> {
+        let config_dir = config_path.parent().unwrap_or(Path::new("."));
+        let sidecar = |name: &str| std::fs::read_to_string(config_dir.join(name)).ok();
         let config = crate::config::model::BackupConfig::load_from_path(config_path).ok();
         let storage = config.as_ref().and_then(|config| {
             if profile == "secondary" {
@@ -140,6 +167,17 @@ impl<'a, E: CommandRunner> ResticProfileTool<'a, E> {
                     "BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY",
                     s3.secret_access_key.expose_secret(),
                 ));
+            }
+        }
+        let sidecar_values = [
+            ("BACKUP_PRIMARY_AWS_ACCESS_KEY_ID", sidecar("primary-aws-access-key-id")),
+            ("BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY", sidecar("primary-aws-secret-access-key")),
+            ("BACKUP_SECONDARY_AWS_ACCESS_KEY_ID", sidecar("secondary-aws-access-key-id")),
+            ("BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY", sidecar("secondary-aws-secret-access-key")),
+        ];
+        for (name, value) in &sidecar_values {
+            if let Some(value) = value.as_deref() {
+                env.push((name, value));
             }
         }
         self.executor

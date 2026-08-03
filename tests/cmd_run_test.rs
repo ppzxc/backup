@@ -8,6 +8,48 @@ use std::path::Path;
 use support::{MockResticProfileRunner, MockResticRunner};
 
 #[test]
+fn selected_profiles_each_execute_their_own_copy_operation() {
+    use backup::commands::run::execute_secondary_copies;
+    use backup::config::model::{CopyCommandSection, ProfileSection, ResticProfileConfig};
+    use std::collections::BTreeMap;
+
+    let profiles = BTreeMap::from([
+        (
+            "one".into(),
+            ProfileSection {
+                copy: Some(CopyCommandSection::default()),
+                ..Default::default()
+            },
+        ),
+        (
+            "two".into(),
+            ProfileSection {
+                copy: Some(CopyCommandSection::default()),
+                ..Default::default()
+            },
+        ),
+    ]);
+    let config = ResticProfileConfig {
+        version: "2".into(),
+        application: None,
+        global: None,
+        groups: None,
+        profiles,
+    };
+    let runner = MockResticProfileRunner::new(0, "copied");
+    let output = execute_secondary_copies(
+        &config,
+        Path::new("/tmp/profiles.yaml"),
+        &["one".into(), "two".into()],
+        false,
+        &runner,
+    )
+    .unwrap();
+
+    assert_eq!(output, vec!["copied", "copied"]);
+}
+
+#[test]
 fn execution_reports_capture_failures_without_exposing_storage_passwords() {
     use backup::commands::run::{ExecutionReport, write_execution_report};
     let directory = tempfile::tempdir().unwrap();

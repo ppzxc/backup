@@ -6,11 +6,12 @@
 
 ### 1. Backup Profile (백엔드 프로필)
 * **설명**: 특정 데이터 대상(예: DB, 로그 파일 등)을 백업하기 위한 보관 주기, 저장 대상, 암호, 스케줄링 등의 구성을 갖춘 독립적인 백업 동작 단위.
-* **비고**: `/etc/backup/profiles.yaml`의 resticprofile v2 `profiles` 키 아래 프로필 키로 표현되며, 호스트명을 기본값으로 갖습니다.
+* **비고**: `/etc/backup/profiles.yaml`의 resticprofile v2 `profiles` 키 아래 프로필 키로 표현되며, `backup run`은 명시적인 프로필 필터가 없으면 실행 가능한 모든 Backup Profile을 순회합니다.
 
 ### 2. Unified Backup Configuration (통합 백업 설정)
 * **설명**: 호스트별 설정의 유일한 단일 원천(Source of Truth)으로 작동하는 환경설정 파일.
-* **비고**: 기본 경로는 `/etc/backup/profiles.yaml`이며, 권한은 반드시 `600`이어야 합니다. resticprofile v2 설정은 표준 최상위 키(`version`, `global`, `groups`, `profiles`)를 사용하고, 애플리케이션 설정은 충돌하지 않는 `application` 키 아래에 보관합니다. 비밀값은 같은 디렉터리의 `600` 파일로 분리합니다.
+* **비고**: 기본 경로는 `/etc/backup/profiles.yaml`이며, 권한은 반드시 `600`이어야 합니다. resticprofile v2 설정은 표준 최상위 키(`version`, `global`, `groups`, `profiles`)를 사용하며, 백업 실행 설정의 유일한 정본이다. `application`은 충돌하지 않는 backup CLI 전용 메타데이터인 보고서, 선택적인 Database Stream, 감사 정보를 보관한다. 구성 형식의 버전은 최상위 `version: "2"`가 유일한 권위이며 `application`은 별도 형식 버전을 갖지 않습니다. 비밀값은 같은 디렉터리의 `600` 파일로 분리합니다.
+* **전환 정책**: 이전 `application`에 백업 실행 설정이 남은 Unified Backup Configuration은 유효하지 않으며, 운영자가 표준 프로필로 수동 전환해야 한다.
 
 ### 2-1. Setup Wizard (설정 위자드)
 * **설명**: 사용자가 Backup Profile과 Unified Backup Configuration을 대화형으로 생성하는 `backup setup` 진입점.
@@ -27,7 +28,7 @@
 
 ### 4. Backend Adapter (백엔드 어댑터)
 * **설명**: 다양한 저장 대상(S3, SFTP 등)에 따라 다르게 요구되는 필드 검증, 환경 변수 렌더링, 공지 사항 생성, 연결 테스트 등의 행위를 추상화한 다형성 모듈.
-* **비고**: `backend_${backend}_${action}` 형태로 함수가 명명되며, 1차 및 2차 저장소 여부에 따른 동적 접두사 처리를 내부에서 캡슐화합니다.
+* **비고**: `primary`와 `secondary`는 예약된 Backend Profile이며, 일반 Backup Profile이 상속 및 복사 설정으로 이를 참조한다. `backend_${backend}_${action}` 형태로 함수가 명명되며, 1차 및 2차 저장소 여부에 따른 동적 접두사 처리를 내부에서 캡슐화합니다.
 
 ### 5. Notification Adapter (알림 어댑터)
 * **설명**: Slack, Discord, Custom 등 다양한 알림 채널에 맞추어 페이로드 포맷을 정하고 웹훅 디스패치 및 필수 값 검증을 추상화한 다형성 모듈.
@@ -68,7 +69,7 @@
 
 ### 11-2. Scheduled Backup Run (예약 백업 실행)
 * **설명**: Setup Wizard가 등록한 스케줄러가 전체 Backup Pipeline을 호출하는 일별 자동 실행.
-* **비고**: 실행 단위는 `backup run`이며, resticprofile의 단일 `backup` 작업이 아닙니다. 따라서 1차 백업·2차 동기화·Retention·Backup Execution Report가 같은 실행 결과에 포함됩니다. Setup Wizard는 systemd timer를 우선 선택하고, 사용할 수 없을 때만 Cron fallback을 자동 선택합니다.
+* **비고**: 실행 단위는 `backup run`이며, resticprofile의 단일 `backup` 작업이 아닙니다. 따라서 각 Backup Profile의 1차 백업·2차 복제·Retention과 Backup Execution Report가 같은 실행 결과에 포함됩니다. Setup Wizard는 systemd timer를 우선 선택하고, 사용할 수 없을 때만 Cron fallback을 자동 선택합니다.
 
 ### 12. Database E2E Support Matrix (데이터베이스 E2E 지원 매트릭스)
 * **설명**: Database Stream의 실제 백업·복원을 계속 검증하는 프로덕션 데이터베이스 버전 집합.

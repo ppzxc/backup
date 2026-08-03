@@ -164,7 +164,7 @@ impl RealReportData {
             if let Ok(profile_cfg) =
                 crate::config::model::ResticProfileConfig::load_from_path(profiles_yaml_path)
             {
-                if let Some(loaded_audit) = profile_cfg.audit {
+                if let Some(loaded_audit) = profile_cfg.application.map(|app| app.audit) {
                     audit = loaded_audit;
                 }
             }

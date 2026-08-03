@@ -16,7 +16,7 @@ fn cli_lifecycle_contract_uses_one_explicit_profiles_path() {
         &profiles,
         unified_profiles_yaml(
             &format!(
-                "  version: '1.0'\n  profile: test\n  backup: {{backup_type: directory, targets: ['/tmp'], excludes: []}}\n  retention: {{keep_daily: 1, keep_weekly: 1, keep_monthly: 1}}\n  storage: {{primary: {{backend: local, repository: /tmp/repo, password: test-password}}}}\n  reports: {{outputDir: '{}', enableDailyReports: true, enableAnnualDrDrillReport: false}}",
+                "  reports: {{outputDir: '{}', enableDailyReports: true, enableAnnualDrDrillReport: false}}",
                 temp.path().join("reports").display()
             ),
             "test",
@@ -85,7 +85,7 @@ fn database_dry_run_accepts_unified_database_configuration() {
     fs::write(
         &profiles,
         unified_profiles_yaml(
-            "  version: '1.0'\n  profile: database\n  backup:\n    backupType: !dbStream\n      db_type: postgres\n      connection_url: postgres://postgres:secret@db:5432/app\n    targets: []\n    excludes: []\n  retention: {keepDaily: 1, keepWeekly: 1, keepMonthly: 1}\n  storage: {primary: {backend: s3, repository: 's3:http://minio:9000/database', password: test-password}}",
+            "  database:\n    profile: database\n    type: postgres\n    connection-url: postgres://postgres:secret@db:5432/app",
             "database",
         ),
     )

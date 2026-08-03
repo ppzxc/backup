@@ -1,7 +1,54 @@
-use backup::config::model::{BackupConfig, BackupType};
+use backup::config::model::{BackupConfig, BackupType, ReportsConfig};
 use secrecy::ExposeSecret;
 use std::fs;
 use tempfile::tempdir;
+
+#[test]
+fn unified_profiles_reject_deprecated_application_execution_settings() {
+    use backup::config::model::ResticProfileConfig;
+
+    let yaml = r#"
+version: "2"
+application:
+  profile: legacy
+  reports:
+    outputDir: /var/reports
+    enableDailyReports: true
+    enableAnnualDrDrillReport: false
+profiles:
+  legacy:
+    backup: { source: [/data] }
+"#;
+
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), yaml).unwrap();
+    let error = ResticProfileConfig::load_from_path(file.path()).unwrap_err();
+    assert!(error.to_string().contains("application.profile"));
+    assert!(error.to_string().contains("move"));
+}
+
+#[test]
+fn unified_profiles_reject_database_target_that_is_not_a_backup_profile() {
+    use backup::config::model::ResticProfileConfig;
+
+    let yaml = r#"
+version: "2"
+application:
+  database:
+    profile: missing
+    type: postgres
+    connection-url: ${BACKUP_DATABASE_CONNECTION_URL}
+profiles:
+  primary:
+    repository: s3:bucket
+"#;
+
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), yaml).unwrap();
+    let error = ResticProfileConfig::load_from_path(file.path()).unwrap_err();
+    assert!(error.to_string().contains("application.database.profile"));
+    assert!(error.to_string().contains("missing"));
+}
 
 #[test]
 fn test_parse_yaml_config() {
@@ -294,10 +341,8 @@ storage:
     for secret in ["repository-secret", "access-key", "aws-secret"] {
         assert!(!profiles.contains(secret), "profiles leaked {secret}");
     }
-    assert!(
-        !profiles.contains("env:\n      AWS_SECRET_ACCESS_KEY"),
-        "resticprofile profile must not override injected AWS credentials"
-    );
+    assert!(profiles.contains("{{ .Env.BACKUP_PRIMARY_AWS_ACCESS_KEY_ID }}"));
+    assert!(profiles.contains("{{ .Env.BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY }}"));
     assert!(config_dir.join("primary-password").exists());
 }
 
@@ -380,19 +425,18 @@ storage:
     assert!(profiles_file.exists(), "profiles.yaml must exist");
 
     let content1 = fs::read_to_string(&profiles_file).unwrap();
+    let document: serde_yaml::Value = serde_yaml::from_str(&content1).unwrap();
+    assert_eq!(document["version"].as_str(), Some("2"));
+    assert!(
+        document["application"].get("version").is_none(),
+        "the application namespace must not declare a second configuration version"
+    );
     let parsed1: backup::config::model::ResticProfileConfig =
         serde_yaml::from_str(&content1).unwrap();
     let application = parsed1
         .application
         .expect("profiles.yaml must contain the application configuration section");
-    assert_eq!(application.profile, "log");
-    let loaded = BackupConfig::load_from_path(&profiles_file)
-        .expect("application settings must load from the unified profiles.yaml");
-    assert_eq!(loaded.profile, "log");
-    assert_eq!(
-        loaded.storage.primary.password.expose_secret(),
-        "secret_pass_123"
-    );
+    assert_eq!(application.reports, ReportsConfig::default());
     assert!(content1.contains("log:"));
     assert!(content1.contains("sftp:backup@192.168.1.100:/backup"));
 
@@ -499,20 +543,20 @@ storage:
 }
 
 #[test]
-fn test_restic_profile_config_audit_section() {
+fn test_restic_profile_config_audit_is_application_metadata() {
     use backup::config::model::ResticProfileConfig;
     let yaml = r#"
 version: "2"
-audit:
-  system-manager: "홍길동 차장"
-  security-officer: "김보안 이사"
+application:
+  audit:
+    system-manager: "홍길동 차장"
+    security-officer: "김보안 이사"
 global:
   min-memory: 1024
 profiles: {}
 "#;
     let config: ResticProfileConfig = serde_yaml::from_str(yaml).unwrap();
-    assert!(config.audit.is_some());
-    let audit = config.audit.unwrap();
+    let audit = config.application.unwrap().audit;
     assert_eq!(audit.system_manager, Some("홍길동 차장".to_string()));
     assert_eq!(audit.security_officer, Some("김보안 이사".to_string()));
 }

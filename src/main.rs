@@ -145,7 +145,8 @@ fn main() -> anyhow::Result<()> {
     let env_override = std::env::var("BACKUP_LOG")
         .or_else(|_| std::env::var("RUST_LOG"))
         .ok();
-    let level_filter = backup::logger::determine_level_filter(cli.verbose, cli.quiet, env_override.as_deref());
+    let level_filter =
+        backup::logger::determine_level_filter(cli.verbose, cli.quiet, env_override.as_deref());
     let log_config = backup::logger::LogConfig::new(level_filter, cli.log_file.clone());
     let _ = backup::logger::init_logging(log_config);
 
@@ -222,6 +223,8 @@ fn main() -> anyhow::Result<()> {
             dry_run,
         } => {
             let config = backup::config::model::BackupConfig::load_from_path(&profiles_path)?;
+            let profiles_config =
+                backup::config::model::ResticProfileConfig::load_from_path(&profiles_path)?;
             configure_profile_environment(&config);
             let opts = backup::commands::run::PipelineOptions {
                 skip_database,
@@ -230,13 +233,18 @@ fn main() -> anyhow::Result<()> {
                 dry_run,
             };
 
-            let report_profile = profile.clone().unwrap_or_else(|| config.profile.clone());
+            let report_profile = profile.clone().unwrap_or_else(|| "all".into());
             let mut stage = "profile resolution";
             let outcome = (|| -> anyhow::Result<(String, Option<String>, Option<String>)> {
                 let profiles_to_run =
                     backup::commands::run::resolve_profiles(&profiles_path, profile.as_deref())?;
                 let mut primary_results = Vec::new();
                 if !skip_database
+                    && profiles_config
+                        .application
+                        .as_ref()
+                        .and_then(|application| application.database.as_ref())
+                        .is_some_and(|database| profiles_to_run.contains(&database.profile))
                     && matches!(
                         config.backup.backup_type,
                         backup::config::model::BackupType::DbStream { .. }
@@ -256,23 +264,16 @@ fn main() -> anyhow::Result<()> {
                         &resticprofile,
                     )?);
                 }
-                let secondary_result = if !skip_secondary_sync
-                    && config
-                        .storage
-                        .secondary
-                        .as_ref()
-                        .is_some_and(|storage| storage.enabled)
-                {
+                let secondary_result = if !skip_secondary_sync {
                     stage = "secondary sync";
-                    let copy_profile = profiles_to_run.first().ok_or_else(|| {
-                        anyhow::anyhow!("No Backup Profiles are configured for snapshot copy")
-                    })?;
-                    Some(backup::commands::run::execute_secondary_copy(
+                    let copies = backup::commands::run::execute_secondary_copies(
+                        &profiles_config,
                         &profiles_path,
-                        copy_profile,
+                        &profiles_to_run,
                         dry_run,
                         &resticprofile,
-                    )?)
+                    )?;
+                    (!copies.is_empty()).then(|| copies.join("\n"))
                 } else {
                     None
                 };

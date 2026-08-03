@@ -201,6 +201,28 @@ pub fn execute_secondary_copy<R: ResticProfileRunner>(
     runner.copy(config_path, profile, dry_run)
 }
 
+/// Executes the copy operation declared by every selected Backup Profile.
+/// Profiles without `copy` are intentionally skipped: replication is profile-owned.
+pub fn execute_secondary_copies<R: ResticProfileRunner>(
+    config: &crate::config::model::ResticProfileConfig,
+    config_path: &Path,
+    profiles: &[String],
+    dry_run: bool,
+    runner: &R,
+) -> Result<Vec<String>> {
+    profiles
+        .iter()
+        .filter(|name| {
+            config
+                .profiles
+                .get(*name)
+                .and_then(|profile| profile.copy.as_ref())
+                .is_some()
+        })
+        .map(|name| execute_secondary_copy(config_path, name, dry_run, runner))
+        .collect()
+}
+
 pub fn execute_retention<R: ResticProfileRunner>(
     config_path: &Path,
     profile: &str,
@@ -228,4 +250,3 @@ pub fn execute_run_profile<R: ResticProfileRunner>(
     let engine = PipelineEngine::new(runner);
     engine.execute(config_path, profile, opts)
 }
-
