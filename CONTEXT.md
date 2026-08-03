@@ -78,6 +78,10 @@
 * **설명**: 운영 CLI 경로는 선언하거나 완료로 보고하는 Backup Pipeline, Backend Adapter, Restore Verification, 감사 진단을 실제로 실행해야 한다는 정책.
 * **비고**: `Mock*` 구현과 고정된 더미 결과는 테스트 격리에서만 허용됩니다. 일반 프로덕션 빌드와 public API에는 `Mock*` 구현을 포함하지 않습니다. 운영 경로는 실제 호출 없이 성공·완료·검증됨을 출력해서는 안 됩니다. 활성화된 Secondary Backend Adapter는 `backup run`에서 실제 스냅샷 복사를 마친 뒤에만 완료로 보고합니다. Database Stream은 하나의 `backup run`에서 Backup Profile 반복 전에 정확히 한 번 실제 실행합니다. ISMS 증적과 보고서는 실제 진단·복구 결과만 포함하며, 고정된 성공값 및 더미 스냅샷 메타데이터를 포함하지 않습니다. `backup doctor`는 Restic 실행 가능 여부와 지정된 통합 설정 파일의 실제 경로·권한을 검사한 결과로만 상태를 보고합니다. 필수 설정을 읽지 못하거나 선언한 작업이 실패한 운영 명령은 성공으로 반환하지 않고 오류 종료합니다. Restore Verification은 복원 산출물의 존재·비어 있지 않음을 확인하고, Database Stream에는 덤프 형식 검증과 실제 측정 RTO를 포함합니다. 비대화형 Setup은 명시 입력된 실제 대상·저장소·자격 증명만 저장하며, 예시값·기본 비밀값 또는 기본 구성으로 대체하지 않습니다. Update의 릴리스 조회·다운로드·자가 교체 실패는 오류 종료로 전파합니다.
 
+### 14. System Diagnostic Logging (시스템 진단 로깅)
+* **설명**: `tracing` 및 `tracing-subscriber` Layered 아키텍처 기반으로 터미널 UX 보호, 비밀값 마스킹, 3단계 시스템 폴백(Journald -> Syslog -> Rotating File)을 보장하는 구조화된 진단 및 운영 로그 수집 체계.
+* **비고**: `stdout`은 데이터/리포트 전용으로 격리하고 `stderr`로 터미널 진단 메시지를 출력합니다. 3단계 폴백 파이프라인(1. Journald socket `/run/systemd/journal/socket`, 2. Syslog socket `/dev/log`, 3. 회전 로그 파일 `/var/log/backup/backup.log` 순차 적용)을 통해 어떤 실행 환경에서도 진단 로그를 안전하게 수집하며, 비밀값(`SecretString`, `password`, `access_key`, `secret_key`, `token` 등)은 `***MASKED***`로 자동 은닉합니다. 대화형 설정 위자드(`backup setup`) 실행 시 터미널 `stderr` 출력을 차단하여 TUI UI 깨짐을 방지합니다.
+
 
 ## CLI 서브커맨드 구조 명세 (Command Architecture Spec)
 
