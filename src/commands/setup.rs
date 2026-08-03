@@ -656,6 +656,8 @@ pub fn verify_sftp_connection<R: crate::runner::executor::CommandRunner>(
             "-p",
             &port_str,
             "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
             "BatchMode=yes",
             "-o",
             "ConnectTimeout=5",
