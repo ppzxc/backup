@@ -6,20 +6,23 @@ pub fn execute_schedule_enable<R: BackupScheduler>(
     config_path: &Path,
     runner: &R,
 ) -> Result<String> {
+    crate::config::model::ResticProfileConfig::load_from_path(config_path)?;
     runner.enable(config_path)
 }
 
 pub fn execute_schedule_disable<R: BackupScheduler>(
-    _config_path: &Path,
+    config_path: &Path,
     runner: &R,
 ) -> Result<String> {
+    crate::config::model::ResticProfileConfig::load_from_path(config_path)?;
     runner.disable()
 }
 
 pub fn execute_schedule_status<R: BackupScheduler>(
-    _config_path: &Path,
+    config_path: &Path,
     runner: &R,
 ) -> Result<String> {
+    crate::config::model::ResticProfileConfig::load_from_path(config_path)?;
     match runner.status() {
         Ok(res) => Ok(res),
         Err(err) => Ok(format!(

@@ -5,11 +5,16 @@ mod support;
 use support::MockScheduler;
 use tempfile::tempdir;
 
+fn write_profiles(path: &std::path::Path) {
+    std::fs::write(path, "version: '2'\nprofiles: {}\n").unwrap();
+}
+
 #[test]
 fn test_execute_schedule_commands() {
     let mock = MockScheduler::new(0, "scheduled successfully");
     let temp = tempdir().unwrap();
     let path = temp.path().join("profiles.yml");
+    write_profiles(&path);
 
     let res_enable = execute_schedule_enable(&path, &mock).unwrap();
     assert_eq!(res_enable, "scheduled successfully");
@@ -28,9 +33,11 @@ fn test_execute_schedule_commands() {
 #[test]
 fn schedule_enable_propagates_runner_failure() {
     let temp = tempdir().unwrap();
+    let path = temp.path().join("profiles.yml");
+    write_profiles(&path);
     let runner = MockScheduler::new(1, "systemd unavailable");
 
-    let error = execute_schedule_enable(&temp.path().join("profiles.yml"), &runner).unwrap_err();
+    let error = execute_schedule_enable(&path, &runner).unwrap_err();
 
     assert!(error.to_string().contains("systemd unavailable"));
 }

@@ -238,6 +238,11 @@ fn main() -> anyhow::Result<()> {
             let outcome = (|| -> anyhow::Result<(String, Option<String>, Option<String>)> {
                 let profiles_to_run =
                     backup::commands::run::resolve_profiles(&profiles_path, profile.as_deref())?;
+                let database_profile = profiles_config
+                    .application
+                    .as_ref()
+                    .and_then(|application| application.database.as_ref())
+                    .map(|database| database.profile.as_str());
                 let mut primary_results = Vec::new();
                 if !skip_database
                     && profiles_config
@@ -255,8 +260,12 @@ fn main() -> anyhow::Result<()> {
                         &config, &restic, dry_run,
                     )?);
                 }
+                let ordinary_profiles: Vec<_> = profiles_to_run
+                    .iter()
+                    .filter(|profile| Some(profile.as_str()) != database_profile)
+                    .collect();
                 stage = "primary backup";
-                for target_profile in &profiles_to_run {
+                for target_profile in &ordinary_profiles {
                     primary_results.push(backup::commands::run::execute_run_profile(
                         &profiles_path,
                         target_profile,
@@ -269,7 +278,10 @@ fn main() -> anyhow::Result<()> {
                     let copies = backup::commands::run::execute_secondary_copies(
                         &profiles_config,
                         &profiles_path,
-                        &profiles_to_run,
+                        &ordinary_profiles
+                            .iter()
+                            .map(|profile| (*profile).clone())
+                            .collect::<Vec<_>>(),
                         dry_run,
                         &resticprofile,
                     )?;
@@ -280,7 +292,7 @@ fn main() -> anyhow::Result<()> {
                 let retention_result = if !skip_retention && !dry_run {
                     stage = "retention";
                     let mut results = Vec::new();
-                    for target_profile in &profiles_to_run {
+                    for target_profile in &ordinary_profiles {
                         results.push(backup::commands::run::execute_retention(
                             &profiles_path,
                             target_profile,

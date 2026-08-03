@@ -30,7 +30,7 @@ pub struct ReportsConfig {
 
 /// Backup CLI metadata which is intentionally outside resticprofile's execution schema.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ApplicationConfig {
     #[serde(default)]
     pub reports: ReportsConfig,
@@ -65,9 +65,16 @@ where
             )));
         }
     }
-    serde_yaml::from_value(value)
-        .map(Some)
-        .map_err(serde::de::Error::custom)
+    let application: ApplicationConfig =
+        serde_yaml::from_value(value).map_err(serde::de::Error::custom)?;
+    if let Some(database) = &application.database {
+        if database.connection_url != "${BACKUP_DATABASE_CONNECTION_URL}" {
+            return Err(serde::de::Error::custom(
+                "application.database.connection-url must reference ${BACKUP_DATABASE_CONNECTION_URL}; store the value in the secure sidecar file",
+            ));
+        }
+    }
+    Ok(Some(application))
 }
 
 impl Default for ReportsConfig {

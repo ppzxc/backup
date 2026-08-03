@@ -85,9 +85,14 @@ fn database_dry_run_accepts_unified_database_configuration() {
     fs::write(
         &profiles,
         unified_profiles_yaml(
-            "  database:\n    profile: database\n    type: postgres\n    connection-url: postgres://postgres:secret@db:5432/app",
+            "  database:\n    profile: database\n    type: postgres\n    connection-url: ${BACKUP_DATABASE_CONNECTION_URL}",
             "database",
         ),
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("database-connection-url"),
+        "postgres://postgres:secret@db:5432/app",
     )
     .unwrap();
 
