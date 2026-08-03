@@ -844,7 +844,7 @@ impl SetupEngine {
                     err_msg = err_msg.replace(trimmed, "******");
                 }
             }
-            eprintln!("\n[ERROR] {}", err_msg);
+            tracing::error!("{}", err_msg);
 
             if !non_interactive {
                 let save_anyway = prompter

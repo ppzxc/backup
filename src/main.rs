@@ -233,17 +233,8 @@ fn main() -> anyhow::Result<()> {
             let report_profile = profile.clone().unwrap_or_else(|| config.profile.clone());
             let mut stage = "profile resolution";
             let outcome = (|| -> anyhow::Result<(String, Option<String>, Option<String>)> {
-                let profiles_to_run = if let Some(p) = profile {
-                    vec![p]
-                } else {
-                    let parsed =
-                        backup::config::model::ResticProfileConfig::load_from_path(&profiles_path)?;
-                    let names = parsed.profile_names();
-                    if names.is_empty() {
-                        anyhow::bail!("No Backup Profiles are configured for backup run");
-                    }
-                    names
-                };
+                let profiles_to_run =
+                    backup::commands::run::resolve_profiles(&profiles_path, profile.as_deref())?;
                 let mut primary_results = Vec::new();
                 if !skip_database
                     && matches!(
@@ -252,7 +243,7 @@ fn main() -> anyhow::Result<()> {
                     )
                 {
                     stage = "database";
-                    primary_results.push(backup::commands::database::execute_database_backup(
+                    primary_results.push(backup::commands::run::run_database_stage(
                         &config, &restic, dry_run,
                     )?);
                 }
@@ -334,7 +325,7 @@ fn main() -> anyhow::Result<()> {
                             &error,
                         ),
                     )?;
-                    eprintln!("[Pipeline] Execution report: {}", path.display());
+                    tracing::error!("[Pipeline] Execution report: {}", path.display());
                     return Err(error);
                 }
             }

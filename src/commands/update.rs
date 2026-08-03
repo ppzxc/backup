@@ -145,6 +145,7 @@ pub fn execute_update_check_with_runner<R: CommandRunner>(
     current_version: &str,
     runner: &R,
 ) -> Result<String> {
+    tracing::info!(current_version = %current_version, "Checking for software updates");
     let (latest_tag, download_url) = fetch_latest_release_info_with_runner(runner)?;
     if is_newer_version(current_version, &latest_tag) {
         perform_self_replace_with_runner(&download_url, runner)?;

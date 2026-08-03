@@ -63,6 +63,7 @@ pub fn execute_status_from_profiles_config<R: crate::runner::resticprofile::Rest
                 }
             }
             Err(err) => {
+                tracing::warn!(profile = %profile.name, error = %err, "Failed to fetch snapshots for profile");
                 output_str.push_str(&format!("\n[WARN] Failed to fetch snapshots: {}", err));
             }
         }
@@ -105,6 +106,7 @@ pub fn execute_status_with_runner<E: CommandRunner>(
             }
         }
         Err(err) => {
+            tracing::warn!(error = %err, "Failed to fetch snapshots");
             output_str.push_str(&format!("\n[WARN] Failed to fetch snapshots: {}", err));
         }
     }

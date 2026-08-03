@@ -42,6 +42,7 @@ pub fn perform_uninstall_with_executor_at_path<R: ResticProfileRunner, E: Comman
     yes: bool,
     purge: bool,
 ) -> Result<String> {
+    tracing::info!(purge = %purge, "Executing backup CLI uninstallation");
     use std::io::IsTerminal;
     if !yes {
         let is_cargo_test =

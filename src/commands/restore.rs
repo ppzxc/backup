@@ -99,6 +99,13 @@ pub fn execute_restore_from_storage<R: ResticRunner>(
     force: bool,
     storage: RestoreStorage,
 ) -> Result<String> {
+    tracing::info!(
+        snapshot_id = %snapshot_id,
+        target_path = %target_path,
+        storage = ?storage,
+        force = %force,
+        "Executing snapshot restore command"
+    );
     let target = Path::new(target_path);
     if target.exists() && target.read_dir()?.next().is_some() && !force {
         bail!("Restore target is not empty; pass --force to overwrite");

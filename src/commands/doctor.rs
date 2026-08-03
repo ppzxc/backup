@@ -280,6 +280,7 @@ pub fn run_doctor_checks_with_runner<R: RcloneRunner, C: CommandRunner>(
     runner: &C,
     config_path: Option<&Path>,
 ) -> Result<String> {
+    tracing::info!("Executing system health diagnostics checks");
     let snapshot = SystemHealthDiagnoser::diagnose_with_runner(rclone, runner, config_path);
     let mut report = String::new();
     report.push_str("Checking dependencies...\n");

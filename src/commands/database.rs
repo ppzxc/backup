@@ -19,6 +19,13 @@ pub fn execute_database_backup<R: ResticRunner>(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("Database Backup Adapter requires a connection URL"))?;
     let (program, args, filename, environment) = dump_command(*db_type, url)?;
+    tracing::info!(
+        db_type = ?db_type,
+        program = %program,
+        filename = %filename,
+        dry_run = %dry_run,
+        "Initiating database stream backup"
+    );
     if dry_run {
         return Ok(format!(
             "[Dry-Run] Database Stream: {} -> {}",

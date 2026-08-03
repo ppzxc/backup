@@ -6,6 +6,7 @@ use secrecy::ExposeSecret;
 use serde::Serialize;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::{info, info_span};
 
 #[derive(Debug, Clone, Default)]
 pub struct PipelineOptions {
@@ -163,12 +164,40 @@ impl<'a, R: ResticProfileRunner> PipelineEngine<'a, R> {
     }
 }
 
+pub fn resolve_profiles(config_path: &Path, profile: Option<&str>) -> Result<Vec<String>> {
+    let _span = info_span!("profile resolution").entered();
+    if let Some(p) = profile {
+        info!(profile = %p, "Resolved target profile");
+        Ok(vec![p.to_string()])
+    } else {
+        let parsed = crate::config::model::ResticProfileConfig::load_from_path(config_path)?;
+        let names = parsed.profile_names();
+        if names.is_empty() {
+            anyhow::bail!("No Backup Profiles are configured for backup run");
+        }
+        info!(profiles = ?names, "Resolved configuration profiles");
+        Ok(names)
+    }
+}
+
+pub fn run_database_stage<R: ResticRunner>(
+    config: &BackupConfig,
+    runner: &R,
+    dry_run: bool,
+) -> Result<String> {
+    let _span = info_span!("database").entered();
+    info!("Executing database backup stage");
+    crate::commands::database::execute_database_backup(config, runner, dry_run)
+}
+
 pub fn execute_secondary_copy<R: ResticProfileRunner>(
     config_path: &Path,
     profile: &str,
     dry_run: bool,
     runner: &R,
 ) -> Result<String> {
+    let _span = info_span!("secondary sync", profile = %profile).entered();
+    info!(profile = %profile, "Executing secondary sync stage");
     runner.copy(config_path, profile, dry_run)
 }
 
@@ -177,6 +206,8 @@ pub fn execute_retention<R: ResticProfileRunner>(
     profile: &str,
     runner: &R,
 ) -> Result<String> {
+    let _span = info_span!("retention", profile = %profile).entered();
+    info!(profile = %profile, "Executing retention prune stage");
     runner.prune(config_path, profile)
 }
 
@@ -192,6 +223,9 @@ pub fn execute_run_profile<R: ResticProfileRunner>(
     opts: &PipelineOptions,
     runner: &R,
 ) -> Result<String> {
+    let _span = info_span!("primary backup", profile = %profile).entered();
+    info!(profile = %profile, "Executing primary backup stage");
     let engine = PipelineEngine::new(runner);
     engine.execute(config_path, profile, opts)
 }
+

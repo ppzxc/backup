@@ -8,6 +8,7 @@ pub fn execute_copy<R: ResticProfileRunner>(
     profile: &str,
     dry_run: bool,
 ) -> Result<String> {
+    tracing::info!(profile = %profile, dry_run = %dry_run, "Executing snapshot copy command");
     let out = runner.copy(config_path, profile, dry_run)?;
     Ok(format!(
         "Snapshot copy completed for profile [{}]:\n{}",
