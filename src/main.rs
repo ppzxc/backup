@@ -9,6 +9,19 @@ struct Cli {
     /// Unified resticprofile v2 and application configuration file path.
     #[arg(long, global = true, value_name = "PATH")]
     profiles: Option<PathBuf>,
+
+    /// Verbosity level (-v for debug, -vv for trace)
+    #[arg(long, short = 'v', global = true, action = clap::ArgAction::Count)]
+    verbose: u8,
+
+    /// Quiet mode (only warn/error logs)
+    #[arg(long, short = 'q', global = true)]
+    quiet: bool,
+
+    /// Log file path
+    #[arg(long, global = true, value_name = "PATH")]
+    log_file: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -128,6 +141,14 @@ fn main() -> anyhow::Result<()> {
     let localized_cmd = backup::i18n::CliHelp::get(lang).apply_to_command(base_cmd);
     let matches = localized_cmd.get_matches();
     let cli = Cli::from_arg_matches(&matches).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    let env_override = std::env::var("BACKUP_LOG")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .ok();
+    let level_filter = backup::logger::determine_level_filter(cli.verbose, cli.quiet, env_override.as_deref());
+    let log_config = backup::logger::LogConfig::new(level_filter, cli.log_file.clone());
+    let _ = backup::logger::init_logging(log_config);
+
     let profiles_path = cli
         .profiles
         .unwrap_or_else(|| PathBuf::from(backup::config::model::DEFAULT_PROFILES_PATH));

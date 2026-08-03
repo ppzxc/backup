@@ -766,6 +766,20 @@ impl SetupEngine {
             std::fs::set_permissions(config_dir, std::fs::Permissions::from_mode(0o700))?;
         }
 
+        struct TuiGuard;
+        impl Drop for TuiGuard {
+            fn drop(&mut self) {
+                crate::logger::set_tui_mode(false);
+            }
+        }
+
+        let _tui_guard = if !non_interactive {
+            crate::logger::set_tui_mode(true);
+            Some(TuiGuard)
+        } else {
+            None
+        };
+
         let config = if !non_interactive {
             let params = prompter.prompt_setup_params(lang_opt, config_dir, profiles_path)?;
             Self::validate_and_build(params)?

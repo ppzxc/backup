@@ -13,9 +13,24 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use tracing_subscriber::filter::filter_fn;
+use tracing_subscriber::Layer;
+
 pub const MASKED_VALUE: &str = "***MASKED***";
 
 static WORKER_GUARD: Mutex<Option<WorkerGuard>> = Mutex::new(None);
+static TUI_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Sets interactive TUI mode state for stderr console log suppression.
+pub fn set_tui_mode(enabled: bool) {
+    TUI_MODE.store(enabled, Ordering::SeqCst);
+}
+
+/// Returns true if interactive TUI mode is currently active.
+pub fn is_tui_mode() -> bool {
+    TUI_MODE.load(Ordering::SeqCst)
+}
 
 /// Represents the active system log target in the 3-tier fallback pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,7 +234,14 @@ pub fn init_logging(config: LogConfig) -> Result<(), anyhow::Error> {
 
     let stderr_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
-        .fmt_fields(SecretMaskingFormatter::new());
+        .fmt_fields(SecretMaskingFormatter::new())
+        .with_filter(filter_fn(|meta| {
+            if is_tui_mode() {
+                *meta.level() <= tracing::Level::WARN
+            } else {
+                true
+            }
+        }));
 
     let sys_layer = tracing_subscriber::fmt::layer()
         .with_writer(sys_writer)
@@ -378,6 +400,24 @@ mod tests {
             visitor.write_field("password", "secret123");
         }
         assert_eq!(buf, "user=alice password=***MASKED***");
+    }
+
+    #[test]
+    fn test_log_level_filter_resolution() {
+        assert_eq!(determine_level_filter(0, false, None), "info");
+        assert_eq!(determine_level_filter(1, false, None), "debug");
+        assert_eq!(determine_level_filter(2, false, None), "trace");
+        assert_eq!(determine_level_filter(0, true, None), "warn");
+        assert_eq!(determine_level_filter(0, false, Some("debug")), "debug");
+    }
+
+    #[test]
+    fn test_tui_mode_toggle() {
+        assert!(!is_tui_mode());
+        set_tui_mode(true);
+        assert!(is_tui_mode());
+        set_tui_mode(false);
+        assert!(!is_tui_mode());
     }
 }
 

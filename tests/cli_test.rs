@@ -137,3 +137,18 @@ fn test_subcommands_not_placeholder() {
         );
     }
 }
+
+#[test]
+fn test_cli_logging_flags() {
+    let mut cmd = Command::cargo_bin("backup").unwrap();
+    let temp_log = tempfile::NamedTempFile::new().unwrap();
+    let log_path = temp_log.path().to_str().unwrap();
+
+    let assert = cmd
+        .args(["-v", "-q", "--log-file", log_path, "version"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
+}
