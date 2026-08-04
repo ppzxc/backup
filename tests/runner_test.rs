@@ -270,7 +270,7 @@ fn resticprofile_profile_commands_share_validated_sidecar_environment() {
     let config_path = directory.path().join("profiles.yaml");
     std::fs::write(
         &config_path,
-        "version: '2'\nprofiles:\n  primary:\n    repository: s3:s3.example/bucket\n    env:\n      AWS_ACCESS_KEY_ID: '{{ .Env.BACKUP_PRIMARY_AWS_ACCESS_KEY_ID }}'\n      AWS_SECRET_ACCESS_KEY: '{{ .Env.BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY }}'\n  archive:\n    inherit: primary\n    backup:\n      source: ['/data']\n  secondary:\n    repository: s3:s3.example/secondary\n    env:\n      AWS_ACCESS_KEY_ID: '{{ .Env.BACKUP_SECONDARY_AWS_ACCESS_KEY_ID }}'\n      AWS_SECRET_ACCESS_KEY: '{{ .Env.BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY }}'\n",
+        "version: '2'\nprofiles:\n  primary:\n    repository: s3:s3.example/bucket\n    env:\n      AWS_ACCESS_KEY_ID: '{{ .Env.BACKUP_PRIMARY_AWS_ACCESS_KEY_ID }}'\n      AWS_SECRET_ACCESS_KEY: '{{ .Env.BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY }}'\n  archive:\n    inherit: primary\n    backup:\n      source: ['/data']\n    copy:\n      profile: secondary\n      repository: s3:s3.example/secondary\n  secondary:\n    repository: s3:s3.example/secondary\n    env:\n      AWS_ACCESS_KEY_ID: '{{ .Env.BACKUP_SECONDARY_AWS_ACCESS_KEY_ID }}'\n      AWS_SECRET_ACCESS_KEY: '{{ .Env.BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY }}'\n",
     )
     .unwrap();
     for (name, value) in [
@@ -288,9 +288,10 @@ fn resticprofile_profile_commands_share_validated_sidecar_environment() {
     let tool = ResticProfileTool::new(&mock);
     tool.backup(&config_path, "archive", false).unwrap();
     tool.init(&config_path, "archive").unwrap();
+    tool.copy(&config_path, "archive", false).unwrap();
 
     let environments = mock.get_environment_calls();
-    assert_eq!(environments.len(), 2);
+    assert_eq!(environments.len(), 3);
     assert_eq!(environments[0], environments[1]);
     assert_eq!(
         environments[0],
@@ -313,6 +314,8 @@ fn resticprofile_profile_commands_share_validated_sidecar_environment() {
             ),
         ]
     );
+    assert!(environments[2].contains(&("AWS_ACCESS_KEY_ID".into(), "secondary-access".into())));
+    assert!(environments[2].contains(&("AWS_SECRET_ACCESS_KEY".into(), "secondary-secret".into())));
 }
 
 #[test]

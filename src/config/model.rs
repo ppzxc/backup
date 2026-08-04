@@ -886,28 +886,28 @@ impl ResticProfileConfig {
             (
                 "primary",
                 "BACKUP_PRIMARY_AWS_ACCESS_KEY_ID",
-                "primary-aws-access-key-id",
                 "BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY",
-                "primary-aws-secret-access-key",
             ),
             (
                 "secondary",
                 "BACKUP_SECONDARY_AWS_ACCESS_KEY_ID",
-                "secondary-aws-access-key-id",
                 "BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY",
-                "secondary-aws-secret-access-key",
             ),
         ];
         let mut environment = Vec::new();
-        for (backend, access_var, access_file, secret_var, secret_file) in definitions {
+        for (backend, access_var, secret_var) in definitions {
             let Some(profile) = self.profiles.get(backend) else {
                 continue;
             };
             let uses_s3_environment = profile.env.as_ref().is_some_and(|environment| {
-                environment
-                    .values()
-                    .any(|value| value.contains(access_var) || value.contains(secret_var))
+                aws_sidecar_references(environment)
+                    .is_some_and(|(access, secret)| access == access_var && secret == secret_var)
+                    || environment
+                        .values()
+                        .any(|value| value.contains(access_var) || value.contains(secret_var))
             });
+            let access_file = sidecar_file_name(access_var).expect("canonical S3 access variable");
+            let secret_file = sidecar_file_name(secret_var).expect("canonical S3 secret variable");
             let access_path = config_dir.join(access_file);
             let secret_path = config_dir.join(secret_file);
             if uses_s3_environment {
@@ -922,6 +922,60 @@ impl ResticProfileConfig {
             }
         }
         Ok(environment)
+    }
+
+    /// Resolves the S3 credentials needed by a profile's copy target. The
+    /// target profile may inherit its S3 environment from another profile;
+    /// callers receive only child-process environment values, never config
+    /// fields or process-global state.
+    pub fn copy_sidecar_environment(
+        &self,
+        config_dir: &Path,
+        profile: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let Some(copy) = self
+            .profiles
+            .get(profile)
+            .and_then(|profile| profile.copy.as_ref())
+        else {
+            return Ok(Vec::new());
+        };
+        let target_name = copy.profile.as_deref().unwrap_or("secondary");
+        let Some((access_var, secret_var)) = self.s3_sidecar_references(target_name) else {
+            return Ok(Vec::new());
+        };
+        let Some(access_file) = sidecar_file_name(&access_var) else {
+            return Ok(Vec::new());
+        };
+        let Some(secret_file) = sidecar_file_name(&secret_var) else {
+            return Ok(Vec::new());
+        };
+        Ok(vec![
+            (
+                "AWS_ACCESS_KEY_ID".into(),
+                read_secure_sidecar(&config_dir.join(access_file))?,
+            ),
+            (
+                "AWS_SECRET_ACCESS_KEY".into(),
+                read_secure_sidecar(&config_dir.join(secret_file))?,
+            ),
+        ])
+    }
+
+    fn s3_sidecar_references(&self, profile: &str) -> Option<(String, String)> {
+        let mut current = profile;
+        let mut remaining = self.profiles.len() + 1;
+        while remaining > 0 {
+            remaining -= 1;
+            let section = self.profiles.get(current)?;
+            if let Some(environment) = &section.env {
+                if let Some(references) = aws_sidecar_references(environment) {
+                    return Some(references);
+                }
+            }
+            current = section.inherit.as_deref()?;
+        }
+        None
     }
 
     pub fn application_config(&self) -> ApplicationConfig {
@@ -984,6 +1038,33 @@ fn read_secure_sidecar(path: &Path) -> Result<String> {
         }
     }
     Ok(fs::read_to_string(path)?)
+}
+
+fn aws_sidecar_references(
+    environment: &std::collections::BTreeMap<String, String>,
+) -> Option<(String, String)> {
+    Some((
+        environment
+            .get("AWS_ACCESS_KEY_ID")
+            .and_then(|value| env_reference(value))?,
+        environment
+            .get("AWS_SECRET_ACCESS_KEY")
+            .and_then(|value| env_reference(value))?,
+    ))
+}
+
+fn sidecar_file_name(variable: &str) -> Option<String> {
+    variable
+        .strip_prefix("BACKUP_")
+        .map(|name| name.to_ascii_lowercase().replace('_', "-"))
+}
+
+fn env_reference(value: &str) -> Option<String> {
+    let reference = value.split_once(".Env.")?.1;
+    let end = reference
+        .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .unwrap_or(reference.len());
+    (!reference[..end].is_empty()).then(|| reference[..end].to_owned())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

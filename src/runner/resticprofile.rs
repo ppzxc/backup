@@ -47,7 +47,10 @@ impl<'a, E: CommandRunner> ResticProfileTool<'a, E> {
         profile: &str,
         args: &[&str],
     ) -> Result<CommandOutput> {
-        let owned_env = profile_sidecar_environment(config_path, profile)?;
+        let mut owned_env = profile_sidecar_environment(config_path, profile)?;
+        if args.last() == Some(&"copy") {
+            append_copy_s3_environment(config_path, profile, &mut owned_env)?;
+        }
         let env: Vec<_> = owned_env
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
@@ -84,6 +87,17 @@ fn profile_sidecar_environment(
     let config = crate::config::model::ResticProfileConfig::load_from_path(config_path)?;
     let config_dir = config_path.parent().unwrap_or(Path::new("."));
     config.sidecar_environment(config_dir)
+}
+
+fn append_copy_s3_environment(
+    config_path: &Path,
+    profile: &str,
+    environment: &mut Vec<(String, String)>,
+) -> Result<()> {
+    let config = crate::config::model::ResticProfileConfig::load_from_path(config_path)?;
+    let config_dir = config_path.parent().unwrap_or(Path::new("."));
+    environment.extend(config.copy_sidecar_environment(config_dir, profile)?);
+    Ok(())
 }
 
 impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {

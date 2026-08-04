@@ -1,11 +1,12 @@
 use crate::runner::executor::{CommandOutput, CommandRunner};
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use std::io::Write;
 use std::path::Path;
 use tempfile::NamedTempFile;
 
 const UNIT_NAME: &str = "backup-pipeline";
 const CRON_MARKER: &str = "# backup-pipeline";
+const CRON_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const DEFAULT_CALENDAR: &str = "*-*-* 03:00:00";
 
 pub trait BackupScheduler {
@@ -101,13 +102,7 @@ impl<'a, E: CommandRunner> BackupScheduler for SystemScheduler<'a, E> {
             .filter(|line| !line.contains(CRON_MARKER))
             .collect::<Vec<_>>()
             .join("\n");
-        let line = format!(
-            "{} {} --profiles {} run {}",
-            cron_schedule(),
-            shell_quote(&self.binary),
-            shell_quote(&profiles),
-            CRON_MARKER
-        );
+        let line = cron_entry(&self.binary, &profiles, &cron_schedule());
         self.install_cron(format!("{}\n{}\n", filtered.trim(), line))?;
         Ok("Scheduled daily backup run with cron".into())
     }
@@ -166,6 +161,14 @@ fn cron_schedule() -> String {
     }
 }
 
+fn cron_entry(binary: &str, profiles: &str, schedule: &str) -> String {
+    format!(
+        "{schedule} PATH={CRON_PATH} {} --profiles {} run {CRON_MARKER}",
+        shell_quote(binary),
+        shell_quote(profiles),
+    )
+}
+
 fn error_message(output: &CommandOutput) -> String {
     if output.stderr.trim().is_empty() {
         output.stdout.trim().into()
@@ -176,4 +179,21 @@ fn error_message(output: &CommandOutput) -> String {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cron_entry;
+
+    #[test]
+    fn cron_entry_exposes_installed_tool_path() {
+        let entry = cron_entry(
+            "/usr/local/bin/backup",
+            "/etc/backup/profiles.yaml",
+            "* * * * *",
+        );
+
+        assert!(entry.contains("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"));
+        assert!(entry.contains("/usr/local/bin/backup"));
+    }
 }

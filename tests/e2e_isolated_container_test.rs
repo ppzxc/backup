@@ -71,11 +71,16 @@ impl E2eResources {
             &self.postgres16,
         ]
     }
+
+    fn container_names_arg(&self) -> String {
+        self.container_names().join(" ")
+    }
 }
 
 const DEFAULT_DOCKER_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const DOCKER_BUILD_TIMEOUT: Duration = Duration::from_secs(600);
 const DOCKER_EXEC_TIMEOUT: Duration = Duration::from_secs(180);
+const CLEANUP_ATTEMPTS: usize = 30;
 
 fn docker_timeout(args: &[&str]) -> Duration {
     match args.first() {
@@ -147,8 +152,15 @@ fn docker_ok(args: &[&str]) -> String {
 fn cleanup_resources(resources: &E2eResources) {
     let mut remove_containers = vec!["rm", "-f"];
     remove_containers.extend(resources.container_names());
-    let _ = docker(&remove_containers);
-    let _ = docker(&["network", "rm", &resources.network]);
+    for _ in 0..CLEANUP_ATTEMPTS {
+        let _ = docker(&remove_containers);
+        let network = docker(&["network", "inspect", &resources.network]);
+        if !network.status.success() {
+            return;
+        }
+        let _ = docker(&["network", "rm", &resources.network]);
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn process_start_time(pid: u32) -> Result<String, String> {
@@ -160,30 +172,36 @@ fn process_start_time(pid: u32) -> Result<String, String> {
         .ok_or_else(|| "parse owner process start time".to_owned())
 }
 
-fn spawn_cleanup_watchdog(resources: &E2eResources) {
-    let owner_pid = std::process::id();
-    let owner_start = process_start_time(owner_pid)
-        .unwrap_or_else(|error| panic!("Docker E2E cleanup watchdog requires /proc: {error}"));
-    let script = r#"
+fn cleanup_watchdog_script() -> String {
+    r#"
 owner_is_alive() {
   [ -r "/proc/$BACKUP_E2E_OWNER_PID/stat" ] || return 1
   owner_start=$(sed -E 's/^.*\) //' "/proc/$BACKUP_E2E_OWNER_PID/stat" | awk '{print $20}')
   [ "$owner_start" = "$BACKUP_E2E_OWNER_START" ]
 }
 while owner_is_alive; do sleep 1; done
-docker rm -f "$BACKUP_E2E_RUNNER" "$BACKUP_E2E_MINIO" "$BACKUP_E2E_SFTP" "$BACKUP_E2E_MARIADB12" "$BACKUP_E2E_MARIADB55" "$BACKUP_E2E_POSTGRES16" >/dev/null 2>&1 || true
-docker network rm "$BACKUP_E2E_NETWORK" >/dev/null 2>&1 || true
-"#;
+docker rm -f $BACKUP_E2E_CONTAINERS >/dev/null 2>&1 || true
+for _ in $(seq 1 __CLEANUP_ATTEMPTS__); do
+  if ! docker network inspect "$BACKUP_E2E_NETWORK" >/dev/null 2>&1; then
+    exit 0
+  fi
+  docker network rm "$BACKUP_E2E_NETWORK" >/dev/null 2>&1 || true
+  sleep 1
+done
+"#
+    .replace("__CLEANUP_ATTEMPTS__", &CLEANUP_ATTEMPTS.to_string())
+}
+
+fn spawn_cleanup_watchdog(resources: &E2eResources) {
+    let owner_pid = std::process::id();
+    let owner_start = process_start_time(owner_pid)
+        .unwrap_or_else(|error| panic!("Docker E2E cleanup watchdog requires /proc: {error}"));
+    let script = cleanup_watchdog_script();
     Command::new("setsid")
-        .args(["sh", "-ceu", script])
+        .args(["sh", "-ceu", &script])
         .env("BACKUP_E2E_OWNER_PID", owner_pid.to_string())
         .env("BACKUP_E2E_OWNER_START", owner_start)
-        .env("BACKUP_E2E_RUNNER", &resources.runner)
-        .env("BACKUP_E2E_MINIO", &resources.minio)
-        .env("BACKUP_E2E_SFTP", &resources.sftp)
-        .env("BACKUP_E2E_MARIADB12", &resources.mariadb12)
-        .env("BACKUP_E2E_MARIADB55", &resources.mariadb55)
-        .env("BACKUP_E2E_POSTGRES16", &resources.postgres16)
+        .env("BACKUP_E2E_CONTAINERS", resources.container_names_arg())
         .env("BACKUP_E2E_NETWORK", &resources.network)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -219,9 +237,9 @@ backup() {{
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
         Err(redact_diagnostics(format!(
-            "docker exec failed. stdout: {} stderr: {}",
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim(),
+            "docker exec failed. stdout (last 80 lines): {} stderr (last 80 lines): {}",
+            tail_lines(&String::from_utf8_lossy(&output.stdout), 80),
+            tail_lines(&String::from_utf8_lossy(&output.stderr), 80),
         )))
     }
 }
@@ -247,6 +265,18 @@ fn redact_diagnostics(value: String) -> String {
     .fold(value, |redacted, secret| {
         redacted.replace(secret, "***MASKED***")
     })
+}
+
+fn tail_lines(value: &str, limit: usize) -> String {
+    value
+        .lines()
+        .rev()
+        .take(limit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn docker_diagnostics(containers: &[&str]) -> String {
@@ -310,6 +340,33 @@ where
         started.elapsed(),
         diagnostics(),
     ))
+}
+
+#[test]
+fn wizard_storage_script_verifies_scheduled_execution() {
+    let script = wizard_storage_script("s3-primary", "'s3-primary'", false);
+
+    assert!(script.contains("BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00'"));
+    assert!(script.contains("systemctl set-environment HOME=/root"));
+    assert!(script
+        .contains("find /work/reports/s3-primary -maxdepth 1 -name 'execution-*.json' -delete"));
+    assert!(script.contains("scheduled timer active"));
+    assert!(script.contains("scheduled timer fired"));
+    assert!(script.contains("LastTriggerUSec"));
+    assert!(script.contains("NextElapseUSecRealtime"));
+    assert!(script.contains("for _ in {1..150}; do"));
+    assert!(!script.contains("systemctl start backup-pipeline.service"));
+    assert!(script.contains("backup --profiles /work/s3-primary/profiles.yaml schedule disable"));
+}
+
+#[test]
+fn cleanup_watchdog_script_uses_shared_container_list_and_retries_network_cleanup() {
+    let script = cleanup_watchdog_script();
+
+    assert!(script.contains("docker rm -f $BACKUP_E2E_CONTAINERS"));
+    assert!(script.contains("docker network inspect \"$BACKUP_E2E_NETWORK\""));
+    assert!(script.contains(&format!("for _ in $(seq 1 {CLEANUP_ATTEMPTS}); do")));
+    assert!(!script.contains("$BACKUP_E2E_RUNNER"));
 }
 
 #[test]
@@ -402,6 +459,101 @@ fn cleanup_watchdog_removes_resources_after_owner_is_killed() {
     .expect("watchdog must clean resources after abrupt owner termination");
 }
 
+fn wizard_storage_script(name: &str, answers: &str, has_secondary: bool) -> String {
+    let report_poll =
+        execution_report_poll_script(&format!("/work/reports/{name}"), "scheduled_report", true);
+    let secondary_restore = if has_secondary {
+        format!(
+            "backup --profiles /work/{name}/profiles.yaml restore --storage secondary --target /work/{name}-secondary\nassert_tree /work/source /work/{name}-secondary/work/source"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"mkdir -p /work/{name}
+cp /work/e2e-key/id_ed25519 /work/{name}/id_ed25519
+cp /work/e2e-key/id_ed25519 /work/{name}/id_ed25519_secondary
+chmod 600 /work/{name}/id_ed25519*
+systemctl set-environment HOME=/root
+printf '%s\n' {answers} | BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' TERM=dumb script -qec '/usr/local/bin/backup --profiles /work/{name}/profiles.yaml setup --lang en' /dev/null
+tree_digest() {{ (cd "$1" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sort); }}
+tree_modes() {{ (cd "$1" && find . -type f -printf '%m %p\n' | sort); }}
+assert_tree() {{ [ "$(tree_digest "$1")" = "$(tree_digest "$2")" ] && [ "$(tree_modes "$1")" = "$(tree_modes "$2")" ]; }}
+if ! systemctl is-active --quiet backup-pipeline.timer; then
+  systemctl status backup-pipeline.timer --no-pager || true
+  journalctl -u backup-pipeline.timer --no-pager -n 80 || true
+  exit 1
+fi
+echo 'scheduled timer active'
+# Verify the timer that Setup Wizard just enabled before manual backup coverage.
+find /work/reports/{name} -maxdepth 1 -name 'execution-*.json' -delete
+{report_poll}
+if [ -z "$scheduled_report" ]; then
+  systemctl status backup-pipeline.service --no-pager || true
+  journalctl -u backup-pipeline.service --no-pager -n 80 || true
+  exit 1
+fi
+last_trigger=$(systemctl show backup-pipeline.timer --property=LastTriggerUSec --value || true)
+if [ -z "$last_trigger" ] || [ "$last_trigger" = "n/a" ]; then
+  systemctl status backup-pipeline.timer --no-pager || true
+  journalctl -u backup-pipeline.timer --no-pager -n 80 || true
+  exit 1
+fi
+echo 'scheduled timer fired'
+if ! grep -Eq '"succeeded": true' "$scheduled_report" || ! grep -Eq '"snapshot_id": "[^"]+"' "$scheduled_report"; then
+  cat "$scheduled_report"
+  systemctl status backup-pipeline.service --no-pager || true
+  journalctl -u backup-pipeline.service --no-pager -n 80 || true
+  exit 1
+fi
+backup --profiles /work/{name}/profiles.yaml run --skip-database
+backup --profiles /work/{name}/profiles.yaml restore --target /work/{name}-primary
+assert_tree /work/source /work/{name}-primary/work/source
+{secondary_restore}
+report=$(find /work/reports/{name} -name 'execution-*.json' -print -quit); test -n "$report" && grep -Eq '"snapshot_id": "[^"]+"' "$report"
+backup --profiles /work/{name}/profiles.yaml schedule disable
+if systemctl is-active --quiet backup-pipeline.timer; then
+  systemctl status backup-pipeline.timer --no-pager || true
+  exit 1
+fi
+next_trigger=$(systemctl show backup-pipeline.timer --property=NextElapseUSecRealtime --value || true)
+if [ -n "$next_trigger" ] && [ "$next_trigger" != "n/a" ]; then
+  systemctl status backup-pipeline.timer --no-pager || true
+  exit 1
+fi"#,
+    )
+}
+
+fn execution_report_poll_script(
+    directory: &str,
+    variable: &str,
+    stop_on_service_failure: bool,
+) -> String {
+    let failure_probe = if stop_on_service_failure {
+        format!(
+            r#"  if systemctl is-failed --quiet backup-pipeline.service; then
+    for _ in {{1..10}}; do
+      {variable}=$(find {directory} -name 'execution-*.json' -print -quit)
+      [ -n "${variable}" ] && break
+      sleep 1
+    done
+    break
+  fi
+"#
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"for _ in {{1..150}}; do
+  {variable}=$(find {directory} -name 'execution-*.json' -print -quit)
+  [ -n "${variable}" ] && break
+{failure_probe}  sleep 1
+done
+{variable}=$(find {directory} -name 'execution-*.json' -print -quit)"#
+    )
+}
+
 fn wizard_storage_case(
     resources: &E2eResources,
     name: &str,
@@ -413,18 +565,9 @@ fn wizard_storage_case(
         .map(|answer| shell_quote(answer))
         .collect::<Vec<_>>()
         .join(" ");
-    let secondary_restore = if has_secondary {
-        format!(
-            "backup --profiles /work/{name}/profiles.yaml restore --storage secondary --target /work/{name}-secondary\nassert_tree /work/source /work/{name}-secondary/work/source"
-        )
-    } else {
-        String::new()
-    };
     runner(
         resources,
-        &format!(
-            "mkdir -p /work/{name}; cp /work/e2e-key/id_ed25519 /work/{name}/id_ed25519; cp /work/e2e-key/id_ed25519 /work/{name}/id_ed25519_secondary; chmod 600 /work/{name}/id_ed25519*\nprintf '%s\\n' {answers} | BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* 03:00:00' TERM=dumb script -qec '/usr/local/bin/backup --profiles /work/{name}/profiles.yaml setup --lang en' /dev/null\ntree_digest() {{ (cd \"$1\" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sort); }}\ntree_modes() {{ (cd \"$1\" && find . -type f -printf '%m %p\\n' | sort); }}\nassert_tree() {{ [ \"$(tree_digest \"$1\")\" = \"$(tree_digest \"$2\")\" ] && [ \"$(tree_modes \"$1\")\" = \"$(tree_modes \"$2\")\" ]; }}\nbackup --profiles /work/{name}/profiles.yaml run --skip-database\nbackup --profiles /work/{name}/profiles.yaml restore --target /work/{name}-primary\nassert_tree /work/source /work/{name}-primary/work/source\n{secondary_restore}\nreport=$(find /work/reports/{name} -name 'execution-*.json' -print -quit); test -n \"$report\" && grep -Eq '\"snapshot_id\": \"[^\"]+\"' \"$report\"\nsystemctl is-active --quiet backup-pipeline.timer\nbackup --profiles /work/{name}/profiles.yaml schedule disable"
-        ),
+        &wizard_storage_script(name, &answers, has_secondary),
     );
 }
 
@@ -857,13 +1000,43 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
         ],
         true,
     );
+    let systemd_report_poll =
+        execution_report_poll_script("/work/reports/s3-to-sftp", "scheduled_report", true);
     runner(
         &resources,
-        "find /work/reports/s3-to-sftp -maxdepth 1 -name 'execution-*.json' -delete\nBACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' backup --profiles /work/s3-to-sftp/profiles.yaml schedule enable\nfor _ in {1..75}; do find /work/reports/s3-to-sftp -name 'execution-*.json' -print -quit | grep -q . && break; sleep 1; done\nfind /work/reports/s3-to-sftp -name 'execution-*.json' -print -quit | grep -q .",
+        &format!(
+            r#"find /work/reports/s3-to-sftp -maxdepth 1 -name 'execution-*.json' -delete
+BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' backup --profiles /work/s3-to-sftp/profiles.yaml schedule enable
+{systemd_report_poll}
+if [ -z "$scheduled_report" ] || ! grep -Eq '"succeeded": true' "$scheduled_report" || ! grep -Eq '"snapshot_id": "[^"]+"' "$scheduled_report"; then
+  cat "$scheduled_report" 2>/dev/null || true
+  systemctl show backup-pipeline.timer --no-pager -p ActiveState -p SubState -p OnCalendar -p NextElapseUSecRealtime -p LastTriggerUSec || true
+  systemctl status backup-pipeline.service --no-pager || true
+  journalctl -u backup-pipeline.service --no-pager -n 80 || true
+  exit 1
+fi"#
+        ),
     );
+    let cron_report_poll =
+        execution_report_poll_script("/work/reports/s3-to-sftp", "cron_report", false);
     runner(
         &resources,
-        "backup --profiles /work/s3-to-sftp/profiles.yaml schedule disable\nfind /work/reports/s3-to-sftp -maxdepth 1 -name 'execution-*.json' -delete\nsystemctl start cron\nBACKUP_TEST_FORCE_CRON=1 BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' backup --profiles /work/s3-to-sftp/profiles.yaml schedule enable\nfor _ in {1..75}; do find /work/reports/s3-to-sftp -name 'execution-*.json' -print -quit | grep -q . && break; sleep 1; done\nfind /work/reports/s3-to-sftp -name 'execution-*.json' -print -quit | grep -q .",
+        &format!(
+            r#"backup --profiles /work/s3-to-sftp/profiles.yaml schedule disable
+if systemctl is-active --quiet backup-pipeline.timer; then systemctl status backup-pipeline.timer --no-pager || true; exit 1; fi
+next_trigger=$(systemctl show backup-pipeline.timer --property=NextElapseUSecRealtime --value || true)
+if [ -n "$next_trigger" ] && [ "$next_trigger" != "n/a" ]; then systemctl status backup-pipeline.timer --no-pager || true; exit 1; fi
+find /work/reports/s3-to-sftp -maxdepth 1 -name 'execution-*.json' -delete
+systemctl start cron
+BACKUP_TEST_FORCE_CRON=1 BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' backup --profiles /work/s3-to-sftp/profiles.yaml schedule enable
+{cron_report_poll}
+if [ -z "$cron_report" ] || ! grep -Eq '"succeeded": true' "$cron_report" || ! grep -Eq '"snapshot_id": "[^"]+"' "$cron_report"; then
+  cat "$cron_report" 2>/dev/null || true
+  systemctl status cron --no-pager || true
+  journalctl -u cron --no-pager -n 80 || true
+  exit 1
+fi"#
+        ),
     );
     for (host, port, database, kind, seed, query) in [
         (
