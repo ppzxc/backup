@@ -18,11 +18,7 @@ pub fn execute_schedule_disable<R: BackupScheduler>(
     runner.disable()
 }
 
-pub fn execute_schedule_status<R: BackupScheduler>(
-    config_path: &Path,
-    runner: &R,
-) -> Result<String> {
-    crate::config::model::ResticProfileConfig::load_from_path(config_path)?;
+pub fn execute_schedule_status<R: BackupScheduler>(runner: &R) -> Result<String> {
     match runner.status() {
         Ok(res) => Ok(res),
         Err(err) => Ok(format!(

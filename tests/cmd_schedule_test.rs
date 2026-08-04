@@ -22,7 +22,7 @@ fn test_execute_schedule_commands() {
     let res_disable = execute_schedule_disable(&path, &mock).unwrap();
     assert_eq!(res_disable, "scheduled successfully");
 
-    let res_status = execute_schedule_status(&path, &mock).unwrap();
+    let res_status = execute_schedule_status(&mock).unwrap();
     assert_eq!(res_status, "scheduled successfully");
     assert_eq!(
         mock.calls.lock().unwrap().as_slice(),
@@ -40,4 +40,17 @@ fn schedule_enable_propagates_runner_failure() {
     let error = execute_schedule_enable(&path, &runner).unwrap_err();
 
     assert!(error.to_string().contains("systemd unavailable"));
+}
+
+#[test]
+fn schedule_status_reports_unavailable_without_unified_backup_configuration() {
+    let runner = MockScheduler::new(1, "systemd unavailable");
+
+    let status = execute_schedule_status(&runner).unwrap();
+
+    assert_eq!(
+        status,
+        "Schedule status: Inactive or scheduler unavailable (mock scheduler failed: systemd unavailable)"
+    );
+    assert_eq!(runner.calls.lock().unwrap().as_slice(), ["status"]);
 }

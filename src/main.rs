@@ -389,10 +389,7 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", out);
             }
             ScheduleAction::Status => {
-                let out = backup::commands::schedule::execute_schedule_status(
-                    &profiles_path,
-                    &scheduler,
-                )?;
+                let out = backup::commands::schedule::execute_schedule_status(&scheduler)?;
                 println!("{}", out);
             }
         },
