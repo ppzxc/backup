@@ -32,6 +32,15 @@ pub fn is_tui_mode() -> bool {
     TUI_MODE.load(Ordering::SeqCst)
 }
 
+/// Emits a user-facing setup notice while preserving the TUI console filter.
+pub fn interactive_notice(message: impl AsRef<str>) {
+    if is_tui_mode() {
+        tracing::warn!("{}", message.as_ref());
+    } else {
+        tracing::info!("{}", message.as_ref());
+    }
+}
+
 /// Represents the active system log target in the 3-tier fallback pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SystemLogTarget {

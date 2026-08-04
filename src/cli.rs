@@ -217,7 +217,10 @@ pub struct CliRuntimeContext {
     pub language: Language,
     pub logging: RuntimeLogging,
     pub scheduler_mode: SchedulerMode,
+    pub scheduler_calendar: String,
+    pub scheduler_force_cron: bool,
     pub adapter_selection: AdapterSelection,
+    pub home_dir: PathBuf,
     pub host_name: String,
 }
 
@@ -258,14 +261,37 @@ impl CliRuntimeContext {
                 log_file: cli.log_file.clone(),
             },
             scheduler_mode,
+            scheduler_calendar: crate::runner::scheduler::DEFAULT_SCHEDULE_CALENDAR.into(),
+            scheduler_force_cron: false,
             adapter_selection,
+            home_dir: PathBuf::from("/tmp"),
             host_name: "localhost".into(),
         })
     }
 
-    pub fn with_host_name(mut self, host_name: impl Into<String>) -> Self {
+    pub fn with_environment(
+        mut self,
+        home_dir: impl Into<PathBuf>,
+        host_name: impl Into<String>,
+        scheduler_calendar: impl Into<String>,
+    ) -> Self {
+        self.home_dir = home_dir.into();
         self.host_name = host_name.into();
+        self.scheduler_calendar = scheduler_calendar.into();
         self
+    }
+
+    pub fn with_scheduler_force_cron(mut self, force_cron: bool) -> Self {
+        self.scheduler_force_cron = force_cron;
+        self
+    }
+
+    pub fn scheduler_settings(&self) -> crate::runner::scheduler::SchedulerSettings {
+        crate::runner::scheduler::SchedulerSettings::new(
+            self.scheduler_mode,
+            &self.scheduler_calendar,
+        )
+        .with_force_cron(self.scheduler_force_cron)
     }
 }
 
@@ -288,10 +314,34 @@ pub struct AdapterSet<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractExpectation {
+    pub exit_status: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub artifact_kinds: Vec<String>,
+    pub external_state_changes: Vec<String>,
+    pub adapter_trace: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractCaseSpec {
+    pub command_path: String,
+    pub option_axis: Option<String>,
+    pub behavior_class: String,
+    pub values: Vec<String>,
+    pub argv: Vec<String>,
+    pub expectation: ContractExpectation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliContractCase {
     pub id: String,
     pub command_path: String,
     pub option_axis: Option<String>,
+    pub behavior_class: String,
+    pub values: Vec<String>,
+    pub argv: Vec<String>,
+    pub expectation: Option<ContractExpectation>,
 }
 
 /// Generates stable schema cases independently of command implementation details.
@@ -302,9 +352,13 @@ pub fn generate_cli_contract_matrix() -> Vec<CliContractCase> {
     let mut cases = authoritative_cli_command_paths()
         .into_iter()
         .map(|command_path| CliContractCase {
-            id: format!("command:{command_path}"),
+            id: format!("command:{command_path}:default"),
             command_path,
             option_axis: None,
+            behavior_class: "command-default".into(),
+            values: Vec::new(),
+            argv: Vec::new(),
+            expectation: None,
         })
         .collect::<Vec<_>>();
     cases.extend(authoritative_cli_axes().into_iter().map(|option_axis| {
@@ -312,14 +366,124 @@ pub fn generate_cli_contract_matrix() -> Vec<CliContractCase> {
             .rsplit_once('.')
             .map(|(path, _)| path.to_owned())
             .unwrap_or_else(|| option_axis.clone());
+        let behavior_class = option_behavior_class(&option_axis);
         CliContractCase {
-            id: format!("option:{option_axis}"),
+            id: format!("option:{option_axis}:default"),
             command_path,
             option_axis: Some(option_axis),
+            behavior_class,
+            values: Vec::new(),
+            argv: Vec::new(),
+            expectation: None,
         }
     }));
-    cases.sort_by(|left, right| left.id.cmp(&right.id));
     cases
+}
+
+/// Builds executable contract cases from test-owned expectations.
+///
+/// The schema inventory above is intentionally not an expectation oracle.  This constructor is
+/// the seam where an independent contract table supplies concrete values, parser input, and
+/// adapter/output expectations while the authoritative schema still enforces completeness.
+pub fn generate_cli_contract_matrix_with_specs(
+    specs: impl IntoIterator<Item = ContractCaseSpec>,
+) -> Result<Vec<CliContractCase>> {
+    let specs = specs.into_iter().collect::<Vec<_>>();
+    let command_paths = authoritative_cli_command_paths();
+    let option_axes = authoritative_cli_axes();
+
+    for spec in &specs {
+        if let Some(option_axis) = &spec.option_axis {
+            if !option_axes.contains(option_axis) {
+                anyhow::bail!("contract matrix contains unknown option axis {option_axis}");
+            }
+            let expected_command_path = option_axis
+                .rsplit_once('.')
+                .map(|(path, _)| path)
+                .unwrap_or(option_axis);
+            if spec.command_path != expected_command_path {
+                anyhow::bail!(
+                    "contract matrix option {option_axis} belongs to {expected_command_path}, not {}",
+                    spec.command_path
+                );
+            }
+        } else if !command_paths.contains(&spec.command_path) {
+            anyhow::bail!(
+                "contract matrix contains unknown command path {}",
+                spec.command_path
+            );
+        }
+    }
+
+    for command_path in &command_paths {
+        if !specs
+            .iter()
+            .any(|spec| spec.option_axis.is_none() && spec.command_path == *command_path)
+        {
+            anyhow::bail!("contract matrix has no command case for {command_path}");
+        }
+    }
+    for option_axis in &option_axes {
+        if !specs
+            .iter()
+            .any(|spec| spec.option_axis.as_deref() == Some(option_axis.as_str()))
+        {
+            anyhow::bail!("contract matrix has no option case for {option_axis}");
+        }
+    }
+
+    let mut cases = specs
+        .into_iter()
+        .map(|spec| {
+            let prefix = if let Some(axis) = &spec.option_axis {
+                format!("option:{axis}")
+            } else {
+                format!("command:{}", spec.command_path)
+            };
+            let suffix = if spec.values.is_empty() {
+                spec.behavior_class.clone()
+            } else {
+                format!("{}={}", spec.behavior_class, spec.values.join(","))
+            };
+            CliContractCase {
+                id: format!("{prefix}:{suffix}"),
+                command_path: spec.command_path,
+                option_axis: spec.option_axis,
+                behavior_class: spec.behavior_class,
+                values: spec.values,
+                argv: spec.argv,
+                expectation: Some(spec.expectation),
+            }
+        })
+        .collect::<Vec<_>>();
+    cases.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut ids = cases.iter().map(|case| &case.id).collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    if ids.len() != cases.len() {
+        anyhow::bail!("contract matrix contains duplicate case IDs");
+    }
+    Ok(cases)
+}
+
+fn option_behavior_class(option_axis: &str) -> String {
+    let option = option_axis.rsplit('.').next().unwrap_or_default();
+    match option {
+        "dry_run"
+        | "force"
+        | "non_interactive"
+        | "purge"
+        | "quiet"
+        | "skip_database"
+        | "skip_retention"
+        | "skip_secondary_sync"
+        | "verbose"
+        | "yes" => "flag-enabled",
+        "format" | "lang" | "profile" | "profiles" | "storage" => "enum-value",
+        "file" | "log_file" | "snapshot" | "target" => "path-or-text-value",
+        _ => "value-supplied",
+    }
+    .into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -335,6 +499,25 @@ pub struct ContractDiagnostic {
 }
 
 impl ContractDiagnostic {
+    pub fn from_outcome(
+        case_id: impl Into<String>,
+        context: impl Into<String>,
+        expected_trace: Vec<String>,
+        actual_trace: Vec<String>,
+        outcome: &CommandOutcome,
+    ) -> Self {
+        Self {
+            case_id: case_id.into(),
+            context: context.into(),
+            expected_trace,
+            actual_trace,
+            stdout: outcome.stdout.clone(),
+            stderr: outcome.stderr.clone(),
+            exit_status: outcome.exit_status,
+            artifacts: outcome.artifacts.clone(),
+        }
+    }
+
     pub fn render(&self) -> String {
         format!(
             "case={} context={} expected_trace={:?} actual_trace={:?} stdout={:?} stderr={:?} exit_status={} artifacts={:?}",
@@ -410,6 +593,25 @@ impl CommandOutcome {
         }
     }
 
+    pub fn failure_with_metadata(
+        command: &str,
+        stage: &str,
+        error: impl Into<String>,
+        artifacts: Vec<PathBuf>,
+        external_state_changes: Vec<String>,
+    ) -> Self {
+        let mut outcome = Self::failure(command, stage, error);
+        outcome.artifacts = artifacts
+            .into_iter()
+            .map(|path| Artifact {
+                path,
+                kind: "file".into(),
+            })
+            .collect();
+        outcome.external_state_changes = external_state_changes;
+        outcome
+    }
+
     pub fn is_success(&self) -> bool {
         self.exit_status == 0
     }
@@ -471,7 +673,31 @@ pub fn dispatch(
     }
     match dispatch_inner(context, command, adapters) {
         Ok(outcome) => outcome,
-        Err(error) => CommandOutcome::failure(&command_name, "execution", error.to_string()),
+        Err(error) => {
+            if let Some(report_failure) =
+                error.downcast_ref::<crate::commands::report::ReportCommandFailure>()
+            {
+                CommandOutcome::failure_with_metadata(
+                    &command_name,
+                    "execution",
+                    report_failure.message.clone(),
+                    report_failure.artifacts.clone(),
+                    report_failure.external_state_changes.clone(),
+                )
+            } else if let Some(run_failure) =
+                error.downcast_ref::<crate::commands::run::RunCommandFailure>()
+            {
+                CommandOutcome::failure_with_metadata(
+                    &command_name,
+                    "execution",
+                    run_failure.message.clone(),
+                    run_failure.artifacts.clone(),
+                    run_failure.external_state_changes.clone(),
+                )
+            } else {
+                CommandOutcome::failure(&command_name, "execution", error.to_string())
+            }
+        }
     }
 }
 
@@ -487,11 +713,13 @@ fn dispatch_inner(
             action,
         } => match action {
             Some(SetupAction::Dependencies) => {
-                let output =
-                    crate::commands::setup::run_setup_dependencies_with_runner_and_language(
-                        adapters.command,
-                        context.language,
-                    )?;
+                let install_dir =
+                    crate::commands::setup::resolve_dependency_install_dir(&context.home_dir)?;
+                let output = crate::commands::setup::run_setup_dependencies_with_runner_at_dir(
+                    adapters.command,
+                    &install_dir,
+                    context.language,
+                )?;
                 Ok(CommandOutcome::success_with_changes(
                     output,
                     "",
@@ -536,7 +764,7 @@ fn dispatch_inner(
             }
             None => {
                 let prompter = crate::commands::setup::InquirePrompter;
-                crate::commands::setup::run_setup_with_prompter_and_runners(
+                crate::commands::setup::run_setup_with_prompter_and_runners_with_scheduler_settings(
                     &context.profiles_path,
                     &prompter,
                     non_interactive,
@@ -548,6 +776,7 @@ fn dispatch_inner(
                     ),
                     adapters.resticprofile,
                     adapters.scheduler,
+                    &context.scheduler_settings(),
                 )?;
                 Ok(CommandOutcome::success_with_changes(
                     match context.language {
@@ -640,18 +869,17 @@ fn dispatch_inner(
         } => {
             let profiles_path = required_profiles_path(context)?;
             let profiles = load_profiles(context)?;
-            let config =
-                crate::config::model::BackupConfig::from_profile_config(&profiles, &profiles_path)?;
             let meta = crate::commands::report::AuditReportMeta::new(
                 &context.host_name,
                 crate::commands::report::get_formatted_time().0,
             )
             .with_profiles_path(&profiles_path);
-            let output = ReportCommand::run_with_adapters_and_meta(
+            let output = ReportCommand::run_with_profile_adapters(
                 action,
                 file,
                 format,
-                &config,
+                &profiles,
+                &profiles_path,
                 adapters.command,
                 adapters.restic,
                 &meta,
@@ -666,23 +894,23 @@ fn dispatch_inner(
         Command::Schedule { action } => {
             let output = match &action {
                 ScheduleAction::Enable => {
-                    crate::commands::schedule::execute_schedule_enable_with_mode(
+                    crate::commands::schedule::execute_schedule_enable_with_settings(
                         &context.profiles_path,
                         adapters.scheduler,
-                        context.scheduler_mode,
+                        &context.scheduler_settings(),
                     )?
                 }
                 ScheduleAction::Disable => {
-                    crate::commands::schedule::execute_schedule_disable_with_mode(
+                    crate::commands::schedule::execute_schedule_disable_with_settings(
                         &context.profiles_path,
                         adapters.scheduler,
-                        context.scheduler_mode,
+                        &context.scheduler_settings(),
                     )?
                 }
                 ScheduleAction::Status => {
-                    crate::commands::schedule::execute_schedule_status_with_mode(
+                    crate::commands::schedule::execute_schedule_status_with_settings(
                         adapters.scheduler,
-                        context.scheduler_mode,
+                        &context.scheduler_settings(),
                     )?
                 }
             };
@@ -905,18 +1133,23 @@ fn dispatch_run(
             ))
         }
         Err(error) => {
-            let report_error = crate::commands::run::write_execution_report_from_profiles(
+            let report_path = crate::commands::run::write_execution_report_from_profiles(
                 &config,
                 &context.profiles_path,
                 crate::commands::run::ExecutionReport::failure(&report_profile, stage, &error),
             )
-            .err();
-            if let Some(report_error) = report_error {
-                anyhow::bail!(
+            .map_err(|report_error| {
+                anyhow::anyhow!(
                     "stage '{stage}' failed: {error}; execution report failed: {report_error}"
-                );
-            }
-            anyhow::bail!("stage '{stage}' failed: {error}");
+                )
+            })?;
+            Err(anyhow::Error::new(
+                crate::commands::run::RunCommandFailure {
+                    message: format!("stage '{stage}' failed: {error}"),
+                    artifacts: vec![report_path],
+                    external_state_changes: vec![format!("stage '{stage}' attempted")],
+                },
+            ))
         }
     }
 }
@@ -1010,18 +1243,28 @@ fn backend_initialization_targets(config: &ResticProfileConfig) -> Result<Vec<St
 }
 
 fn report_paths_from_output(output: &str) -> Vec<PathBuf> {
-    output
-        .split([',', '\n'])
-        .map(str::trim)
-        .filter_map(|value| {
-            value
-                .strip_prefix("ISMS report saved to ")
-                .or_else(|| value.strip_prefix("All 3 sub-reports generated successfully:"))
-                .map(str::trim)
-        })
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .collect()
+    crate::commands::report::saved_report_paths(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::report_paths_from_output;
+    use std::path::PathBuf;
+
+    #[test]
+    fn report_artifact_parser_keeps_every_saved_path() {
+        assert_eq!(
+            report_paths_from_output("ISMS report saved to /tmp/report.html, /tmp/report.json"),
+            vec![
+                PathBuf::from("/tmp/report.html"),
+                PathBuf::from("/tmp/report.json")
+            ]
+        );
+        assert_eq!(
+            report_paths_from_output(
+                "All 3 sub-reports generated successfully:\nISMS report saved to /tmp/a.html, /tmp/a.json"
+            ),
+            vec![PathBuf::from("/tmp/a.html"), PathBuf::from("/tmp/a.json")]
+        );
+    }
 }

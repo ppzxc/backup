@@ -263,7 +263,7 @@ impl SetupPrompter for InquirePrompter {
 
             let enc_file_path = config_dir.join("enc");
             let password = if let Some(existing_pass) = resolve_encryption_keyfile(&enc_file_path) {
-                println!("\n{}", msg.found_existing_keyfile);
+                crate::logger::interactive_notice(msg.found_existing_keyfile);
                 existing_pass
             } else {
                 let auto_gen = inquire::Confirm::new(msg.auto_generate_password_prompt)
@@ -562,14 +562,13 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
     }
 
     if let Ok(pub_key) = std::fs::read_to_string(&pub_path) {
-        println!(
-            "\n================================================================================"
-        );
-        println!("{}", msg.sftp_pubkey_notice);
-        println!(
-            "================================================================================"
-        );
-        println!("{}\n", pub_key.trim());
+        crate::logger::interactive_notice(format!(
+            "{}\n{}\n{}\n{}",
+            "================================================================================",
+            msg.sftp_pubkey_notice,
+            "================================================================================",
+            pub_key.trim()
+        ));
     }
 
     let _ = inquire::Text::new(msg.sftp_press_enter).prompt_skippable()?;
@@ -583,16 +582,16 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
 
     loop {
         // Perform SFTP connection test
-        println!("{}", msg.sftp_testing_connection);
+        crate::logger::interactive_notice(msg.sftp_testing_connection);
         let test_result = verify_sftp_connection(&user, &host, port, &key_path_str, runner);
 
         let success = match test_result {
             Ok(()) => {
-                println!("{}", msg.sftp_test_success);
+                crate::logger::interactive_notice(msg.sftp_test_success);
                 true
             }
             Err(ref reason) => {
-                println!("{}", msg.sftp_test_failed.replace("{}", reason));
+                tracing::warn!("{}", msg.sftp_test_failed.replace("{}", reason));
                 false
             }
         };
@@ -751,6 +750,30 @@ impl SetupEngine {
         runner: &R,
         scheduler: &S,
     ) -> Result<()> {
+        Self::run_with_scheduler_settings(
+            profiles_path,
+            prompter,
+            non_interactive,
+            lang_opt,
+            runner,
+            scheduler,
+            &crate::runner::scheduler::SchedulerSettings::auto(),
+        )
+    }
+
+    pub fn run_with_scheduler_settings<
+        P: SetupPrompter,
+        R: crate::runner::resticprofile::ResticProfileRunner + ?Sized,
+        S: crate::runner::scheduler::BackupScheduler + ?Sized,
+    >(
+        profiles_path: &Path,
+        prompter: &P,
+        non_interactive: bool,
+        lang_opt: Option<Language>,
+        runner: &R,
+        scheduler: &S,
+        scheduler_settings: &crate::runner::scheduler::SchedulerSettings,
+    ) -> Result<()> {
         let config_dir = if let Some(parent) = profiles_path.parent() {
             if parent.as_os_str().is_empty() {
                 Path::new(".")
@@ -782,19 +805,17 @@ impl SetupEngine {
             None
         };
 
-        let config = if !non_interactive {
-            let params = prompter.prompt_setup_params(lang_opt, config_dir, profiles_path)?;
-            Self::validate_and_build(params)?
-        } else {
-            if !profiles_path.is_file() {
-                anyhow::bail!(
-                    "Non-interactive setup requires an existing unified profiles.yaml with real target, repository, and credentials"
-                );
-            }
-            let config = crate::config::model::BackupConfig::load_from_path(profiles_path)?;
-            config.validate()?;
-            config
-        };
+        if non_interactive {
+            return Self::run_existing_profiles_setup(
+                profiles_path,
+                runner,
+                scheduler,
+                scheduler_settings,
+            );
+        }
+
+        let params = prompter.prompt_setup_params(lang_opt, config_dir, profiles_path)?;
+        let config = Self::validate_and_build(params)?;
 
         std::fs::create_dir_all(&config.reports.output_dir)?;
         let staged_dir = tempfile::Builder::new()
@@ -805,10 +826,10 @@ impl SetupEngine {
             .join(crate::config::model::DEFAULT_PROFILES_FILENAME);
         config.save_to_profiles_path(&staged_profiles)?;
         let staged = crate::config::model::ResticProfileConfig::load_from_path(&staged_profiles)?;
-        let lang = lang_opt.unwrap_or_else(Language::detect);
+        let lang = lang_opt.unwrap_or(Language::En);
         let msg = crate::i18n::I18nMessages::get(lang);
 
-        println!("\n{}", msg.initializing_backend_repo);
+        crate::logger::interactive_notice(msg.initializing_backend_repo);
 
         let init_result = (|| -> Result<()> {
             for name in staged.profile_names() {
@@ -873,12 +894,50 @@ impl SetupEngine {
             previous.restore()?;
             return Err(error);
         }
-        if let Err(error) = scheduler.enable(profiles_path) {
+        if let Err(error) = scheduler.enable_with_settings(profiles_path, scheduler_settings) {
             previous.restore()?;
-            let _ = scheduler.enable(profiles_path);
+            let _ = scheduler.enable_with_settings(profiles_path, scheduler_settings);
             return Err(error);
         }
 
+        Ok(())
+    }
+
+    fn run_existing_profiles_setup<
+        R: crate::runner::resticprofile::ResticProfileRunner + ?Sized,
+        S: crate::runner::scheduler::BackupScheduler + ?Sized,
+    >(
+        profiles_path: &Path,
+        runner: &R,
+        scheduler: &S,
+        scheduler_settings: &crate::runner::scheduler::SchedulerSettings,
+    ) -> Result<()> {
+        if !profiles_path.is_file() {
+            anyhow::bail!(
+                "Non-interactive setup requires an existing unified profiles.yaml with real target, repository, and credentials"
+            );
+        }
+        let profiles = crate::config::model::ResticProfileConfig::load_from_path(profiles_path)?;
+        let profile_names = profiles.profile_names();
+        if profile_names.is_empty() {
+            anyhow::bail!("Non-interactive setup requires at least one Backup Profile");
+        }
+
+        let init_result = profile_names
+            .iter()
+            .try_for_each(|profile| runner.init(profiles_path, profile).map(|_| ()));
+        if let Err(error) = init_result {
+            let mut message = error.to_string();
+            let config_dir = profiles_path.parent().unwrap_or_else(|| Path::new("."));
+            for (_, secret) in profiles.sidecar_environment(config_dir)? {
+                if !secret.trim().is_empty() {
+                    message = message.replace(&secret, "******");
+                }
+            }
+            anyhow::bail!("Non-interactive setup failed repository initialization: {message}");
+        }
+
+        scheduler.enable_with_settings(profiles_path, scheduler_settings)?;
         Ok(())
     }
 }
@@ -942,7 +1001,7 @@ pub fn run_setup_with_prompter_and_runners<
     runner: &R,
     scheduler: &S,
 ) -> Result<()> {
-    let resolved_lang = lang_opt.or_else(|| Some(Language::detect()));
+    let resolved_lang = lang_opt.or(Some(Language::En));
     SetupEngine::run(
         profiles_path,
         prompter,
@@ -950,6 +1009,30 @@ pub fn run_setup_with_prompter_and_runners<
         resolved_lang,
         runner,
         scheduler,
+    )
+}
+
+pub fn run_setup_with_prompter_and_runners_with_scheduler_settings<
+    P: SetupPrompter,
+    R: crate::runner::resticprofile::ResticProfileRunner + ?Sized,
+    S: crate::runner::scheduler::BackupScheduler + ?Sized,
+>(
+    profiles_path: &Path,
+    prompter: &P,
+    non_interactive: bool,
+    lang_opt: Option<Language>,
+    runner: &R,
+    scheduler: &S,
+    scheduler_settings: &crate::runner::scheduler::SchedulerSettings,
+) -> Result<()> {
+    SetupEngine::run_with_scheduler_settings(
+        profiles_path,
+        prompter,
+        non_interactive,
+        lang_opt,
+        runner,
+        scheduler,
+        scheduler_settings,
     )
 }
 
@@ -1015,6 +1098,22 @@ pub fn run_setup_dependencies_with_runner_and_language<R: CommandRunner + ?Sized
     runner: &R,
     language: Language,
 ) -> Result<String> {
+    let install_dir = resolve_dependency_install_dir(Path::new("/tmp"))?;
+    run_setup_dependencies_with_runner_at_dir(runner, &install_dir, language)
+}
+
+pub fn resolve_dependency_install_dir(home_dir: &Path) -> Result<std::path::PathBuf> {
+    if Path::new("/usr/local/bin").is_dir() && is_dir_writable("/usr/local/bin") {
+        return Ok(Path::new("/usr/local/bin").to_path_buf());
+    }
+    Ok(home_dir.join(".local/bin"))
+}
+
+pub fn run_setup_dependencies_with_runner_at_dir<R: CommandRunner + ?Sized>(
+    runner: &R,
+    install_dir: &Path,
+    language: Language,
+) -> Result<String> {
     let mut report = String::new();
     let mut failures = Vec::new();
     report.push_str(match language {
@@ -1022,16 +1121,8 @@ pub fn run_setup_dependencies_with_runner_and_language<R: CommandRunner + ?Sized
         Language::En => "Checking binary dependencies...\n",
     });
 
-    let home_bin = std::env::var("HOME")
-        .map(|h| format!("{}/.local/bin", h))
-        .unwrap_or_else(|_| "/tmp".into());
-    let install_target_dir =
-        if Path::new("/usr/local/bin").is_dir() && is_dir_writable("/usr/local/bin") {
-            "/usr/local/bin".to_string()
-        } else {
-            std::fs::create_dir_all(&home_bin)?;
-            home_bin
-        };
+    std::fs::create_dir_all(install_dir)?;
+    let install_target_dir = install_dir.to_string_lossy().into_owned();
 
     let binaries = [
         (

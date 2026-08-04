@@ -51,10 +51,7 @@ impl SystemHealthDiagnoser {
         runner: &C,
         config_path: Option<&Path>,
     ) -> SystemHealthSnapshot {
-        let host_name = std::env::var("HOSTNAME")
-            .or_else(|_| std::env::var("COMPUTERNAME"))
-            .unwrap_or_else(|_| "localhost".into());
-        Self::diagnose_with_runner_and_host(rclone, runner, config_path, &host_name)
+        Self::diagnose_with_runner_and_host(rclone, runner, config_path, "localhost")
     }
 
     pub fn diagnose_with_runner_and_host<R: RcloneRunner + ?Sized, C: CommandRunner + ?Sized>(
@@ -239,7 +236,9 @@ impl SystemHealthDiagnoser {
             detail: rto_detail,
         });
 
-        let overall_pass = items.iter().all(|i| i.status == DoctorStatus::Pass);
+        let overall_pass = items
+            .iter()
+            .all(|item| !matches!(item.status, DoctorStatus::Fail | DoctorStatus::Unavailable));
 
         SystemHealthSnapshot {
             host_name: host_name.to_owned(),
@@ -330,51 +329,29 @@ fn render_doctor_report(snapshot: &SystemHealthSnapshot) -> String {
     report.push_str("Checking dependencies...\n");
 
     for item in &snapshot.items {
-        match item.category {
-            DoctorCategory::Storage => {
-                let status = if item.status == DoctorStatus::Pass {
-                    "OK"
-                } else {
-                    "FAILED (Check remote configuration and network)"
-                };
-                report.push_str(&format!("Rclone connectivity: {}\n", status));
+        let name = match item.category {
+            DoctorCategory::Storage => "Rclone connectivity",
+            DoctorCategory::System if item.criterion == "Restic binary" => "Restic binary",
+            DoctorCategory::System if item.criterion.contains("시각 동기화") => {
+                "NTP Time Sync"
             }
-            DoctorCategory::System => {
-                if item.criterion == "Restic binary" {
-                    let status = if item.status == DoctorStatus::Pass {
-                        "OK"
-                    } else {
-                        "FAILED"
-                    };
-                    report.push_str(&format!("Restic binary: {}\n", status));
-                } else if item.criterion.contains("시각 동기화") {
-                    let status = if item.status == DoctorStatus::Pass {
-                        "OK"
-                    } else {
-                        "FAILED"
-                    };
-                    report.push_str(&format!("NTP Time Sync: {}\n", status));
-                } else {
-                    let status = match item.status {
-                        DoctorStatus::Pass => "OK",
-                        DoctorStatus::Warn => "WARN",
-                        DoctorStatus::Fail => "FAILED",
-                        DoctorStatus::Unavailable => "UNAVAILABLE",
-                    };
-                    report.push_str(&format!("{}: {}\n", item.criterion, status));
-                }
-            }
-            _ => {
-                let status = match item.status {
-                    DoctorStatus::Pass => "OK",
-                    DoctorStatus::Warn => "WARN",
-                    DoctorStatus::Fail => "FAILED",
-                    DoctorStatus::Unavailable => "UNAVAILABLE",
-                };
-                report.push_str(&format!("{}: {}\n", item.criterion, status));
-            }
-        }
+            _ => &item.criterion,
+        };
+        report.push_str(&format!(
+            "{}: {}\n",
+            name,
+            doctor_status_label(&item.status)
+        ));
     }
 
     report
+}
+
+fn doctor_status_label(status: &DoctorStatus) -> &'static str {
+    match status {
+        DoctorStatus::Pass => "Pass",
+        DoctorStatus::Warn => "Warn",
+        DoctorStatus::Fail => "Fail",
+        DoctorStatus::Unavailable => "Unavailable",
+    }
 }

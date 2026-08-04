@@ -831,6 +831,13 @@ pub struct ResticProfileConfig {
     pub profiles: std::collections::BTreeMap<String, ProfileSection>,
 }
 
+#[derive(Debug, Clone)]
+pub struct EffectiveBackupSettings {
+    pub source: Vec<String>,
+    pub exclude: Vec<String>,
+    pub retention: RetentionPolicy,
+}
+
 impl ResticProfileConfig {
     pub fn load_from_path(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)?;
@@ -987,6 +994,68 @@ impl ResticProfileConfig {
 
     pub fn application_config(&self) -> ApplicationConfig {
         self.application.clone().unwrap_or_default()
+    }
+
+    /// Resolves the operational Backup Profile inheritance chain without projecting it into the
+    /// retired legacy configuration model.
+    pub fn effective_backup_settings(&self, profile: &str) -> Result<EffectiveBackupSettings> {
+        let mut current = profile;
+        let mut source = None;
+        let mut exclude = None;
+        let mut keep_daily = None;
+        let mut keep_weekly = None;
+        let mut keep_monthly = None;
+        let mut remaining = self.profiles.len() + 1;
+
+        while remaining > 0 {
+            remaining -= 1;
+            let section = self
+                .profiles
+                .get(current)
+                .ok_or_else(|| anyhow::anyhow!("Unknown Backup Profile '{current}'"))?;
+            if let Some(backup) = &section.backup {
+                if source.is_none() {
+                    source = backup.source.clone();
+                }
+                if exclude.is_none() {
+                    exclude = backup.exclude.clone();
+                }
+            }
+            let retention = section.retention.as_ref();
+            let forget = section.forget.as_ref();
+            if keep_daily.is_none() {
+                keep_daily = retention
+                    .and_then(|value| value.keep_daily)
+                    .or_else(|| forget.and_then(|value| value.keep_daily));
+            }
+            if keep_weekly.is_none() {
+                keep_weekly = retention
+                    .and_then(|value| value.keep_weekly)
+                    .or_else(|| forget.and_then(|value| value.keep_weekly));
+            }
+            if keep_monthly.is_none() {
+                keep_monthly = retention
+                    .and_then(|value| value.keep_monthly)
+                    .or_else(|| forget.and_then(|value| value.keep_monthly));
+            }
+            let Some(parent) = section.inherit.as_deref() else {
+                break;
+            };
+            current = parent;
+        }
+        if remaining == 0 {
+            anyhow::bail!("Backup Profile inheritance is cyclic");
+        }
+
+        Ok(EffectiveBackupSettings {
+            source: source.unwrap_or_default(),
+            exclude: exclude.unwrap_or_default(),
+            retention: RetentionPolicy {
+                keep_daily: keep_daily.unwrap_or(7),
+                keep_weekly: keep_weekly.unwrap_or(4),
+                keep_monthly: keep_monthly.unwrap_or(12),
+            },
+        })
     }
 
     /// Resolves a Backend Profile through its inheritance chain without a lossy

@@ -1,8 +1,10 @@
 use backup::commands::report::{
-    ReportType, execute_report_file_export, render_html_isms_report,
-    render_html_isms_report_with_type,
+    ReportAction, ReportCommand, ReportFormat, ReportType, execute_report_file_export,
+    render_html_isms_report, render_html_isms_report_with_type,
 };
+mod support;
 use std::fs;
+use support::{MockExecutor, MockResticRunner};
 use tempfile::tempdir;
 
 #[test]
@@ -64,7 +66,7 @@ fn test_report_file_export_dual_format_by_default() {
     let dir = tempdir().unwrap();
     let base_file = dir.path().join("audit_report");
     let meta = backup::commands::report::AuditReportMeta::new("host-1", "2026-07-30");
-    let default_config = backup::config::model::BackupConfig::default();
+    let default_config = backup::commands::report::ReportConfig::default();
 
     let msg = execute_report_export(ReportExportOptions {
         report_type: ReportType::All,
@@ -94,7 +96,7 @@ fn test_report_file_export_single_format_when_specified() {
     let dir = tempdir().unwrap();
     let base_file = dir.path().join("audit_report.json");
     let meta = backup::commands::report::AuditReportMeta::new("host-1", "2026-07-30");
-    let default_config = backup::config::model::BackupConfig::default();
+    let default_config = backup::commands::report::ReportConfig::default();
 
     let msg = execute_report_export(ReportExportOptions {
         report_type: ReportType::Environment,
@@ -122,7 +124,7 @@ fn test_report_file_export_default_directory_when_file_none() {
     use backup::commands::report::{ReportExportOptions, execute_report_export};
     let dir = tempdir().unwrap();
     let meta = backup::commands::report::AuditReportMeta::new("host-1", "2026-07-30");
-    let default_config = backup::config::model::BackupConfig::default();
+    let default_config = backup::commands::report::ReportConfig::default();
 
     let msg = execute_report_export(ReportExportOptions {
         report_type: ReportType::TimeSync,
@@ -240,7 +242,7 @@ fn test_default_export_filename_format_date_prefix() {
 
     let dir = tempfile::tempdir().unwrap();
     let meta = AuditReportMeta::new("funa1.nanoit.kr", "2026-07-30");
-    let default_config = backup::config::model::BackupConfig::default();
+    let default_config = backup::commands::report::ReportConfig::default();
 
     let msg = execute_report_export(ReportExportOptions {
         report_type: ReportType::All,
@@ -262,14 +264,14 @@ fn test_default_export_filename_format_date_prefix() {
 
 #[test]
 fn test_real_report_data_collects_os_and_audit() {
-    let config = backup::config::model::BackupConfig::default();
+    let config = backup::commands::report::ReportConfig::default();
     let data = backup::commands::report::RealReportData::collect(&config);
     assert!(!data.os_info.is_empty(), "os_info should be populated");
 }
 
 #[test]
 fn test_html_report_contains_custom_audit_names_and_os() {
-    let config = backup::config::model::BackupConfig::default();
+    let config = backup::commands::report::ReportConfig::default();
     let mut data = backup::commands::report::RealReportData::collect(&config);
     data.audit.system_manager = Some("홍길동 차장".into());
     data.audit.security_officer = Some("김보안 이사".into());
@@ -299,4 +301,59 @@ fn test_report_command_fails_on_missing_config() {
     let non_existent_path = std::path::Path::new("/tmp/non_existent_config_12345.yaml");
     let res = backup::commands::report::run_report(non_existent_path, None, None, None);
     assert!(res.is_err());
+}
+
+#[test]
+fn restore_drill_failure_is_recorded_in_the_written_report() {
+    let temp = tempdir().unwrap();
+    let password = temp.path().join("primary-password");
+    fs::write(&password, "report-password").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&password, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let profiles_path = temp.path().join("profiles.yaml");
+    fs::write(
+        &profiles_path,
+        format!(
+            "version: '2'\napplication:\n  reports:\n    outputDir: {}\n    enableDailyReports: true\n    enableAnnualDrDrillReport: true\nprofiles:\n  primary:\n    repository: /tmp/repo\n    password-file: {}\n  files:\n    backup:\n      source: ['/work/source']\n",
+            temp.path().display(),
+            password.display()
+        ),
+    )
+    .unwrap();
+    let profiles =
+        backup::config::model::ResticProfileConfig::load_from_path(&profiles_path).unwrap();
+    let output_file = temp.path().join("restore-drill.json");
+    let command_runner = MockExecutor::new();
+    let restic_runner = MockResticRunner::new(1, "restore failed for report-password at /tmp/repo");
+    let meta = backup::commands::report::AuditReportMeta::new("contract-host", "2026-08-04")
+        .with_profiles_path(&profiles_path);
+
+    let error = ReportCommand::run_with_profile_adapters(
+        Some(ReportAction::RestoreDrill {
+            file: Some(output_file.clone()),
+            format: Some(ReportFormat::Json),
+        }),
+        None,
+        None,
+        &profiles,
+        &profiles_path,
+        &command_runner,
+        &restic_runner,
+        &meta,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("failure report"));
+    assert!(!error.to_string().contains("report-password"));
+    assert!(!error.to_string().contains("/tmp/repo"));
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output_file).unwrap()).unwrap();
+    assert_eq!(report["report_status"], "Fail");
+    assert_eq!(
+        report["failure_diagnostic"],
+        "mock restic failed with exit code 1: restore failed for ****** at [repository masked]"
+    );
 }

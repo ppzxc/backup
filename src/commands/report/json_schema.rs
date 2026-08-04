@@ -134,11 +134,11 @@ pub fn render_json_real(report_type: ReportType, data: &RealReportData) -> Resul
                 timestamp: data.timestamp.clone(),
                 backup_policy: BackupPolicyJson {
                     backend: "sftp".into(),
-                    repository: format!("rclone:syno_backup:/backup/{}", data.hostname),
+                    repository: data.config.primary_repository.clone(),
                     encryption: "AES-256 (restic 저장소 자체 암호화)".into(),
                     encryption_warning: false,
-                    targets: data.config.backup.targets.join(","),
-                    excludes: data.config.backup.excludes.join(","),
+                    targets: data.config.targets.join(","),
+                    excludes: data.config.excludes.join(","),
                 },
                 retention_policy: RetentionPolicyJson {
                     keep_daily: data.config.retention.keep_daily,
@@ -175,9 +175,9 @@ pub fn render_json_real(report_type: ReportType, data: &RealReportData) -> Resul
                     .unwrap_or_else(|| "시스템 운영팀".into()),
                 backup_policy: serde_json::json!({
                     "backend": "sftp",
-                    "repository": format!("rclone:syno_backup:/backup/{}", data.hostname),
+                    "repository": data.config.primary_repository.clone(),
                     "encryption": "AES-256 (보안 비밀번호 키 적용 완료)",
-                    "targets": data.config.backup.targets.join(",")
+                    "targets": data.config.targets.join(",")
                 }),
                 retention_policy_verification: RetentionPolicyVerificationJson {
                     keep_daily: RetentionVerificationItemJson {
@@ -270,7 +270,7 @@ pub fn render_json_real(report_type: ReportType, data: &RealReportData) -> Resul
 }
 
 pub fn render_json(report_type: ReportType, _results: &AuditDiagnosticResults) -> Result<String> {
-    let config = crate::config::model::BackupConfig::default();
+    let config = crate::commands::report::ReportConfig::default();
     let data = RealReportData::collect(&config);
     render_json_real(report_type, &data)
 }

@@ -51,6 +51,77 @@ profiles:
 }
 
 #[test]
+fn effective_backup_settings_merge_partial_inheritance_fields() {
+    use backup::config::model::ResticProfileConfig;
+
+    let yaml = r#"
+version: "2"
+profiles:
+  default:
+    backup:
+      exclude: [/parent-cache]
+    retention:
+      keep-weekly: 5
+      keep-monthly: 13
+  child:
+    inherit: default
+    backup:
+      source: [/work]
+    retention:
+      keep-daily: 9
+"#;
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), yaml).unwrap();
+    let profiles = ResticProfileConfig::load_from_path(file.path()).unwrap();
+
+    let settings = profiles.effective_backup_settings("child").unwrap();
+    assert_eq!(settings.source, vec!["/work"]);
+    assert_eq!(settings.exclude, vec!["/parent-cache"]);
+    assert_eq!(settings.retention.keep_daily, 9);
+    assert_eq!(settings.retention.keep_weekly, 5);
+    assert_eq!(settings.retention.keep_monthly, 13);
+}
+
+#[test]
+fn effective_backup_settings_reject_unknown_profile_and_cycles() {
+    use backup::config::model::ResticProfileConfig;
+
+    let unknown = ResticProfileConfig {
+        version: "2".into(),
+        application: None,
+        global: None,
+        groups: None,
+        profiles: Default::default(),
+    };
+    assert!(
+        unknown
+            .effective_backup_settings("missing")
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown Backup Profile")
+    );
+
+    let yaml = r#"
+version: "2"
+profiles:
+  one:
+    inherit: two
+  two:
+    inherit: one
+"#;
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), yaml).unwrap();
+    let profiles = ResticProfileConfig::load_from_path(file.path()).unwrap();
+    assert!(
+        profiles
+            .effective_backup_settings("one")
+            .unwrap_err()
+            .to_string()
+            .contains("cyclic")
+    );
+}
+
+#[test]
 fn test_parse_yaml_config() {
     let yaml = r#"
 version: "1.0"

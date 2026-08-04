@@ -36,11 +36,20 @@ fn main() {
         SchedulerMode::Auto,
         AdapterSelection::System,
     ) {
-        Ok(context) => context.with_host_name(
-            std::env::var("HOSTNAME")
+        Ok(context) => {
+            let home_dir = std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+            let host_name = std::env::var("HOSTNAME")
                 .or_else(|_| std::env::var("COMPUTERNAME"))
-                .unwrap_or_else(|_| "localhost".into()),
-        ),
+                .unwrap_or_else(|_| "localhost".into());
+            let scheduler_calendar = std::env::var("BACKUP_TEST_SCHEDULE_CALENDAR")
+                .unwrap_or_else(|_| backup::runner::scheduler::DEFAULT_SCHEDULE_CALENDAR.into());
+            let force_cron = std::env::var_os("BACKUP_TEST_FORCE_CRON").is_some();
+            context
+                .with_environment(home_dir, host_name, scheduler_calendar)
+                .with_scheduler_force_cron(force_cron)
+        }
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(2);

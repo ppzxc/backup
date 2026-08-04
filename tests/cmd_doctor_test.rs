@@ -6,9 +6,9 @@ use support::MockRcloneRunner;
 fn test_doctor_checks() {
     let mock_rclone = MockRcloneRunner::new(0, "syno_backup");
     let report = run_doctor_checks(&mock_rclone, None).unwrap();
-    assert!(report.contains("Rclone connectivity: OK"));
-    assert!(report.contains("Restic binary: OK"));
-    assert!(report.contains("NTP Time Sync: OK"));
+    assert!(report.contains("Rclone connectivity: Pass"));
+    assert!(report.contains("Restic binary: Pass"));
+    assert!(report.contains("NTP Time Sync: Pass"));
 }
 
 #[test]

@@ -4,7 +4,9 @@ use crate::runner::resticprofile::ResticProfileRunner;
 use anyhow::Result;
 use secrecy::ExposeSecret;
 use serde::Serialize;
+use std::fmt;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, info_span};
 
@@ -15,6 +17,21 @@ pub struct PipelineOptions {
     pub skip_retention: bool,
     pub dry_run: bool,
 }
+
+#[derive(Debug, Clone)]
+pub struct RunCommandFailure {
+    pub message: String,
+    pub artifacts: Vec<PathBuf>,
+    pub external_state_changes: Vec<String>,
+}
+
+impl fmt::Display for RunCommandFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RunCommandFailure {}
 
 #[derive(Debug, Serialize)]
 pub struct ExecutionReport {

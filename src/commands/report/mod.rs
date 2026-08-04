@@ -1,9 +1,11 @@
 pub mod html_template;
 pub mod json_schema;
 
+use crate::config::model::{AuditConfig, ResticProfileConfig, RetentionPolicy};
 use crate::runner::executor::{CommandRunner, SystemExecutor};
 use crate::runner::restic::{ResticRunner, ResticTool};
 use anyhow::Result;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,6 +27,75 @@ pub enum ReportType {
     RestoreDrill,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReportConfig {
+    pub output_dir: PathBuf,
+    pub audit: AuditConfig,
+    pub targets: Vec<String>,
+    pub excludes: Vec<String>,
+    pub retention: RetentionPolicy,
+    pub primary_repository: String,
+    pub primary_password: SecretString,
+    pub database_stream: bool,
+}
+
+impl ReportConfig {
+    pub fn from_profiles(profiles: &ResticProfileConfig, profiles_path: &Path) -> Result<Self> {
+        let application = profiles.application_config();
+        let profile_name = application
+            .database
+            .as_ref()
+            .map(|database| database.profile.clone())
+            .or_else(|| {
+                let names = profiles.profile_names();
+                names
+                    .iter()
+                    .find(|name| {
+                        profiles
+                            .effective_backup_settings(name)
+                            .map(|settings| !settings.source.is_empty())
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .or_else(|| names.into_iter().next())
+            })
+            .ok_or_else(|| anyhow::anyhow!("profiles.yaml has no runnable Backup Profile"))?;
+        let settings = profiles.effective_backup_settings(&profile_name)?;
+        let config_dir = profiles_path.parent().unwrap_or_else(|| Path::new("."));
+        let (primary_repository, password) = if profiles.profiles.contains_key("primary") {
+            profiles.backend_credentials(config_dir, "primary")?
+        } else {
+            (String::new(), String::new())
+        };
+
+        Ok(Self {
+            output_dir: PathBuf::from(application.reports.output_dir),
+            audit: application.audit,
+            targets: settings.source,
+            excludes: settings.exclude,
+            retention: settings.retention,
+            primary_repository,
+            primary_password: SecretString::new(password),
+            database_stream: application.database.is_some(),
+        })
+    }
+}
+
+impl Default for ReportConfig {
+    fn default() -> Self {
+        Self {
+            output_dir: PathBuf::from("/data/backup/reports"),
+            audit: AuditConfig::default(),
+            targets: vec!["/data".into()],
+            excludes: Vec::new(),
+            retention: RetentionPolicy::standard_defaults(),
+            primary_repository: String::new(),
+            primary_password: SecretString::new(String::new()),
+            database_stream: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiagnosticItem {
     pub name: String,
@@ -41,13 +112,13 @@ pub struct AuditDiagnosticResults {
     pub items: Vec<DiagnosticItem>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RealReportData {
     pub hostname: String,
     pub timestamp: String,
     pub date_prefix: String,
     pub report_type: ReportType,
-    pub config: crate::config::model::BackupConfig,
+    pub config: ReportConfig,
     pub etc_backup_dir_perm: String,
     pub etc_backup_dir_safe: bool,
     pub backup_env_file_perm: String,
@@ -63,6 +134,7 @@ pub struct RealReportData {
     pub snapshots: Vec<serde_json::Value>,
     pub audit: crate::config::model::AuditConfig,
     pub os_info: String,
+    pub failure_diagnostic: Option<String>,
 }
 
 pub fn get_formatted_time() -> (String, String) {
@@ -124,25 +196,28 @@ pub fn get_formatted_time() -> (String, String) {
 }
 
 impl RealReportData {
-    pub fn collect_with_meta(
-        config: &crate::config::model::BackupConfig,
-        meta: &AuditReportMeta,
-    ) -> Self {
+    pub fn collect_with_meta(config: &ReportConfig, meta: &AuditReportMeta) -> Self {
         let executor = SystemExecutor;
-        Self::collect_with_meta_with_runner(config, meta, &executor)
+        Self::collect_with_report_config_with_runner(config, meta, &executor)
     }
 
     pub fn collect_with_meta_with_runner<R: CommandRunner + ?Sized>(
-        config: &crate::config::model::BackupConfig,
+        config: &ReportConfig,
         meta: &AuditReportMeta,
         runner: &R,
     ) -> Self {
-        let hostname = if !meta.host_name.is_empty() {
-            meta.host_name.clone()
+        Self::collect_with_report_config_with_runner(config, meta, runner)
+    }
+
+    pub fn collect_with_report_config_with_runner<R: CommandRunner + ?Sized>(
+        config: &ReportConfig,
+        meta: &AuditReportMeta,
+        runner: &R,
+    ) -> Self {
+        let hostname = if meta.host_name.is_empty() {
+            "localhost".into()
         } else {
-            std::env::var("HOSTNAME")
-                .or_else(|_| std::env::var("COMPUTERNAME"))
-                .unwrap_or_else(|_| "localhost".into())
+            meta.host_name.clone()
         };
 
         let (default_ts, date_prefix) = get_formatted_time();
@@ -193,10 +268,11 @@ impl RealReportData {
             snapshots: vec![],
             audit,
             os_info,
+            failure_diagnostic: None,
         }
     }
 
-    pub fn collect(config: &crate::config::model::BackupConfig) -> Self {
+    pub fn collect(config: &ReportConfig) -> Self {
         let meta = AuditReportMeta::current();
         Self::collect_with_meta(config, &meta)
     }
@@ -369,14 +445,14 @@ impl AuditReport {
     }
 
     pub fn render_html(&self) -> String {
-        let config = crate::config::model::BackupConfig::default();
+        let config = ReportConfig::default();
         let meta = AuditReportMeta::new(&self.results.host_name, &self.results.timestamp);
         let data = RealReportData::collect_with_meta(&config, &meta);
         html_template::render_html_real(self.report_type, &data)
     }
 
     pub fn render_json(&self) -> Result<String> {
-        let config = crate::config::model::BackupConfig::default();
+        let config = ReportConfig::default();
         let meta = AuditReportMeta::new(&self.results.host_name, &self.results.timestamp);
         let data = RealReportData::collect_with_meta(&config, &meta);
         json_schema::render_json_real(self.report_type, &data)
@@ -395,12 +471,9 @@ pub struct AuditReportMeta {
 
 impl AuditReportMeta {
     pub fn current() -> Self {
-        let host_name = std::env::var("HOSTNAME")
-            .or_else(|_| std::env::var("COMPUTERNAME"))
-            .unwrap_or_else(|_| "localhost".into());
         let (timestamp, _) = get_formatted_time();
         Self {
-            host_name,
+            host_name: "localhost".into(),
             timestamp,
             profiles_path: None,
         }
@@ -427,7 +500,18 @@ pub struct ReportExportOptions<'a> {
     pub format: Option<ReportFormat>,
     pub output_dir: &'a Path,
     pub meta: &'a AuditReportMeta,
-    pub config: &'a crate::config::model::BackupConfig,
+    pub config: &'a ReportConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReportExportOptionsForConfig<'a> {
+    pub report_type: ReportType,
+    pub file: Option<&'a Path>,
+    pub format: Option<ReportFormat>,
+    pub output_dir: &'a Path,
+    pub meta: &'a AuditReportMeta,
+    pub config: &'a ReportConfig,
+    pub failure_diagnostic: Option<String>,
 }
 
 #[derive(Debug, Clone, clap::Subcommand, Serialize, Deserialize)]
@@ -457,23 +541,86 @@ pub enum ReportAction {
 
 pub struct ReportCommand;
 
+#[derive(Debug)]
+pub struct ReportCommandFailure {
+    pub message: String,
+    pub artifacts: Vec<PathBuf>,
+    pub external_state_changes: Vec<String>,
+}
+
+impl ReportCommandFailure {
+    fn from_saved_report(message: String, report: &str) -> Self {
+        let artifacts = saved_report_paths(report);
+        let external_state_changes = if artifacts.is_empty() {
+            Vec::new()
+        } else {
+            vec!["report artifacts committed".into()]
+        };
+        Self {
+            message,
+            artifacts,
+            external_state_changes,
+        }
+    }
+}
+
+impl std::fmt::Display for ReportCommandFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(formatter)
+    }
+}
+
+impl std::error::Error for ReportCommandFailure {}
+
+pub fn saved_report_paths(output: &str) -> Vec<PathBuf> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter_map(|value| {
+            value
+                .strip_prefix("ISMS report saved to ")
+                .or_else(|| {
+                    value
+                        .strip_prefix("All 3 sub-reports generated successfully:")
+                        .filter(|rest| !rest.trim().is_empty())
+                })
+                .map(str::trim)
+        })
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
 impl ReportCommand {
     pub fn run(
         action: Option<ReportAction>,
         file: Option<PathBuf>,
         format: Option<ReportFormat>,
-        config: &crate::config::model::BackupConfig,
+        profiles_path: &Path,
     ) -> Result<String> {
         let executor = SystemExecutor;
         let restic = ResticTool::new(&executor);
-        Self::run_with_adapters(action, file, format, config, &executor, &restic)
+        let profiles = ResticProfileConfig::load_from_path(profiles_path)?;
+        let meta = AuditReportMeta::current().with_profiles_path(profiles_path);
+        Self::run_with_profile_adapters(
+            action,
+            file,
+            format,
+            &profiles,
+            profiles_path,
+            &executor,
+            &restic,
+            &meta,
+        )
     }
 
     pub fn run_with_adapters<C: CommandRunner + ?Sized, R: ResticRunner + ?Sized>(
         action: Option<ReportAction>,
         file: Option<PathBuf>,
         format: Option<ReportFormat>,
-        config: &crate::config::model::BackupConfig,
+        config: &ReportConfig,
         command_runner: &C,
         restic_runner: &R,
     ) -> Result<String> {
@@ -493,12 +640,54 @@ impl ReportCommand {
         action: Option<ReportAction>,
         file: Option<PathBuf>,
         format: Option<ReportFormat>,
-        config: &crate::config::model::BackupConfig,
+        config: &ReportConfig,
         command_runner: &C,
         restic_runner: &R,
         meta: &AuditReportMeta,
     ) -> Result<String> {
-        let output_dir = Path::new(&config.reports.output_dir);
+        Self::run_with_report_config_and_meta(
+            action,
+            file,
+            format,
+            config,
+            command_runner,
+            restic_runner,
+            meta,
+        )
+    }
+
+    pub fn run_with_profile_adapters<C: CommandRunner + ?Sized, R: ResticRunner + ?Sized>(
+        action: Option<ReportAction>,
+        file: Option<PathBuf>,
+        format: Option<ReportFormat>,
+        profiles: &ResticProfileConfig,
+        profiles_path: &Path,
+        command_runner: &C,
+        restic_runner: &R,
+        meta: &AuditReportMeta,
+    ) -> Result<String> {
+        let report_config = ReportConfig::from_profiles(profiles, profiles_path)?;
+        Self::run_with_report_config_and_meta(
+            action,
+            file,
+            format,
+            &report_config,
+            command_runner,
+            restic_runner,
+            meta,
+        )
+    }
+
+    fn run_with_report_config_and_meta<C: CommandRunner + ?Sized, R: ResticRunner + ?Sized>(
+        action: Option<ReportAction>,
+        file: Option<PathBuf>,
+        format: Option<ReportFormat>,
+        config: &ReportConfig,
+        command_runner: &C,
+        restic_runner: &R,
+        meta: &AuditReportMeta,
+    ) -> Result<String> {
+        let output_dir = config.output_dir.as_path();
 
         match action {
             Some(ReportAction::Environment {
@@ -506,55 +695,68 @@ impl ReportCommand {
                 format: sub_format,
             }) => {
                 let final_file = sub_file.or(file);
-                let opts = ReportExportOptions {
+                let opts = ReportExportOptionsForConfig {
                     report_type: ReportType::Environment,
                     file: final_file.as_deref(),
                     format: sub_format.or(format),
                     output_dir,
-                    meta: &meta,
+                    meta,
                     config,
+                    failure_diagnostic: None,
                 };
-                execute_report_export_with_runner(opts, command_runner)
+                execute_report_export_with_report_config(opts, command_runner)
             }
             Some(ReportAction::TimeSync {
                 file: sub_file,
                 format: sub_format,
             }) => {
                 let final_file = sub_file.or(file);
-                let opts = ReportExportOptions {
+                let opts = ReportExportOptionsForConfig {
                     report_type: ReportType::TimeSync,
                     file: final_file.as_deref(),
                     format: sub_format.or(format),
                     output_dir,
-                    meta: &meta,
+                    meta,
                     config,
+                    failure_diagnostic: None,
                 };
-                execute_report_export_with_runner(opts, command_runner)
+                execute_report_export_with_report_config(opts, command_runner)
             }
             Some(ReportAction::RestoreDrill {
                 file: sub_file,
                 format: sub_format,
             }) => {
-                let drill_error = execute_restore_drill_with_runner(config, restic_runner).err();
+                let drill_error = execute_restore_drill_with_runner(config, restic_runner)
+                    .err()
+                    .map(|error| redact_report_diagnostic(&error.to_string(), config));
                 let final_file = sub_file.or(file);
-                let opts = ReportExportOptions {
+                let opts = ReportExportOptionsForConfig {
                     report_type: ReportType::RestoreDrill,
                     file: final_file.as_deref(),
                     format: sub_format.or(format),
                     output_dir,
-                    meta: &meta,
+                    meta,
                     config,
+                    failure_diagnostic: drill_error.clone(),
                 };
-                let report = execute_report_export_with_runner(opts, command_runner);
+                let report = execute_report_export_with_report_config(opts, command_runner);
                 match (drill_error, report) {
                     (None, report) => report,
                     (Some(drill_error), Ok(report)) => {
-                        anyhow::bail!(
-                            "restore drill failed: {drill_error}; failure report: {report}"
+                        Err(ReportCommandFailure::from_saved_report(
+                            format!("restore drill failed: {drill_error}; failure report: {report}"),
+                            &report,
                         )
+                        .into())
                     }
-                    (Some(drill_error), Err(report_error)) => anyhow::bail!(
-                        "restore drill failed: {drill_error}; failure report also failed: {report_error}"
+                    (Some(drill_error), Err(report_error)) => Err(
+                        ReportCommandFailure::from_saved_report(
+                            format!(
+                                "restore drill failed: {drill_error}; failure report also failed: {report_error}"
+                            ),
+                            "",
+                        )
+                        .into(),
                     ),
                 }
             }
@@ -569,31 +771,39 @@ impl ReportCommand {
                 let mut saved_all = Vec::new();
                 let mut failures = Vec::new();
                 for r_type in report_types {
-                    if r_type == ReportType::RestoreDrill {
-                        if let Err(error) = execute_restore_drill_with_runner(config, restic_runner)
-                        {
-                            failures.push(format!("restore drill: {error}"));
-                        }
+                    let mut drill_error = None;
+                    if r_type == ReportType::RestoreDrill
+                        && let Err(error) = execute_restore_drill_with_runner(config, restic_runner)
+                    {
+                        let message = redact_report_diagnostic(&error.to_string(), config);
+                        failures.push(format!("restore drill: {message}"));
+                        drill_error = Some(message);
                     }
-                    let opts = ReportExportOptions {
+                    let opts = ReportExportOptionsForConfig {
                         report_type: r_type,
                         file: file.as_deref(),
                         format,
                         output_dir,
-                        meta: &meta,
+                        meta,
                         config,
+                        failure_diagnostic: drill_error,
                     };
-                    match execute_report_export_with_runner(opts, command_runner) {
+                    match execute_report_export_with_report_config(opts, command_runner) {
                         Ok(res_msg) => saved_all.push(res_msg),
                         Err(error) => failures.push(format!("{r_type:?} report: {error}")),
                     }
                 }
 
                 if !failures.is_empty() {
-                    anyhow::bail!(
-                        "report generation completed with failures: {}",
-                        failures.join("; ")
-                    );
+                    let output = saved_all.join("\n");
+                    return Err(ReportCommandFailure::from_saved_report(
+                        format!(
+                            "report generation completed with failures: {}",
+                            failures.join("; ")
+                        ),
+                        &output,
+                    )
+                    .into());
                 }
 
                 Ok(format!(
@@ -606,24 +816,20 @@ impl ReportCommand {
 }
 
 fn execute_restore_drill_with_runner<R: ResticRunner + ?Sized>(
-    config: &crate::config::model::BackupConfig,
+    config: &ReportConfig,
     runner: &R,
 ) -> Result<()> {
-    use secrecy::ExposeSecret;
+    if config.primary_repository.is_empty() || config.primary_password.expose_secret().is_empty() {
+        anyhow::bail!("restore drill requires a configured primary Backend Profile");
+    }
     let target = tempfile::tempdir()?;
     runner.restore(
-        &config.storage.primary.repository,
-        config.storage.primary.password.expose_secret(),
+        &config.primary_repository,
+        config.primary_password.expose_secret(),
         "latest",
         target.path().to_string_lossy().as_ref(),
     )?;
-    crate::commands::restore::validate_restored_output(
-        target.path(),
-        matches!(
-            config.backup.backup_type,
-            crate::config::model::BackupType::DbStream { .. }
-        ),
-    )?;
+    crate::commands::restore::validate_restored_output(target.path(), config.database_stream)?;
     Ok(())
 }
 
@@ -636,7 +842,7 @@ pub fn render_html_isms_report_with_type(
     report_type: ReportType,
     meta: &AuditReportMeta,
 ) -> String {
-    let config = crate::config::model::BackupConfig::default();
+    let config = ReportConfig::default();
     let data = RealReportData::collect_with_meta(&config, meta);
     html_template::render_html_real(report_type, &data)
 }
@@ -699,7 +905,29 @@ pub fn execute_report_export_with_runner<R: CommandRunner + ?Sized>(
     opts: ReportExportOptions,
     runner: &R,
 ) -> Result<String> {
-    let data = RealReportData::collect_with_meta_with_runner(opts.config, opts.meta, runner);
+    execute_report_export_with_report_config(
+        ReportExportOptionsForConfig {
+            report_type: opts.report_type,
+            file: opts.file,
+            format: opts.format,
+            output_dir: opts.output_dir,
+            meta: opts.meta,
+            config: opts.config,
+            failure_diagnostic: None,
+        },
+        runner,
+    )
+}
+
+pub fn execute_report_export_with_report_config<R: CommandRunner + ?Sized>(
+    opts: ReportExportOptionsForConfig,
+    runner: &R,
+) -> Result<String> {
+    let mut data =
+        RealReportData::collect_with_report_config_with_runner(opts.config, opts.meta, runner);
+    data.failure_diagnostic = opts
+        .failure_diagnostic
+        .map(|value| redact_report_diagnostic(&value, opts.config));
 
     let target_filename = match opts.report_type {
         ReportType::All => "audit_report",
@@ -749,6 +977,7 @@ pub fn execute_report_export_with_runner<R: CommandRunner + ?Sized>(
             ReportFormat::Html => html_template::render_html_real(opts.report_type, &data),
             ReportFormat::Json => json_schema::render_json_real(opts.report_type, &data)?,
         };
+        let content = render_failure_metadata(fmt, content, data.failure_diagnostic.as_deref())?;
 
         write_file_with_perms(&file_path, &content)?;
         saved_paths.push(file_path);
@@ -763,13 +992,91 @@ pub fn execute_report_export_with_runner<R: CommandRunner + ?Sized>(
     Ok(format!("ISMS report saved to {}", paths_str))
 }
 
+fn redact_report_diagnostic(value: &str, config: &ReportConfig) -> String {
+    let mut redacted = value.to_owned();
+    let secret = config.primary_password.expose_secret();
+    if !secret.is_empty() {
+        redacted = redacted.replace(secret, "******");
+    }
+    if !config.primary_repository.is_empty() {
+        redacted = redacted.replace(&config.primary_repository, "[repository masked]");
+    }
+    redacted
+}
+
+fn render_failure_metadata(
+    format: ReportFormat,
+    content: String,
+    diagnostic: Option<&str>,
+) -> Result<String> {
+    let Some(diagnostic) = diagnostic else {
+        return Ok(content);
+    };
+    match format {
+        ReportFormat::Html => Ok(format!(
+            "{content}\n<div class=\"report-failure\"><strong>Report status: Fail</strong><br>{}</div>\n",
+            escape_html(diagnostic)
+        )),
+        ReportFormat::Json => {
+            let mut value: serde_json::Value = serde_json::from_str(&content)?;
+            let object = value
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("report JSON root must be an object"))?;
+            object.insert("report_status".into(), serde_json::json!("Fail"));
+            object.insert("failure_diagnostic".into(), serde_json::json!(diagnostic));
+            Ok(serde_json::to_string_pretty(&value)?)
+        }
+    }
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReportFormat, escape_html, render_failure_metadata};
+
+    #[test]
+    fn failure_metadata_escapes_html_diagnostics() {
+        let rendered = render_failure_metadata(
+            ReportFormat::Html,
+            "<main>report</main>".into(),
+            Some("<secret> & \"quoted\""),
+        )
+        .unwrap();
+        assert!(rendered.contains("Report status: Fail"));
+        assert!(rendered.contains("&lt;secret&gt; &amp; &quot;quoted&quot;"));
+        assert!(!rendered.contains("<secret>"));
+        assert_eq!(escape_html("<"), "&lt;");
+    }
+
+    #[test]
+    fn failure_metadata_adds_structured_json_fields() {
+        let rendered = render_failure_metadata(
+            ReportFormat::Json,
+            r#"{"hostname":"host"}"#.into(),
+            Some("failed"),
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(value["report_status"], "Fail");
+        assert_eq!(value["failure_diagnostic"], "failed");
+    }
+}
+
 pub fn execute_report_file_export_with_type(
     report_type: ReportType,
     file: Option<&Path>,
     meta: &AuditReportMeta,
 ) -> Result<String> {
-    let default_config = crate::config::model::BackupConfig::default();
-    let default_output_dir = Path::new(&default_config.reports.output_dir);
+    let default_config = ReportConfig::default();
+    let default_output_dir = default_config.output_dir.as_path();
     let opts = ReportExportOptions {
         report_type,
         file,
@@ -792,12 +1099,12 @@ pub fn run_report(
     file: Option<PathBuf>,
     format: Option<ReportFormat>,
 ) -> Result<String> {
-    let config = crate::config::model::BackupConfig::load_from_path(config_path).map_err(|e| {
+    ResticProfileConfig::load_from_path(config_path).map_err(|e| {
         anyhow::anyhow!(
             "Configuration load error at {}: {}",
             config_path.display(),
             e
         )
     })?;
-    ReportCommand::run(action, file, format, &config)
+    ReportCommand::run(action, file, format, config_path)
 }

@@ -199,7 +199,7 @@ fn render_all_html(data: &RealReportData) -> String {
     </tr>
     <tr>
       <td class="label">저장소 주소</td>
-      <td>rclone:syno_backup:/backup/{}</td>
+      <td>{}</td>
     </tr>
     <tr>
       <td class="label">1차 백업 대상</td>
@@ -300,9 +300,9 @@ fn render_all_html(data: &RealReportData) -> String {
         COMMON_REPORT_CSS,
         data.timestamp,
         data.hostname,
-        data.hostname,
-        data.config.backup.targets.join(","),
-        data.config.backup.excludes.join(","),
+        data.config.primary_repository,
+        data.config.targets.join(","),
+        data.config.excludes.join(","),
         data.config.retention.keep_daily,
         data.config.retention.keep_weekly,
         data.config.retention.keep_monthly,
@@ -358,7 +358,7 @@ fn render_environment_html(data: &RealReportData) -> String {
     </tr>
     <tr>
       <td class="label">저장소 주소</td>
-      <td>rclone:syno_backup:/backup/{}</td>
+      <td>{}</td>
     </tr>
     <tr>
       <td class="label">1차 백업 대상</td>
@@ -470,8 +470,8 @@ fn render_environment_html(data: &RealReportData) -> String {
             .system_manager
             .as_deref()
             .unwrap_or("시스템 운영팀"),
-        data.hostname,
-        data.config.backup.targets.join(","),
+        data.config.primary_repository,
+        data.config.targets.join(","),
         data.config.retention.keep_daily,
         data.config.retention.keep_weekly,
         data.config.retention.keep_monthly,
@@ -673,7 +673,7 @@ fn render_restore_drill_html(data: &RealReportData) -> String {
 }
 
 pub fn render_html(report_type: ReportType, _results: &AuditDiagnosticResults) -> String {
-    let config = crate::config::model::BackupConfig::default();
+    let config = crate::commands::report::ReportConfig::default();
     let data = RealReportData::collect(&config);
     render_html_real(report_type, &data)
 }

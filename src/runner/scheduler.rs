@@ -7,13 +7,39 @@ use tempfile::NamedTempFile;
 const UNIT_NAME: &str = "backup-pipeline";
 const CRON_MARKER: &str = "# backup-pipeline";
 const CRON_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-const DEFAULT_CALENDAR: &str = "*-*-* 03:00:00";
+pub const DEFAULT_SCHEDULE_CALENDAR: &str = "*-*-* 03:00:00";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchedulerMode {
     Auto,
     Systemd,
     Cron,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchedulerSettings {
+    pub mode: SchedulerMode,
+    pub calendar: String,
+    pub force_cron: bool,
+}
+
+impl SchedulerSettings {
+    pub fn new(mode: SchedulerMode, calendar: impl Into<String>) -> Self {
+        Self {
+            mode,
+            calendar: calendar.into(),
+            force_cron: false,
+        }
+    }
+
+    pub fn with_force_cron(mut self, force_cron: bool) -> Self {
+        self.force_cron = force_cron;
+        self
+    }
+
+    pub fn auto() -> Self {
+        Self::new(SchedulerMode::Auto, DEFAULT_SCHEDULE_CALENDAR)
+    }
 }
 
 pub trait BackupScheduler {
@@ -32,6 +58,22 @@ pub trait BackupScheduler {
     fn status_with_mode(&self, _mode: SchedulerMode) -> Result<String> {
         self.status()
     }
+
+    fn enable_with_settings(
+        &self,
+        profiles_path: &Path,
+        settings: &SchedulerSettings,
+    ) -> Result<String> {
+        self.enable_with_mode(profiles_path, settings.mode)
+    }
+
+    fn disable_with_settings(&self, settings: &SchedulerSettings) -> Result<String> {
+        self.disable_with_mode(settings.mode)
+    }
+
+    fn status_with_settings(&self, settings: &SchedulerSettings) -> Result<String> {
+        self.status_with_mode(settings.mode)
+    }
 }
 
 pub struct SystemScheduler<'a, E: CommandRunner> {
@@ -47,16 +89,12 @@ impl<'a, E: CommandRunner> SystemScheduler<'a, E> {
         }
     }
 
-    fn systemd_available(&self, mode: SchedulerMode) -> Result<bool> {
-        match mode {
+    fn systemd_available(&self, settings: &SchedulerSettings) -> Result<bool> {
+        match settings.mode {
             SchedulerMode::Systemd => Ok(true),
             SchedulerMode::Cron => Ok(false),
-            SchedulerMode::Auto => {
-                if std::env::var_os("BACKUP_TEST_FORCE_CRON").is_some() {
-                    return Ok(false);
-                }
-                Ok(self.executor.run("systemctl", &["--version"])?.status_code == 0)
-            }
+            SchedulerMode::Auto => Ok(!settings.force_cron
+                && self.executor.run("systemctl", &["--version"])?.status_code == 0),
         }
     }
 
@@ -89,12 +127,23 @@ impl<'a, E: CommandRunner> SystemScheduler<'a, E> {
 
 impl<'a, E: CommandRunner> BackupScheduler for SystemScheduler<'a, E> {
     fn enable(&self, profiles_path: &Path) -> Result<String> {
-        self.enable_with_mode(profiles_path, SchedulerMode::Auto)
+        self.enable_with_settings(profiles_path, &SchedulerSettings::auto())
     }
 
     fn enable_with_mode(&self, profiles_path: &Path, mode: SchedulerMode) -> Result<String> {
+        self.enable_with_settings(
+            profiles_path,
+            &SchedulerSettings::new(mode, DEFAULT_SCHEDULE_CALENDAR),
+        )
+    }
+
+    fn enable_with_settings(
+        &self,
+        profiles_path: &Path,
+        settings: &SchedulerSettings,
+    ) -> Result<String> {
         let profiles = profiles_path.to_string_lossy();
-        if self.systemd_available(mode)? {
+        if self.systemd_available(settings)? {
             // A transient timer keeps its unit name until stopped.  Clearing an existing timer
             // makes repeated `backup schedule enable` registrations replace the prior run.
             let _ = self
@@ -114,7 +163,7 @@ impl<'a, E: CommandRunner> BackupScheduler for SystemScheduler<'a, E> {
                 &[
                     "--unit",
                     UNIT_NAME,
-                    &format!("--on-calendar={}", schedule_calendar()),
+                    &format!("--on-calendar={}", settings.calendar),
                     "--timer-property=Persistent=true",
                     &self.binary,
                     "--profiles",
@@ -131,17 +180,22 @@ impl<'a, E: CommandRunner> BackupScheduler for SystemScheduler<'a, E> {
             .filter(|line| !line.contains(CRON_MARKER))
             .collect::<Vec<_>>()
             .join("\n");
-        let line = cron_entry(&self.binary, &profiles, &cron_schedule());
+        let schedule = cron_schedule(&settings.calendar)?;
+        let line = cron_entry(&self.binary, &profiles, &schedule);
         self.install_cron(format!("{}\n{}\n", filtered.trim(), line))?;
         Ok("Scheduled daily backup run with cron".into())
     }
 
     fn disable(&self) -> Result<String> {
-        self.disable_with_mode(SchedulerMode::Auto)
+        self.disable_with_settings(&SchedulerSettings::auto())
     }
 
     fn disable_with_mode(&self, mode: SchedulerMode) -> Result<String> {
-        if self.systemd_available(mode)? {
+        self.disable_with_settings(&SchedulerSettings::new(mode, DEFAULT_SCHEDULE_CALENDAR))
+    }
+
+    fn disable_with_settings(&self, settings: &SchedulerSettings) -> Result<String> {
+        if self.systemd_available(settings)? {
             let stop = self
                 .executor
                 .run("systemctl", &["stop", "backup-pipeline.timer"])?;
@@ -170,11 +224,15 @@ impl<'a, E: CommandRunner> BackupScheduler for SystemScheduler<'a, E> {
     }
 
     fn status(&self) -> Result<String> {
-        self.status_with_mode(SchedulerMode::Auto)
+        self.status_with_settings(&SchedulerSettings::auto())
     }
 
     fn status_with_mode(&self, mode: SchedulerMode) -> Result<String> {
-        if self.systemd_available(mode)? {
+        self.status_with_settings(&SchedulerSettings::new(mode, DEFAULT_SCHEDULE_CALENDAR))
+    }
+
+    fn status_with_settings(&self, settings: &SchedulerSettings) -> Result<String> {
+        if self.systemd_available(settings)? {
             let output = self
                 .executor
                 .run("systemctl", &["is-active", "backup-pipeline.timer"])?;
@@ -195,15 +253,11 @@ impl<'a, E: CommandRunner> BackupScheduler for SystemScheduler<'a, E> {
     }
 }
 
-fn schedule_calendar() -> String {
-    std::env::var("BACKUP_TEST_SCHEDULE_CALENDAR").unwrap_or_else(|_| DEFAULT_CALENDAR.into())
-}
-
-fn cron_schedule() -> String {
-    if std::env::var_os("BACKUP_TEST_SCHEDULE_CALENDAR").is_some() {
-        "* * * * *".into()
-    } else {
-        "0 3 * * *".into()
+fn cron_schedule(calendar: &str) -> Result<String> {
+    match calendar {
+        DEFAULT_SCHEDULE_CALENDAR => Ok("0 3 * * *".into()),
+        "*-*-* *:*:00" => Ok("* * * * *".into()),
+        _ => bail!("calendar '{calendar}' cannot be represented safely by cron; use systemd mode"),
     }
 }
 

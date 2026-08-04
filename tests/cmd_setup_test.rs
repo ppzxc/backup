@@ -476,13 +476,13 @@ fn test_setup_auto_detects_language_when_lang_opt_none() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("profiles.yaml");
 
-    // lang_opt = None으로 호출 → run_setup_with_prompter 내부에서 detect()로 채워 Some(..)으로 전달
+    // lang_opt = None으로 호출해도 setup은 명시적인 기본 언어를 전달해야 한다.
     let _ = run_setup_with_prompter(&config_path, &prompter, false, None);
 
     let captured = received.lock().unwrap();
     assert!(
         captured.is_some(),
-        "lang_opt이 None이면 Language::detect()로 채워 Some(..)을 prompter에 전달해야 합니다"
+        "lang_opt이 None이어도 명시적인 기본 언어를 prompter에 전달해야 합니다"
     );
 }
 
