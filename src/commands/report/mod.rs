@@ -2,6 +2,7 @@ pub mod html_template;
 pub mod json_schema;
 
 use crate::runner::executor::{CommandRunner, SystemExecutor};
+use crate::runner::restic::{ResticRunner, ResticTool};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -127,6 +128,15 @@ impl RealReportData {
         config: &crate::config::model::BackupConfig,
         meta: &AuditReportMeta,
     ) -> Self {
+        let executor = SystemExecutor;
+        Self::collect_with_meta_with_runner(config, meta, &executor)
+    }
+
+    pub fn collect_with_meta_with_runner<R: CommandRunner + ?Sized>(
+        config: &crate::config::model::BackupConfig,
+        meta: &AuditReportMeta,
+        runner: &R,
+    ) -> Self {
         let hostname = if !meta.host_name.is_empty() {
             meta.host_name.clone()
         } else {
@@ -142,33 +152,25 @@ impl RealReportData {
             default_ts
         };
 
-        let etc_backup_dir = Path::new("/etc/backup");
-        let backup_env_file = Path::new("/etc/backup/profiles.yaml");
+        let backup_env_file = meta
+            .profiles_path
+            .as_deref()
+            .unwrap_or_else(|| Path::new(crate::config::model::DEFAULT_PROFILES_PATH));
+        let etc_backup_dir = backup_env_file.parent().unwrap_or_else(|| Path::new("."));
 
         let (etc_backup_dir_perm, etc_backup_dir_safe) =
             get_file_perm_and_safety(etc_backup_dir, 0o700);
         let (backup_env_file_perm, backup_env_file_safe) =
             get_file_perm_and_safety(backup_env_file, 0o600);
 
-        let executor = SystemExecutor;
-        let (chrony_enabled, chrony_active) = check_service_status(&executor, "chrony");
-        let (chrony_sources, chrony_tracking) = collect_chrony_info(&executor);
+        let (chrony_enabled, chrony_active) = check_service_status(runner, "chrony");
+        let (chrony_sources, chrony_tracking) = collect_chrony_info(runner);
         let (chrony_conf_perm, _) = get_file_perm_and_safety(Path::new("/etc/chrony.conf"), 0o644);
 
-        let (timer_enabled, timer_active, next_run) = check_systemd_timer_status(&executor);
-        let os_info = collect_os_info(&executor);
+        let (timer_enabled, timer_active, next_run) = check_systemd_timer_status(runner);
+        let os_info = collect_os_info(runner);
 
-        let mut audit = config.audit.clone();
-        if audit.system_manager.is_none() && audit.security_officer.is_none() {
-            let profiles_yaml_path = Path::new("/etc/backup/profiles.yaml");
-            if let Ok(profile_cfg) =
-                crate::config::model::ResticProfileConfig::load_from_path(profiles_yaml_path)
-            {
-                if let Some(loaded_audit) = profile_cfg.application.map(|app| app.audit) {
-                    audit = loaded_audit;
-                }
-            }
-        }
+        let audit = config.audit.clone();
 
         Self {
             hostname,
@@ -217,7 +219,10 @@ fn get_file_perm_and_safety(path: &Path, expected_mode: u32) -> (String, bool) {
     (format!("{:03o}", expected_mode), true)
 }
 
-fn check_service_status<R: CommandRunner>(runner: &R, service_name: &str) -> (String, String) {
+fn check_service_status<R: CommandRunner + ?Sized>(
+    runner: &R,
+    service_name: &str,
+) -> (String, String) {
     let enabled_out = runner.run("systemctl", &["is-enabled", service_name]);
     let enabled = match enabled_out {
         Ok(out) if out.status_code == 0 => "enabled".to_string(),
@@ -246,7 +251,7 @@ fn check_service_status<R: CommandRunner>(runner: &R, service_name: &str) -> (St
     )
 }
 
-fn collect_chrony_info<R: CommandRunner>(runner: &R) -> (String, String) {
+fn collect_chrony_info<R: CommandRunner + ?Sized>(runner: &R) -> (String, String) {
     let sources_out = runner.run("chronyc", &["sources"]);
     let sources = match sources_out {
         Ok(out) => out.stdout,
@@ -262,7 +267,7 @@ fn collect_chrony_info<R: CommandRunner>(runner: &R) -> (String, String) {
     (sources, tracking)
 }
 
-fn check_systemd_timer_status<R: CommandRunner>(runner: &R) -> (String, String, String) {
+fn check_systemd_timer_status<R: CommandRunner + ?Sized>(runner: &R) -> (String, String, String) {
     let (enabled, active) = check_service_status(runner, "backup.timer");
     let list_out = runner.run("systemctl", &["list-timers", "backup.timer", "--no-legend"]);
 
@@ -281,7 +286,7 @@ fn check_systemd_timer_status<R: CommandRunner>(runner: &R) -> (String, String, 
     (enabled, active, next_run)
 }
 
-fn collect_os_info<R: CommandRunner>(runner: &R) -> String {
+fn collect_os_info<R: CommandRunner + ?Sized>(runner: &R) -> String {
     if let Ok(content) = fs::read_to_string("/etc/os-release") {
         for line in content.lines() {
             if line.starts_with("PRETTY_NAME=") {
@@ -385,6 +390,7 @@ pub type DoctorDiagnosticReport = AuditReport;
 pub struct AuditReportMeta {
     pub host_name: String,
     pub timestamp: String,
+    pub profiles_path: Option<PathBuf>,
 }
 
 impl AuditReportMeta {
@@ -396,13 +402,20 @@ impl AuditReportMeta {
         Self {
             host_name,
             timestamp,
+            profiles_path: None,
         }
+    }
+
+    pub fn with_profiles_path(mut self, profiles_path: impl Into<PathBuf>) -> Self {
+        self.profiles_path = Some(profiles_path.into());
+        self
     }
 
     pub fn new(host_name: impl Into<String>, timestamp: impl Into<String>) -> Self {
         Self {
             host_name: host_name.into(),
             timestamp: timestamp.into(),
+            profiles_path: None,
         }
     }
 }
@@ -451,7 +464,40 @@ impl ReportCommand {
         format: Option<ReportFormat>,
         config: &crate::config::model::BackupConfig,
     ) -> Result<String> {
+        let executor = SystemExecutor;
+        let restic = ResticTool::new(&executor);
+        Self::run_with_adapters(action, file, format, config, &executor, &restic)
+    }
+
+    pub fn run_with_adapters<C: CommandRunner + ?Sized, R: ResticRunner + ?Sized>(
+        action: Option<ReportAction>,
+        file: Option<PathBuf>,
+        format: Option<ReportFormat>,
+        config: &crate::config::model::BackupConfig,
+        command_runner: &C,
+        restic_runner: &R,
+    ) -> Result<String> {
         let meta = AuditReportMeta::current();
+        Self::run_with_adapters_and_meta(
+            action,
+            file,
+            format,
+            config,
+            command_runner,
+            restic_runner,
+            &meta,
+        )
+    }
+
+    pub fn run_with_adapters_and_meta<C: CommandRunner + ?Sized, R: ResticRunner + ?Sized>(
+        action: Option<ReportAction>,
+        file: Option<PathBuf>,
+        format: Option<ReportFormat>,
+        config: &crate::config::model::BackupConfig,
+        command_runner: &C,
+        restic_runner: &R,
+        meta: &AuditReportMeta,
+    ) -> Result<String> {
         let output_dir = Path::new(&config.reports.output_dir);
 
         match action {
@@ -468,7 +514,7 @@ impl ReportCommand {
                     meta: &meta,
                     config,
                 };
-                execute_report_export(opts)
+                execute_report_export_with_runner(opts, command_runner)
             }
             Some(ReportAction::TimeSync {
                 file: sub_file,
@@ -483,13 +529,13 @@ impl ReportCommand {
                     meta: &meta,
                     config,
                 };
-                execute_report_export(opts)
+                execute_report_export_with_runner(opts, command_runner)
             }
             Some(ReportAction::RestoreDrill {
                 file: sub_file,
                 format: sub_format,
             }) => {
-                execute_restore_drill(config)?;
+                let drill_error = execute_restore_drill_with_runner(config, restic_runner).err();
                 let final_file = sub_file.or(file);
                 let opts = ReportExportOptions {
                     report_type: ReportType::RestoreDrill,
@@ -499,7 +545,18 @@ impl ReportCommand {
                     meta: &meta,
                     config,
                 };
-                execute_report_export(opts)
+                let report = execute_report_export_with_runner(opts, command_runner);
+                match (drill_error, report) {
+                    (None, report) => report,
+                    (Some(drill_error), Ok(report)) => {
+                        anyhow::bail!(
+                            "restore drill failed: {drill_error}; failure report: {report}"
+                        )
+                    }
+                    (Some(drill_error), Err(report_error)) => anyhow::bail!(
+                        "restore drill failed: {drill_error}; failure report also failed: {report_error}"
+                    ),
+                }
             }
             None => {
                 // Execute subcommands 3종 (Environment, TimeSync, RestoreDrill)
@@ -510,9 +567,13 @@ impl ReportCommand {
                 ];
 
                 let mut saved_all = Vec::new();
+                let mut failures = Vec::new();
                 for r_type in report_types {
                     if r_type == ReportType::RestoreDrill {
-                        execute_restore_drill(config)?;
+                        if let Err(error) = execute_restore_drill_with_runner(config, restic_runner)
+                        {
+                            failures.push(format!("restore drill: {error}"));
+                        }
                     }
                     let opts = ReportExportOptions {
                         report_type: r_type,
@@ -522,8 +583,17 @@ impl ReportCommand {
                         meta: &meta,
                         config,
                     };
-                    let res_msg = execute_report_export(opts)?;
-                    saved_all.push(res_msg);
+                    match execute_report_export_with_runner(opts, command_runner) {
+                        Ok(res_msg) => saved_all.push(res_msg),
+                        Err(error) => failures.push(format!("{r_type:?} report: {error}")),
+                    }
+                }
+
+                if !failures.is_empty() {
+                    anyhow::bail!(
+                        "report generation completed with failures: {}",
+                        failures.join("; ")
+                    );
                 }
 
                 Ok(format!(
@@ -535,11 +605,11 @@ impl ReportCommand {
     }
 }
 
-fn execute_restore_drill(config: &crate::config::model::BackupConfig) -> Result<()> {
-    use crate::runner::restic::{ResticRunner, ResticTool};
+fn execute_restore_drill_with_runner<R: ResticRunner + ?Sized>(
+    config: &crate::config::model::BackupConfig,
+    runner: &R,
+) -> Result<()> {
     use secrecy::ExposeSecret;
-    let executor = SystemExecutor;
-    let runner = ResticTool::new(&executor);
     let target = tempfile::tempdir()?;
     runner.restore(
         &config.storage.primary.repository,
@@ -572,11 +642,64 @@ pub fn render_html_isms_report_with_type(
 }
 
 fn write_file_with_perms(file_path: &Path, content: &str) -> Result<()> {
-    crate::config::model::save_secure_file(file_path, content)
+    use std::io::Write;
+
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    let parent = file_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(content.as_bytes())?;
+    temporary.flush()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o600))?;
+    }
+    temporary.persist(file_path).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to atomically write {}: {}",
+            file_path.display(),
+            error
+        )
+    })?;
+    Ok(())
+}
+
+fn collision_safe_path(path: PathBuf) -> PathBuf {
+    if !path.exists() {
+        return path;
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = path
+        .extension()
+        .map(|extension| format!(".{}", extension.to_string_lossy()))
+        .unwrap_or_default();
+    for index in 1.. {
+        let candidate = parent.join(format!("{stem}-{index}{extension}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("collision search must find a path");
 }
 
 pub fn execute_report_export(opts: ReportExportOptions) -> Result<String> {
-    let data = RealReportData::collect_with_meta(opts.config, opts.meta);
+    let executor = SystemExecutor;
+    execute_report_export_with_runner(opts, &executor)
+}
+
+pub fn execute_report_export_with_runner<R: CommandRunner + ?Sized>(
+    opts: ReportExportOptions,
+    runner: &R,
+) -> Result<String> {
+    let data = RealReportData::collect_with_meta_with_runner(opts.config, opts.meta, runner);
 
     let target_filename = match opts.report_type {
         ReportType::All => "audit_report",
@@ -600,7 +723,7 @@ pub fn execute_report_export(opts: ReportExportOptions) -> Result<String> {
             ReportFormat::Json => "json",
         };
 
-        let file_path = match opts.file {
+        let mut file_path = match opts.file {
             Some(f) => {
                 let parent = f.parent().unwrap_or_else(|| Path::new("."));
                 let file_name = f.file_name().unwrap_or_default().to_string_lossy();
@@ -617,6 +740,10 @@ pub fn execute_report_export(opts: ReportExportOptions) -> Result<String> {
                 .output_dir
                 .join(format!("{}_{}.{}", date_prefix, target_filename, ext)),
         };
+
+        if opts.file.is_none() {
+            file_path = collision_safe_path(file_path);
+        }
 
         let content = match fmt {
             ReportFormat::Html => html_template::render_html_real(opts.report_type, &data),

@@ -113,15 +113,36 @@ fn test_setup_subcommand_help_english() {
 }
 
 #[test]
+fn explicit_setup_language_overrides_environment_for_help() {
+    let mut cmd = Command::cargo_bin("backup").unwrap();
+    let assert = cmd
+        .env("LANG", "ko_KR.UTF-8")
+        .env_remove("LC_ALL")
+        .args(["setup", "--lang", "en", "--help"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("wizard"));
+    assert!(!stdout.contains("마법사"));
+}
+
+#[test]
+fn invalid_setup_language_fails_before_help_or_dispatch() {
+    let mut cmd = Command::cargo_bin("backup").unwrap();
+    cmd.args(["setup", "--lang", "fr", "--help"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("invalid language"));
+}
+
+#[test]
 fn test_subcommands_not_placeholder() {
     let subcommands = vec![
         vec!["setup", "--help"],
         vec!["run", "--help"],
-        vec!["doctor"],
         vec!["schedule", "--help"],
         vec!["restore", "--help"],
         vec!["snapshots", "--help"],
-        vec!["status"],
         vec!["update"],
         vec!["uninstall", "--help"],
     ];
@@ -136,6 +157,21 @@ fn test_subcommands_not_placeholder() {
             args
         );
     }
+
+    let temp = tempfile::tempdir().unwrap();
+    let profiles = temp.path().join("profiles.yaml");
+    std::fs::write(
+        &profiles,
+        "version: '2'\nprofiles:\n  default:\n    repository: /tmp/repo\n    backup:\n      source: ['/tmp']\n",
+    )
+    .unwrap();
+    let assert = Command::cargo_bin("backup")
+        .unwrap()
+        .args(["--profiles", profiles.to_str().unwrap(), "status"])
+        .assert()
+        .success();
+    let output = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(!output.contains("Command executed"));
 }
 
 #[test]
@@ -144,11 +180,11 @@ fn test_cli_logging_flags() {
     let temp_log = tempfile::NamedTempFile::new().unwrap();
     let log_path = temp_log.path().to_str().unwrap();
 
-    let assert = cmd
+    let _assert = cmd
         .args(["-v", "-q", "--log-file", log_path, "version"])
         .assert()
-        .success();
-
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
+        .code(2)
+        .stderr(predicates::str::contains(
+            "--quiet cannot be combined with --verbose",
+        ));
 }

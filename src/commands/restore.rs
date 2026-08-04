@@ -122,7 +122,7 @@ pub fn execute_restore_from_storage<R: ResticRunner>(
     Ok(result)
 }
 
-pub fn execute_restore_from_profiles<R: ResticRunner>(
+pub fn execute_restore_from_profiles<R: ResticRunner + ?Sized>(
     config: &crate::config::model::ResticProfileConfig,
     config_path: &Path,
     runner: &R,

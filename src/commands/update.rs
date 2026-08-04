@@ -25,7 +25,7 @@ pub fn is_newer_version(current: &str, latest: &str) -> bool {
 }
 
 /// GitHub Releases API를 조회하여 최신 태그명과 다운로드 URL을 가져옵니다.
-pub fn fetch_latest_release_info_with_runner<R: CommandRunner>(
+pub fn fetch_latest_release_info_with_runner<R: CommandRunner + ?Sized>(
     runner: &R,
 ) -> Result<(String, String)> {
     let output = runner.run(
@@ -85,7 +85,7 @@ pub fn fetch_latest_release_info() -> Result<(String, String)> {
 }
 
 /// 현재 실행 바이너리를 다운로드한 새 바이너리로 교체합니다.
-pub fn perform_self_replace_with_runner<R: CommandRunner>(
+pub fn perform_self_replace_with_runner<R: CommandRunner + ?Sized>(
     download_url: &str,
     runner: &R,
 ) -> Result<()> {
@@ -141,7 +141,7 @@ pub fn perform_self_replace(download_url: &str) -> Result<()> {
 }
 
 /// 자가 업데이트 실행 및 결과 메시지를 반환합니다.
-pub fn execute_update_check_with_runner<R: CommandRunner>(
+pub fn execute_update_check_with_runner<R: CommandRunner + ?Sized>(
     current_version: &str,
     runner: &R,
 ) -> Result<String> {

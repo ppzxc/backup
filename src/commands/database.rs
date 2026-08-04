@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use secrecy::ExposeSecret;
 use std::path::Path;
 
-pub fn execute_database_backup_from_profiles<R: ResticRunner>(
+pub fn execute_database_backup_from_profiles<R: ResticRunner + ?Sized>(
     config: &crate::config::model::ResticProfileConfig,
     config_path: &Path,
     runner: &R,

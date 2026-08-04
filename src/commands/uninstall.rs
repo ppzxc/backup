@@ -16,7 +16,7 @@ pub fn perform_uninstall<R: ResticProfileRunner>(
     perform_uninstall_at_path(profiles_path, runner, yes, purge)
 }
 
-pub fn perform_uninstall_at_path<R: ResticProfileRunner>(
+pub fn perform_uninstall_at_path<R: ResticProfileRunner + ?Sized>(
     profiles_path: &Path,
     runner: &R,
     yes: bool,
@@ -35,7 +35,10 @@ pub fn perform_uninstall_with_executor<R: ResticProfileRunner, E: CommandRunner>
     perform_uninstall_with_executor_at_path(profiles_path, runner, executor, yes, purge)
 }
 
-pub fn perform_uninstall_with_executor_at_path<R: ResticProfileRunner, E: CommandRunner>(
+pub fn perform_uninstall_with_executor_at_path<
+    R: ResticProfileRunner + ?Sized,
+    E: CommandRunner + ?Sized,
+>(
     profiles_path: &Path,
     runner: &R,
     executor: &E,

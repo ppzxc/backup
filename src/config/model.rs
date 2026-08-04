@@ -473,6 +473,13 @@ impl BackupConfig {
 
     pub fn load_from_path(path: &Path) -> Result<Self> {
         let profiles = ResticProfileConfig::load_from_path(path)?;
+        Self::from_profile_config(&profiles, path)
+    }
+
+    /// Builds the compatibility/report view from an already validated unified profile model.
+    /// Operational command dispatch must load and validate `ResticProfileConfig` first; this
+    /// projection is retained only for report rendering and legacy public APIs.
+    pub fn from_profile_config(profiles: &ResticProfileConfig, path: &Path) -> Result<Self> {
         let application = profiles.application.clone().unwrap_or_default();
         let profile_name = application
             .database

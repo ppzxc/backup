@@ -15,8 +15,10 @@
 !/Cargo.lock
 !/src/
 !/src/**
+!/src/cli.rs
 !/tests/
 !/tests/**
+!/tests/cli_contract_test.rs
 !/.superpowers/
 !/.superpowers/**
 !/docs/
@@ -24,6 +26,7 @@
 !/docs/prd-codebase-architecture-improvements.md
 !/docs/adr/
 !/docs/adr/**
+!/docs/adr/0017-exhaustive-cli-command-contract-matrix.md
 !/docs/agents/
 !/docs/agents/**
 !/docs/reference/

@@ -364,6 +364,14 @@ fn test_run_setup_dependencies_with_mock_runner() {
         "which",
         CommandOutput {
             status_code: 0,
+            stdout: "/usr/bin/rclone\n".into(),
+            stderr: "".into(),
+        },
+    );
+    mock.push_output(
+        "which",
+        CommandOutput {
+            status_code: 0,
             stdout: "/usr/bin/resticprofile\n".into(),
             stderr: "".into(),
         },

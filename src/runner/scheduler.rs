@@ -1,5 +1,5 @@
 use crate::runner::executor::{CommandOutput, CommandRunner};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::io::Write;
 use std::path::Path;
 use tempfile::NamedTempFile;
@@ -9,10 +9,29 @@ const CRON_MARKER: &str = "# backup-pipeline";
 const CRON_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const DEFAULT_CALENDAR: &str = "*-*-* 03:00:00";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerMode {
+    Auto,
+    Systemd,
+    Cron,
+}
+
 pub trait BackupScheduler {
     fn enable(&self, profiles_path: &Path) -> Result<String>;
     fn disable(&self) -> Result<String>;
     fn status(&self) -> Result<String>;
+
+    fn enable_with_mode(&self, profiles_path: &Path, _mode: SchedulerMode) -> Result<String> {
+        self.enable(profiles_path)
+    }
+
+    fn disable_with_mode(&self, _mode: SchedulerMode) -> Result<String> {
+        self.disable()
+    }
+
+    fn status_with_mode(&self, _mode: SchedulerMode) -> Result<String> {
+        self.status()
+    }
 }
 
 pub struct SystemScheduler<'a, E: CommandRunner> {
@@ -28,11 +47,17 @@ impl<'a, E: CommandRunner> SystemScheduler<'a, E> {
         }
     }
 
-    fn systemd_available(&self) -> Result<bool> {
-        if std::env::var_os("BACKUP_TEST_FORCE_CRON").is_some() {
-            return Ok(false);
+    fn systemd_available(&self, mode: SchedulerMode) -> Result<bool> {
+        match mode {
+            SchedulerMode::Systemd => Ok(true),
+            SchedulerMode::Cron => Ok(false),
+            SchedulerMode::Auto => {
+                if std::env::var_os("BACKUP_TEST_FORCE_CRON").is_some() {
+                    return Ok(false);
+                }
+                Ok(self.executor.run("systemctl", &["--version"])?.status_code == 0)
+            }
         }
-        Ok(self.executor.run("systemctl", &["--version"])?.status_code == 0)
     }
 
     fn checked(&self, program: &str, args: &[&str]) -> Result<String> {
@@ -64,8 +89,12 @@ impl<'a, E: CommandRunner> SystemScheduler<'a, E> {
 
 impl<'a, E: CommandRunner> BackupScheduler for SystemScheduler<'a, E> {
     fn enable(&self, profiles_path: &Path) -> Result<String> {
+        self.enable_with_mode(profiles_path, SchedulerMode::Auto)
+    }
+
+    fn enable_with_mode(&self, profiles_path: &Path, mode: SchedulerMode) -> Result<String> {
         let profiles = profiles_path.to_string_lossy();
-        if self.systemd_available()? {
+        if self.systemd_available(mode)? {
             // A transient timer keeps its unit name until stopped.  Clearing an existing timer
             // makes repeated `backup schedule enable` registrations replace the prior run.
             let _ = self
@@ -108,7 +137,11 @@ impl<'a, E: CommandRunner> BackupScheduler for SystemScheduler<'a, E> {
     }
 
     fn disable(&self) -> Result<String> {
-        if self.systemd_available()? {
+        self.disable_with_mode(SchedulerMode::Auto)
+    }
+
+    fn disable_with_mode(&self, mode: SchedulerMode) -> Result<String> {
+        if self.systemd_available(mode)? {
             let stop = self
                 .executor
                 .run("systemctl", &["stop", "backup-pipeline.timer"])?;
@@ -137,8 +170,21 @@ impl<'a, E: CommandRunner> BackupScheduler for SystemScheduler<'a, E> {
     }
 
     fn status(&self) -> Result<String> {
-        if self.systemd_available()? {
-            return self.checked("systemctl", &["is-active", "backup-pipeline.timer"]);
+        self.status_with_mode(SchedulerMode::Auto)
+    }
+
+    fn status_with_mode(&self, mode: SchedulerMode) -> Result<String> {
+        if self.systemd_available(mode)? {
+            let output = self
+                .executor
+                .run("systemctl", &["is-active", "backup-pipeline.timer"])?;
+            if output.status_code == 0 {
+                return Ok(output.stdout);
+            }
+            if output.stdout.trim().is_empty() {
+                bail!("systemctl failed: {}", error_message(&output));
+            }
+            return Ok(output.stdout.trim().into());
         }
         let cron = self.cron_contents()?;
         Ok(if cron.contains(CRON_MARKER) {
@@ -193,7 +239,9 @@ mod tests {
             "* * * * *",
         );
 
-        assert!(entry.contains("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"));
+        assert!(
+            entry.contains("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        );
         assert!(entry.contains("/usr/local/bin/backup"));
     }
 }

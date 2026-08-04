@@ -2,7 +2,7 @@ use crate::runner::resticprofile::ResticProfileRunner;
 use anyhow::Result;
 use std::path::Path;
 
-pub fn execute_copy<R: ResticProfileRunner>(
+pub fn execute_copy<R: ResticProfileRunner + ?Sized>(
     runner: &R,
     config_path: &Path,
     profile: &str,

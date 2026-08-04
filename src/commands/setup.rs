@@ -741,8 +741,8 @@ impl SetupEngine {
 
     pub fn run<
         P: SetupPrompter,
-        R: crate::runner::resticprofile::ResticProfileRunner,
-        S: crate::runner::scheduler::BackupScheduler,
+        R: crate::runner::resticprofile::ResticProfileRunner + ?Sized,
+        S: crate::runner::scheduler::BackupScheduler + ?Sized,
     >(
         profiles_path: &Path,
         prompter: &P,
@@ -932,8 +932,8 @@ impl LiveConfigSnapshot {
 
 pub fn run_setup_with_prompter_and_runners<
     P: SetupPrompter,
-    R: crate::runner::resticprofile::ResticProfileRunner,
-    S: crate::runner::scheduler::BackupScheduler,
+    R: crate::runner::resticprofile::ResticProfileRunner + ?Sized,
+    S: crate::runner::scheduler::BackupScheduler + ?Sized,
 >(
     profiles_path: &Path,
     prompter: &P,
@@ -1007,9 +1007,20 @@ fn is_dir_writable(path: &str) -> bool {
     }
 }
 
-pub fn run_setup_dependencies_with_runner<R: CommandRunner>(runner: &R) -> Result<String> {
+pub fn run_setup_dependencies_with_runner<R: CommandRunner + ?Sized>(runner: &R) -> Result<String> {
+    run_setup_dependencies_with_runner_and_language(runner, Language::En)
+}
+
+pub fn run_setup_dependencies_with_runner_and_language<R: CommandRunner + ?Sized>(
+    runner: &R,
+    language: Language,
+) -> Result<String> {
     let mut report = String::new();
-    report.push_str("Checking binary dependencies...\n");
+    let mut failures = Vec::new();
+    report.push_str(match language {
+        Language::Ko => "바이너리 의존성을 확인하는 중...\n",
+        Language::En => "Checking binary dependencies...\n",
+    });
 
     let home_bin = std::env::var("HOME")
         .map(|h| format!("{}/.local/bin", h))
@@ -1042,20 +1053,101 @@ pub fn run_setup_dependencies_with_runner<R: CommandRunner>(runner: &R) -> Resul
         match status {
             Ok(out) if out.status_code == 0 => {
                 let path = out.stdout.trim().to_string();
-                report.push_str(&format!("{}: OK ({})\n", bin, path));
+                if path.is_empty() {
+                    failures.push(format!("{bin}: which returned an empty executable path"));
+                    report.push_str(&format!("{bin}: FAILED (empty executable path)\n"));
+                } else {
+                    match runner.run(bin, &["version"]) {
+                        Ok(version) if version.status_code == 0 => {
+                            report.push_str(&format!("{}: OK ({})\n", bin, path));
+                        }
+                        Ok(version) => {
+                            failures.push(format!(
+                                "{bin}: execution verification failed with status {}",
+                                version.status_code
+                            ));
+                            report.push_str(&format!("{bin}: FAILED (execution verification)\n"));
+                        }
+                        Err(error) => {
+                            failures.push(format!("{bin}: execution verification failed: {error}"));
+                            report.push_str(&format!("{bin}: FAILED (execution verification)\n"));
+                        }
+                    }
+                }
             }
             _ => {
                 report.push_str(&format!("{}: MISSING -> Installing from {}\n", bin, url));
                 let cmd = build_download_command(bin, url, &install_target_dir);
-                let _ = runner.run("sh", &["-c", &cmd]);
-                report.push_str(&format!(
-                    "{}: Installed to {}/{}\n",
-                    bin, install_target_dir, bin
-                ));
+                let install = runner.run("sh", &["-c", &cmd]);
+                match install {
+                    Ok(out) if out.status_code == 0 => match runner.run("which", &[bin]) {
+                        Ok(verify)
+                            if verify.status_code == 0 && !verify.stdout.trim().is_empty() =>
+                        {
+                            match runner.run(bin, &["version"]) {
+                                Ok(version) if version.status_code == 0 => {
+                                    report.push_str(&format!(
+                                        "{}: Installed to {}\n",
+                                        bin,
+                                        verify.stdout.trim()
+                                    ));
+                                }
+                                Ok(version) => {
+                                    failures.push(format!(
+                                        "{bin}: execution verification failed with status {}",
+                                        version.status_code
+                                    ));
+                                    report.push_str(&format!(
+                                        "{bin}: FAILED (execution verification)\n"
+                                    ));
+                                }
+                                Err(error) => {
+                                    failures.push(format!(
+                                        "{bin}: execution verification failed: {error}"
+                                    ));
+                                    report.push_str(&format!(
+                                        "{bin}: FAILED (execution verification)\n"
+                                    ));
+                                }
+                            }
+                        }
+                        Ok(verify) => {
+                            failures.push(format!(
+                                "{bin}: installation verification failed with status {}",
+                                verify.status_code
+                            ));
+                            report.push_str(&format!("{bin}: FAILED (verification)\n"));
+                        }
+                        Err(error) => {
+                            failures
+                                .push(format!("{bin}: installation verification failed: {error}"));
+                            report.push_str(&format!("{bin}: FAILED (verification)\n"));
+                        }
+                    },
+                    Ok(out) => {
+                        failures.push(format!(
+                            "{bin}: installation failed with status {}: {}",
+                            out.status_code,
+                            out.stderr.trim()
+                        ));
+                        report.push_str(&format!("{bin}: FAILED (installation)\n"));
+                    }
+                    Err(error) => {
+                        failures.push(format!("{bin}: installation failed: {error}"));
+                        report.push_str(&format!("{bin}: FAILED (installation)\n"));
+                    }
+                }
             }
         }
     }
-    Ok(report)
+    if failures.is_empty() {
+        Ok(report)
+    } else {
+        anyhow::bail!(
+            "dependency verification failed: {}\n{report}",
+            failures.join("; ")
+        )
+    }
 }
 
 pub fn generate_secure_password() -> String {

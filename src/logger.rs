@@ -5,17 +5,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tracing::field::{Field, Visit};
 use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::field::RecordFields;
+use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
-use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::Layer;
+use tracing_subscriber::filter::filter_fn;
 
 pub const MASKED_VALUE: &str = "***MASKED***";
 
@@ -58,19 +58,21 @@ impl LogConfig {
 
 /// Resolves the level filter string from verbosity flags, quiet flag, and optional env override.
 pub fn determine_level_filter(verbose: u8, quiet: bool, env_override: Option<&str>) -> String {
+    if quiet {
+        return "warn".to_string();
+    }
+    if verbose > 0 {
+        return match verbose {
+            1 => "debug".to_string(),
+            _ => "trace".to_string(),
+        };
+    }
     if let Some(env_val) = env_override {
         if !env_val.is_empty() {
             return env_val.to_string();
         }
     }
-    if quiet {
-        return "warn".to_string();
-    }
-    match verbose {
-        0 => "info".to_string(),
-        1 => "debug".to_string(),
-        _ => "trace".to_string(),
-    }
+    "info".to_string()
 }
 
 /// Resolves the active system log target according to the 3-tier fallback policy:
@@ -201,9 +203,7 @@ pub fn init_logging(config: LogConfig) -> Result<(), anyhow::Error> {
         &config.level_filter
     };
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new(filter_str))
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_new(filter_str).unwrap_or_else(|_| EnvFilter::new("info"));
 
     let target = resolve_system_log_target(config.log_file.as_deref());
 
@@ -450,7 +450,9 @@ mod fallback_tests {
     fn test_resolve_system_log_target_default() {
         let target = resolve_system_log_target(None);
         match target {
-            SystemLogTarget::Journald(p) => assert_eq!(p, PathBuf::from("/run/systemd/journal/socket")),
+            SystemLogTarget::Journald(p) => {
+                assert_eq!(p, PathBuf::from("/run/systemd/journal/socket"))
+            }
             SystemLogTarget::Syslog(p) => assert_eq!(p, PathBuf::from("/dev/log")),
             SystemLogTarget::File(p) => assert!(p.to_string_lossy().contains("backup.log")),
         }

@@ -46,11 +46,7 @@ fn schedule_enable_propagates_runner_failure() {
 fn schedule_status_reports_unavailable_without_unified_backup_configuration() {
     let runner = MockScheduler::new(1, "systemd unavailable");
 
-    let status = execute_schedule_status(&runner).unwrap();
-
-    assert_eq!(
-        status,
-        "Schedule status: Inactive or scheduler unavailable (mock scheduler failed: systemd unavailable)"
-    );
+    let error = execute_schedule_status(&runner).unwrap_err();
+    assert!(error.to_string().contains("systemd unavailable"));
     assert_eq!(runner.calls.lock().unwrap().as_slice(), ["status"]);
 }

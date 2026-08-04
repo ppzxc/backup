@@ -180,13 +180,13 @@ fn redact_execution_report(config: &BackupConfig, report: &mut ExecutionReport) 
     }
 }
 
-pub struct PipelineEngine<'a, R: ResticProfileRunner> {
+pub struct PipelineEngine<'a, R: ResticProfileRunner + ?Sized> {
     runner: &'a R,
 }
 
 pub type BackupRunner<'a, R> = PipelineEngine<'a, R>;
 
-impl<'a, R: ResticProfileRunner> PipelineEngine<'a, R> {
+impl<'a, R: ResticProfileRunner + ?Sized> PipelineEngine<'a, R> {
     pub fn new(runner: &'a R) -> Self {
         Self { runner }
     }
@@ -213,14 +213,22 @@ impl<'a, R: ResticProfileRunner> PipelineEngine<'a, R> {
     }
 }
 
-pub fn resolve_profiles(config_path: &Path, profile: Option<&str>) -> Result<Vec<String>> {
+pub fn resolve_profiles(
+    config: &crate::config::model::ResticProfileConfig,
+    profile: Option<&str>,
+) -> Result<Vec<String>> {
     let _span = info_span!("profile resolution").entered();
     if let Some(p) = profile {
+        if p.trim().is_empty() || p != p.trim() {
+            anyhow::bail!("profile must be an exact, non-empty configured profile name");
+        }
+        if !config.profile_names().iter().any(|name| name == p) {
+            anyhow::bail!("profile '{p}' is not configured");
+        }
         info!(profile = %p, "Resolved target profile");
         Ok(vec![p.to_string()])
     } else {
-        let parsed = crate::config::model::ResticProfileConfig::load_from_path(config_path)?;
-        let names = parsed.profile_names();
+        let names = config.profile_names();
         if names.is_empty() {
             anyhow::bail!("No Backup Profiles are configured for backup run");
         }
@@ -229,7 +237,7 @@ pub fn resolve_profiles(config_path: &Path, profile: Option<&str>) -> Result<Vec
     }
 }
 
-pub fn run_database_stage<R: ResticRunner>(
+pub fn run_database_stage<R: ResticRunner + ?Sized>(
     config: &crate::config::model::ResticProfileConfig,
     config_path: &Path,
     runner: &R,
@@ -245,7 +253,7 @@ pub fn run_database_stage<R: ResticRunner>(
     )
 }
 
-pub fn execute_secondary_copy<R: ResticProfileRunner>(
+pub fn execute_secondary_copy<R: ResticProfileRunner + ?Sized>(
     config_path: &Path,
     profile: &str,
     dry_run: bool,
@@ -258,7 +266,7 @@ pub fn execute_secondary_copy<R: ResticProfileRunner>(
 
 /// Executes the copy operation declared by every selected Backup Profile.
 /// Profiles without `copy` are intentionally skipped: replication is profile-owned.
-pub fn execute_secondary_copies<R: ResticProfileRunner>(
+pub fn execute_secondary_copies<R: ResticProfileRunner + ?Sized>(
     config: &crate::config::model::ResticProfileConfig,
     config_path: &Path,
     profiles: &[String],
@@ -278,7 +286,7 @@ pub fn execute_secondary_copies<R: ResticProfileRunner>(
         .collect()
 }
 
-pub fn execute_retention<R: ResticProfileRunner>(
+pub fn execute_retention<R: ResticProfileRunner + ?Sized>(
     config_path: &Path,
     profile: &str,
     runner: &R,
@@ -294,7 +302,7 @@ pub fn execute_run<R: ResticRunner>(config: &BackupConfig, runner: &R) -> Result
     runner.backup_paths(repo, pwd, &config.backup.targets, &config.backup.excludes)
 }
 
-pub fn execute_run_profile<R: ResticProfileRunner>(
+pub fn execute_run_profile<R: ResticProfileRunner + ?Sized>(
     config_path: &Path,
     profile: &str,
     opts: &PipelineOptions,

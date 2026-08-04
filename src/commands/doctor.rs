@@ -9,6 +9,7 @@ pub enum DoctorStatus {
     Pass,
     Fail,
     Warn,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,7 +46,7 @@ impl SystemHealthDiagnoser {
         Self::diagnose_with_runner(rclone, &SystemExecutor, config_path)
     }
 
-    pub fn diagnose_with_runner<R: RcloneRunner, C: CommandRunner>(
+    pub fn diagnose_with_runner<R: RcloneRunner + ?Sized, C: CommandRunner + ?Sized>(
         rclone: &R,
         runner: &C,
         config_path: Option<&Path>,
@@ -53,6 +54,15 @@ impl SystemHealthDiagnoser {
         let host_name = std::env::var("HOSTNAME")
             .or_else(|_| std::env::var("COMPUTERNAME"))
             .unwrap_or_else(|_| "localhost".into());
+        Self::diagnose_with_runner_and_host(rclone, runner, config_path, &host_name)
+    }
+
+    pub fn diagnose_with_runner_and_host<R: RcloneRunner + ?Sized, C: CommandRunner + ?Sized>(
+        rclone: &R,
+        runner: &C,
+        config_path: Option<&Path>,
+        host_name: &str,
+    ) -> SystemHealthSnapshot {
         let timestamp = format!("{:?}", std::time::SystemTime::now());
 
         let target_config =
@@ -166,7 +176,9 @@ impl SystemHealthDiagnoser {
         let restic_res = (|| -> anyhow::Result<_> {
             use std::io::Write;
             let config = crate::config::model::ResticProfileConfig::load_from_path(target_config)?;
-            let config_dir = target_config.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let config_dir = target_config
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
             let (repository, password) = config.backend_credentials(config_dir, "primary")?;
             let mut password_file = tempfile::NamedTempFile::new()?;
             password_file.write_all(password.as_bytes())?;
@@ -230,7 +242,7 @@ impl SystemHealthDiagnoser {
         let overall_pass = items.iter().all(|i| i.status == DoctorStatus::Pass);
 
         SystemHealthSnapshot {
-            host_name,
+            host_name: host_name.to_owned(),
             timestamp,
             overall_pass,
             items,
@@ -242,7 +254,7 @@ pub fn check_ntp_sync() -> (DoctorStatus, String) {
     check_ntp_sync_with_runner(&SystemExecutor)
 }
 
-pub fn check_ntp_sync_with_runner<C: CommandRunner>(runner: &C) -> (DoctorStatus, String) {
+pub fn check_ntp_sync_with_runner<C: CommandRunner + ?Sized>(runner: &C) -> (DoctorStatus, String) {
     if let Ok(out) = runner.run("chronyc", &["tracking"]) {
         if out.status_code == 0
             && (out.stdout.contains("Reference ID")
@@ -283,13 +295,37 @@ pub fn run_doctor_checks<R: RcloneRunner>(
     run_doctor_checks_with_runner(rclone, &SystemExecutor, config_path)
 }
 
-pub fn run_doctor_checks_with_runner<R: RcloneRunner, C: CommandRunner>(
+pub fn run_doctor_checks_with_runner<R: RcloneRunner + ?Sized, C: CommandRunner + ?Sized>(
     rclone: &R,
     runner: &C,
     config_path: Option<&Path>,
 ) -> Result<String> {
     tracing::info!("Executing system health diagnostics checks");
     let snapshot = SystemHealthDiagnoser::diagnose_with_runner(rclone, runner, config_path);
+    Ok(render_doctor_report(&snapshot))
+}
+
+pub fn run_doctor_contract_with_runner<R: RcloneRunner + ?Sized, C: CommandRunner + ?Sized>(
+    rclone: &R,
+    runner: &C,
+    config_path: Option<&Path>,
+    host_name: &str,
+) -> Result<(String, bool)> {
+    tracing::info!("Executing system health diagnostics checks");
+    let snapshot = SystemHealthDiagnoser::diagnose_with_runner_and_host(
+        rclone,
+        runner,
+        config_path,
+        host_name,
+    );
+    let passed = snapshot
+        .items
+        .iter()
+        .all(|item| !matches!(item.status, DoctorStatus::Fail | DoctorStatus::Unavailable));
+    Ok((render_doctor_report(&snapshot), passed))
+}
+
+fn render_doctor_report(snapshot: &SystemHealthSnapshot) -> String {
     let mut report = String::new();
     report.push_str("Checking dependencies...\n");
 
@@ -323,6 +359,7 @@ pub fn run_doctor_checks_with_runner<R: RcloneRunner, C: CommandRunner>(
                         DoctorStatus::Pass => "OK",
                         DoctorStatus::Warn => "WARN",
                         DoctorStatus::Fail => "FAILED",
+                        DoctorStatus::Unavailable => "UNAVAILABLE",
                     };
                     report.push_str(&format!("{}: {}\n", item.criterion, status));
                 }
@@ -332,11 +369,12 @@ pub fn run_doctor_checks_with_runner<R: RcloneRunner, C: CommandRunner>(
                     DoctorStatus::Pass => "OK",
                     DoctorStatus::Warn => "WARN",
                     DoctorStatus::Fail => "FAILED",
+                    DoctorStatus::Unavailable => "UNAVAILABLE",
                 };
                 report.push_str(&format!("{}: {}\n", item.criterion, status));
             }
         }
     }
 
-    Ok(report)
+    report
 }

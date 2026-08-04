@@ -22,7 +22,9 @@ pub fn execute_status(config: &BackupConfig) -> Result<String> {
     execute_status_with_runner(config, &executor, None)
 }
 
-pub fn execute_status_from_profiles_config<R: crate::runner::resticprofile::ResticProfileRunner>(
+pub fn execute_status_from_profiles_config<
+    R: crate::runner::resticprofile::ResticProfileRunner + ?Sized,
+>(
     config_path: &std::path::Path,
     profile_filter: Option<&str>,
     runner: &R,

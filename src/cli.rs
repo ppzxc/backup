@@ -1,0 +1,1027 @@
+//! The authoritative CLI schema, runtime context, and shared command dispatch seam.
+//!
+//! The binary is intentionally only a composition shell. Keeping parsing and dispatch here lets
+//! the production process and contract tests observe the same command behavior.
+
+use crate::commands::report::{ReportAction, ReportCommand, ReportFormat};
+use crate::commands::restore::RestoreStorage;
+use crate::config::model::{DEFAULT_PROFILES_PATH, ResticProfileConfig};
+use crate::i18n::Language;
+use crate::runner::executor::CommandRunner;
+use crate::runner::rclone::RcloneRunner;
+use crate::runner::restic::ResticRunner;
+use crate::runner::resticprofile::ResticProfileRunner;
+use crate::runner::scheduler::BackupScheduler;
+use anyhow::{Context, Result};
+use clap::{CommandFactory, Parser, Subcommand};
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(name = "backup", version)]
+pub struct Cli {
+    /// Unified resticprofile v2 and application configuration file path.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub profiles: Option<PathBuf>,
+
+    /// Verbosity level (-v for debug, -vv for trace)
+    #[arg(long, short = 'v', global = true, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Quiet mode (only warn/error logs)
+    #[arg(long, short = 'q', global = true)]
+    pub quiet: bool,
+
+    /// Log file path
+    #[arg(long, global = true, value_name = "PATH")]
+    pub log_file: Option<PathBuf>,
+
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Subcommand)]
+pub enum Command {
+    /// Unified backup configuration setup wizard / 통합 백업 설정 마법사
+    Setup {
+        /// Select language (ko/en) / 언어 선택 (ko/en)
+        #[arg(long)]
+        lang: Option<String>,
+        #[arg(long)]
+        non_interactive: bool,
+        #[command(subcommand)]
+        action: Option<SetupAction>,
+    },
+    /// Sync snapshots from primary to secondary storage target / 저장소 간 스냅샷 동기화 및 복사
+    #[command(alias = "sync")]
+    Copy {
+        /// Profile name to copy (default: "default")
+        #[arg(long, short = 'p')]
+        profile: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Execute backup pipeline / 백업 파이프라인 수동 실행
+    Run {
+        /// Profile name to run (default: "default")
+        #[arg(long, short = 'p')]
+        profile: Option<String>,
+        #[arg(long)]
+        skip_database: bool,
+        #[arg(long)]
+        skip_secondary_sync: bool,
+        #[arg(long)]
+        skip_retention: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Create a Database Stream snapshot / 데이터베이스 스트림 백업 실행
+    Database {
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Comprehensive system settings, dependencies, and health check diagnostics / 시스템 설정, 의존성 및 헬스체크 종합 진단
+    Doctor,
+    /// ISMS-P audit evidence and report generation / ISMS-P 감사 증적 및 레포트 생성
+    Report {
+        #[command(subcommand)]
+        action: Option<ReportAction>,
+        /// Report file path / 보고서 파일 저장 경로
+        #[arg(long, short = 'f')]
+        file: Option<PathBuf>,
+        /// Report format (html, json) / 보고서 포맷
+        #[arg(long)]
+        format: Option<ReportFormat>,
+    },
+    /// Systemd timer / Cron scheduler management / 스케줄러 타이머 관리
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleAction,
+    },
+    /// Restore files or database dumps from snapshot / 스냅샷 기반 파일 및 DB 복구
+    Restore {
+        #[arg(long, default_value = "latest")]
+        snapshot: String,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        force: bool,
+        /// Storage to restore from (primary or secondary)
+        #[arg(long, value_enum, default_value_t = RestoreStorage::Primary)]
+        storage: RestoreStorage,
+    },
+    /// List snapshots across primary and secondary storage targets / 스냅샷 목록 조회
+    Snapshots,
+    /// Display operational status and snapshot recency / 운영 상태 및 스냅샷 주기 확인
+    Status {
+        /// Profile name to query status for (optional)
+        #[arg(long, short = 'p')]
+        profile: Option<String>,
+    },
+    /// Self-update backup binary and assets / 바이너리 및 자산 자가 업데이트
+    Update,
+    /// Display CLI binary version / CLI 바이너리 버전 표시
+    Version,
+    /// Uninstall backup CLI and scheduled timers / 백업 CLI 및 스케줄러 삭제
+    Uninstall {
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        purge: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SetupAction {
+    /// Verify and download required binary dependencies (restic, rclone, resticprofile)
+    Dependencies,
+    /// Initialize primary and secondary Backend Adapter repositories
+    BackendInit,
+}
+
+#[derive(Subcommand)]
+pub enum ScheduleAction {
+    /// Enable systemd timers / cron fallback
+    Enable,
+    /// Disable scheduled timers
+    Disable,
+    /// Display timer/scheduler status
+    Status,
+}
+
+/// The one parser schema consumed by production and the contract matrix.
+pub fn authoritative_cli_schema() -> clap::Command {
+    Cli::command()
+}
+
+/// Returns stable command.option axis identifiers for the contract matrix coverage guard.
+pub fn authoritative_cli_axes() -> Vec<String> {
+    fn visit(command: &clap::Command, prefix: &str, axes: &mut Vec<String>) {
+        let name = if prefix.is_empty() {
+            command.get_name().to_string()
+        } else {
+            format!("{prefix}.{}", command.get_name())
+        };
+        axes.extend(
+            command
+                .get_arguments()
+                .map(|argument| format!("{name}.{}", argument.get_id().as_str())),
+        );
+        for subcommand in command.get_subcommands() {
+            visit(subcommand, &name, axes);
+        }
+    }
+
+    let mut axes = Vec::new();
+    visit(&authoritative_cli_schema(), "", &mut axes);
+    axes.sort();
+    axes
+}
+
+pub fn authoritative_cli_command_paths() -> Vec<String> {
+    fn visit(command: &clap::Command, prefix: &str, paths: &mut Vec<String>) {
+        let name = if prefix.is_empty() {
+            command.get_name().to_string()
+        } else {
+            format!("{prefix}.{}", command.get_name())
+        };
+        paths.push(name.clone());
+        for subcommand in command.get_subcommands() {
+            visit(subcommand, &name, paths);
+        }
+    }
+
+    let mut paths = Vec::new();
+    visit(&authoritative_cli_schema(), "", &mut paths);
+    paths.sort();
+    paths
+}
+
+pub use crate::runner::scheduler::SchedulerMode;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdapterSelection {
+    System,
+    StrictTest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeLogging {
+    pub level_filter: String,
+    pub log_file: Option<PathBuf>,
+}
+
+/// All process-derived values needed by one command execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliRuntimeContext {
+    pub profiles_path: PathBuf,
+    pub language: Language,
+    pub logging: RuntimeLogging,
+    pub scheduler_mode: SchedulerMode,
+    pub adapter_selection: AdapterSelection,
+    pub host_name: String,
+}
+
+impl CliRuntimeContext {
+    pub fn from_cli(
+        cli: &Cli,
+        language: Language,
+        env_log_override: Option<String>,
+        scheduler_mode: SchedulerMode,
+        adapter_selection: AdapterSelection,
+    ) -> Result<Self> {
+        if cli.quiet && cli.verbose > 0 {
+            anyhow::bail!("--quiet cannot be combined with --verbose");
+        }
+
+        let language = match &cli.command {
+            Command::Setup {
+                lang: Some(value), ..
+            } => parse_language(value)?,
+            _ => language,
+        };
+        let level_filter = if cli.quiet {
+            "warn".into()
+        } else if cli.verbose > 0 {
+            crate::logger::determine_level_filter(cli.verbose, false, None)
+        } else {
+            crate::logger::determine_level_filter(0, false, env_log_override.as_deref())
+        };
+
+        Ok(Self {
+            profiles_path: cli
+                .profiles
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_PROFILES_PATH)),
+            language,
+            logging: RuntimeLogging {
+                level_filter,
+                log_file: cli.log_file.clone(),
+            },
+            scheduler_mode,
+            adapter_selection,
+            host_name: "localhost".into(),
+        })
+    }
+
+    pub fn with_host_name(mut self, host_name: impl Into<String>) -> Self {
+        self.host_name = host_name.into();
+        self
+    }
+}
+
+pub fn parse_language(value: &str) -> Result<Language> {
+    match value.to_ascii_lowercase().as_str() {
+        "ko" => Ok(Language::Ko),
+        "en" => Ok(Language::En),
+        _ => anyhow::bail!("invalid language '{value}'; expected ko or en"),
+    }
+}
+
+/// Production and strict test adapters are passed through this one composition point.
+pub struct AdapterSet<'a> {
+    pub command: &'a dyn CommandRunner,
+    pub rclone: &'a dyn RcloneRunner,
+    pub restic: &'a dyn ResticRunner,
+    pub resticprofile: &'a dyn ResticProfileRunner,
+    pub scheduler: &'a dyn BackupScheduler,
+    pub selection: AdapterSelection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliContractCase {
+    pub id: String,
+    pub command_path: String,
+    pub option_axis: Option<String>,
+}
+
+/// Generates stable schema cases independently of command implementation details.
+///
+/// Command-path cases ensure every parser branch exists in the contract inventory; option-axis
+/// cases ensure every declared option is consumed by the matrix coverage guard.
+pub fn generate_cli_contract_matrix() -> Vec<CliContractCase> {
+    let mut cases = authoritative_cli_command_paths()
+        .into_iter()
+        .map(|command_path| CliContractCase {
+            id: format!("command:{command_path}"),
+            command_path,
+            option_axis: None,
+        })
+        .collect::<Vec<_>>();
+    cases.extend(authoritative_cli_axes().into_iter().map(|option_axis| {
+        let command_path = option_axis
+            .rsplit_once('.')
+            .map(|(path, _)| path.to_owned())
+            .unwrap_or_else(|| option_axis.clone());
+        CliContractCase {
+            id: format!("option:{option_axis}"),
+            command_path,
+            option_axis: Some(option_axis),
+        }
+    }));
+    cases.sort_by(|left, right| left.id.cmp(&right.id));
+    cases
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractDiagnostic {
+    pub case_id: String,
+    pub context: String,
+    pub expected_trace: Vec<String>,
+    pub actual_trace: Vec<String>,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_status: i32,
+    pub artifacts: Vec<Artifact>,
+}
+
+impl ContractDiagnostic {
+    pub fn render(&self) -> String {
+        format!(
+            "case={} context={} expected_trace={:?} actual_trace={:?} stdout={:?} stderr={:?} exit_status={} artifacts={:?}",
+            self.case_id,
+            self.context,
+            self.expected_trace,
+            self.actual_trace,
+            self.stdout,
+            self.stderr,
+            self.exit_status,
+            self.artifacts,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Artifact {
+    pub path: PathBuf,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandOutcome {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_status: i32,
+    pub artifacts: Vec<Artifact>,
+    pub external_state_changes: Vec<String>,
+}
+
+impl CommandOutcome {
+    pub fn success(
+        stdout: impl Into<String>,
+        stderr: impl Into<String>,
+        artifacts: Vec<PathBuf>,
+    ) -> Self {
+        Self {
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            exit_status: 0,
+            artifacts: artifacts
+                .into_iter()
+                .map(|path| Artifact {
+                    path,
+                    kind: "file".into(),
+                })
+                .collect(),
+            external_state_changes: Vec::new(),
+        }
+    }
+
+    pub fn success_with_changes(
+        stdout: impl Into<String>,
+        stderr: impl Into<String>,
+        artifacts: Vec<PathBuf>,
+        external_state_changes: Vec<String>,
+    ) -> Self {
+        let mut outcome = Self::success(stdout, stderr, artifacts);
+        outcome.external_state_changes = external_state_changes;
+        outcome
+    }
+
+    pub fn failure(command: &str, stage: &str, error: impl Into<String>) -> Self {
+        Self {
+            stdout: String::new(),
+            stderr: format!(
+                "{command} failed at {stage}: {}",
+                redact_diagnostic(&error.into())
+            ),
+            exit_status: 1,
+            artifacts: Vec::new(),
+            external_state_changes: Vec::new(),
+        }
+    }
+
+    pub fn is_success(&self) -> bool {
+        self.exit_status == 0
+    }
+}
+
+fn redact_diagnostic(value: &str) -> String {
+    let mut redact_next = false;
+    value
+        .split_whitespace()
+        .map(|token| {
+            let lower = token.to_ascii_lowercase();
+            let is_sensitive_name = [
+                "password",
+                "secret",
+                "token",
+                "credential",
+                "connection-url",
+                "connection_url",
+                "repository",
+                "access-key",
+                "access_key",
+            ]
+            .iter()
+            .any(|marker| lower.contains(marker));
+            let sensitive_value = lower.contains("://")
+                || lower.starts_with("s3:")
+                || lower.starts_with("sftp:")
+                || lower.starts_with("mysql:")
+                || lower.starts_with("postgres:");
+            if redact_next || sensitive_value {
+                redact_next = false;
+                "<redacted>".to_string()
+            } else if is_sensitive_name && token.contains('=') {
+                format!("{}<redacted>", token.split('=').next().unwrap_or(token))
+            } else {
+                redact_next = is_sensitive_name;
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn dispatch(
+    context: &CliRuntimeContext,
+    command: Command,
+    adapters: &AdapterSet<'_>,
+) -> CommandOutcome {
+    let command_name = command_name(&command);
+    if context.adapter_selection != adapters.selection {
+        return CommandOutcome::failure(
+            &command_name,
+            "adapter selection",
+            format!(
+                "runtime selected {:?}, but composition supplied {:?}",
+                context.adapter_selection, adapters.selection
+            ),
+        );
+    }
+    match dispatch_inner(context, command, adapters) {
+        Ok(outcome) => outcome,
+        Err(error) => CommandOutcome::failure(&command_name, "execution", error.to_string()),
+    }
+}
+
+fn dispatch_inner(
+    context: &CliRuntimeContext,
+    command: Command,
+    adapters: &AdapterSet<'_>,
+) -> Result<CommandOutcome> {
+    match command {
+        Command::Setup {
+            lang,
+            non_interactive,
+            action,
+        } => match action {
+            Some(SetupAction::Dependencies) => {
+                let output =
+                    crate::commands::setup::run_setup_dependencies_with_runner_and_language(
+                        adapters.command,
+                        context.language,
+                    )?;
+                Ok(CommandOutcome::success_with_changes(
+                    output,
+                    "",
+                    Vec::new(),
+                    vec!["dependencies verified or installed".into()],
+                ))
+            }
+            Some(SetupAction::BackendInit) => {
+                let config = load_profiles(context)?;
+                let targets = backend_initialization_targets(&config)?;
+                let mut output = Vec::new();
+                let mut failures = Vec::new();
+                for profile in targets {
+                    match adapters
+                        .resticprofile
+                        .init(&context.profiles_path, &profile)
+                    {
+                        Ok(result) => {
+                            let heading = match context.language {
+                                Language::Ko => "=== 백엔드 저장소 초기화 프로필:",
+                                Language::En => "=== Initializing Backend Storage for Profile:",
+                            };
+                            output
+                                .push(format!("{heading} [{profile}] ===\n{}", result.trim_end()));
+                        }
+                        Err(error) => failures.push(format!("{profile}: {error}")),
+                    }
+                }
+                if failures.is_empty() {
+                    Ok(CommandOutcome::success_with_changes(
+                        output.join("\n"),
+                        "",
+                        Vec::new(),
+                        vec!["backend repositories initialized".into()],
+                    ))
+                } else {
+                    anyhow::bail!(
+                        "backend initialization failed after attempting every target: {}",
+                        failures.join("; ")
+                    )
+                }
+            }
+            None => {
+                let prompter = crate::commands::setup::InquirePrompter;
+                crate::commands::setup::run_setup_with_prompter_and_runners(
+                    &context.profiles_path,
+                    &prompter,
+                    non_interactive,
+                    Some(
+                        lang.as_deref()
+                            .map(parse_language)
+                            .transpose()?
+                            .unwrap_or(context.language),
+                    ),
+                    adapters.resticprofile,
+                    adapters.scheduler,
+                )?;
+                Ok(CommandOutcome::success_with_changes(
+                    match context.language {
+                        Language::Ko => "설정이 성공적으로 완료되었습니다.",
+                        Language::En => "Setup completed successfully.",
+                    },
+                    "",
+                    Vec::new(),
+                    vec!["configuration and scheduler updated".into()],
+                ))
+            }
+        },
+        Command::Copy { profile, dry_run } => {
+            let config = load_profiles(context)?;
+            let target_profile = profile.as_deref().unwrap_or("default");
+            validate_profile(&config, target_profile, "copy")?;
+            let output = crate::commands::copy::execute_copy(
+                adapters.resticprofile,
+                &context.profiles_path,
+                target_profile,
+                dry_run,
+            )?;
+            Ok(CommandOutcome::success_with_changes(
+                output,
+                "",
+                Vec::new(),
+                vec![if dry_run {
+                    "copy plan rendered".into()
+                } else {
+                    "snapshots copied".into()
+                }],
+            ))
+        }
+        Command::Run {
+            profile,
+            skip_database,
+            skip_secondary_sync,
+            skip_retention,
+            dry_run,
+        } => dispatch_run(
+            context,
+            adapters,
+            profile,
+            crate::commands::run::PipelineOptions {
+                skip_database,
+                skip_secondary_sync,
+                skip_retention,
+                dry_run,
+            },
+        ),
+        Command::Database { dry_run } => {
+            let config = load_profiles(context)?;
+            let output = crate::commands::database::execute_database_backup_from_profiles(
+                &config,
+                &context.profiles_path,
+                adapters.restic,
+                dry_run,
+            )?;
+            Ok(CommandOutcome::success_with_changes(
+                output,
+                "",
+                Vec::new(),
+                vec![if dry_run {
+                    "database backup plan rendered".into()
+                } else {
+                    "database snapshot created".into()
+                }],
+            ))
+        }
+        Command::Doctor => {
+            let (output, passed) = crate::commands::doctor::run_doctor_contract_with_runner(
+                adapters.rclone,
+                adapters.command,
+                Some(&context.profiles_path),
+                &context.host_name,
+            )?;
+            let mut outcome = CommandOutcome::success(output, "", Vec::new());
+            if !passed {
+                outcome.exit_status = 1;
+                outcome
+                    .stderr
+                    .push_str("doctor reported one or more failed diagnostics");
+            }
+            Ok(outcome)
+        }
+        Command::Report {
+            action,
+            file,
+            format,
+        } => {
+            let profiles_path = required_profiles_path(context)?;
+            let profiles = load_profiles(context)?;
+            let config =
+                crate::config::model::BackupConfig::from_profile_config(&profiles, &profiles_path)?;
+            let meta = crate::commands::report::AuditReportMeta::new(
+                &context.host_name,
+                crate::commands::report::get_formatted_time().0,
+            )
+            .with_profiles_path(&profiles_path);
+            let output = ReportCommand::run_with_adapters_and_meta(
+                action,
+                file,
+                format,
+                &config,
+                adapters.command,
+                adapters.restic,
+                &meta,
+            )?;
+            Ok(CommandOutcome::success_with_changes(
+                &output,
+                "",
+                report_paths_from_output(&output),
+                vec!["report artifacts committed".into()],
+            ))
+        }
+        Command::Schedule { action } => {
+            let output = match &action {
+                ScheduleAction::Enable => {
+                    crate::commands::schedule::execute_schedule_enable_with_mode(
+                        &context.profiles_path,
+                        adapters.scheduler,
+                        context.scheduler_mode,
+                    )?
+                }
+                ScheduleAction::Disable => {
+                    crate::commands::schedule::execute_schedule_disable_with_mode(
+                        &context.profiles_path,
+                        adapters.scheduler,
+                        context.scheduler_mode,
+                    )?
+                }
+                ScheduleAction::Status => {
+                    crate::commands::schedule::execute_schedule_status_with_mode(
+                        adapters.scheduler,
+                        context.scheduler_mode,
+                    )?
+                }
+            };
+            let changes = match action {
+                ScheduleAction::Status => Vec::new(),
+                ScheduleAction::Enable => vec!["scheduler registration updated".into()],
+                ScheduleAction::Disable => vec!["scheduler registration removed".into()],
+            };
+            Ok(CommandOutcome::success_with_changes(
+                output,
+                "",
+                Vec::new(),
+                changes,
+            ))
+        }
+        Command::Restore {
+            snapshot,
+            target,
+            force,
+            storage,
+        } => {
+            let config = load_profiles(context)?;
+            if snapshot.trim().is_empty() || snapshot != snapshot.trim() {
+                anyhow::bail!("restore snapshot must be an exact, non-empty value");
+            }
+            let target = target.ok_or_else(|| anyhow::anyhow!("restore requires --target"))?;
+            if target.trim().is_empty() || target != target.trim() {
+                anyhow::bail!("restore target must be an exact, non-empty path");
+            }
+            let output = crate::commands::restore::execute_restore_from_profiles(
+                &config,
+                &context.profiles_path,
+                adapters.restic,
+                &snapshot,
+                &target,
+                force,
+                storage,
+            )?;
+            Ok(CommandOutcome::success_with_changes(
+                output,
+                "",
+                Vec::new(),
+                vec!["restore output created".into()],
+            ))
+        }
+        Command::Snapshots => {
+            let config = load_profiles(context)?;
+            let output = crate::commands::snapshots::execute_snapshots_from_profiles(
+                &config,
+                &context.profiles_path,
+                adapters.restic,
+            )?;
+            Ok(CommandOutcome::success(output, "", Vec::new()))
+        }
+        Command::Status { profile } => {
+            let config = load_profiles(context)?;
+            if let Some(profile) = profile.as_deref() {
+                validate_profile(&config, profile, "status")?;
+            }
+            let output = crate::commands::status::execute_status_from_profiles_config(
+                &context.profiles_path,
+                profile.as_deref(),
+                adapters.resticprofile,
+            )?;
+            Ok(CommandOutcome::success(output, "", Vec::new()))
+        }
+        Command::Update => {
+            let output = crate::commands::update::execute_update_check_with_runner(
+                env!("CARGO_PKG_VERSION"),
+                adapters.command,
+            )?;
+            Ok(CommandOutcome::success_with_changes(
+                output,
+                "",
+                Vec::new(),
+                vec!["update installation attempted".into()],
+            ))
+        }
+        Command::Version => Ok(CommandOutcome::success(
+            format!("backup {}", env!("CARGO_PKG_VERSION")),
+            "",
+            Vec::new(),
+        )),
+        Command::Uninstall { yes, purge } => {
+            let output = crate::commands::uninstall::perform_uninstall_with_executor_at_path(
+                &context.profiles_path,
+                adapters.resticprofile,
+                adapters.command,
+                yes,
+                purge,
+            )?;
+            Ok(CommandOutcome::success_with_changes(
+                output,
+                "",
+                Vec::new(),
+                vec!["uninstall scope removed".into()],
+            ))
+        }
+    }
+}
+
+fn dispatch_run(
+    context: &CliRuntimeContext,
+    adapters: &AdapterSet<'_>,
+    profile: Option<String>,
+    options: crate::commands::run::PipelineOptions,
+) -> Result<CommandOutcome> {
+    let config = load_profiles(context)?;
+    let profiles = resolve_profiles(&config, profile.as_deref())?;
+    let report_profile = profile.clone().unwrap_or_else(|| "all".into());
+    let database_profile = config
+        .application
+        .as_ref()
+        .and_then(|application| application.database.as_ref())
+        .map(|database| database.profile.as_str());
+    let mut stage = "profile resolution";
+
+    let result = (|| -> Result<(String, Option<String>, Option<String>)> {
+        let mut primary_results = Vec::new();
+        if !options.skip_database
+            && config
+                .application
+                .as_ref()
+                .and_then(|application| application.database.as_ref())
+                .is_some_and(|database| profiles.contains(&database.profile))
+        {
+            stage = "database";
+            primary_results.push(crate::commands::run::run_database_stage(
+                &config,
+                &context.profiles_path,
+                adapters.restic,
+                options.dry_run,
+            )?);
+        }
+
+        let ordinary_profiles = profiles
+            .iter()
+            .filter(|profile| Some(profile.as_str()) != database_profile)
+            .cloned()
+            .collect::<Vec<_>>();
+        stage = "primary backup";
+        for target_profile in &ordinary_profiles {
+            primary_results.push(crate::commands::run::execute_run_profile(
+                &context.profiles_path,
+                target_profile,
+                &options,
+                adapters.resticprofile,
+            )?);
+        }
+
+        let secondary_result = if !options.skip_secondary_sync {
+            stage = "secondary sync";
+            let copies = crate::commands::run::execute_secondary_copies(
+                &config,
+                &context.profiles_path,
+                &ordinary_profiles,
+                options.dry_run,
+                adapters.resticprofile,
+            )?;
+            (!copies.is_empty()).then(|| copies.join("\n"))
+        } else {
+            None
+        };
+        let retention_result = if !options.skip_retention && !options.dry_run {
+            stage = "retention";
+            let results = ordinary_profiles
+                .iter()
+                .map(|profile| {
+                    crate::commands::run::execute_retention(
+                        &context.profiles_path,
+                        profile,
+                        adapters.resticprofile,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Some(results.join("\n"))
+        } else {
+            None
+        };
+        Ok((
+            primary_results.join("\n"),
+            secondary_result,
+            retention_result,
+        ))
+    })();
+
+    match result {
+        Ok((primary, secondary, retention)) => {
+            let report = crate::commands::run::ExecutionReport::success(
+                &report_profile,
+                primary.clone(),
+                secondary.clone(),
+                retention.clone(),
+            );
+            let report_path = crate::commands::run::write_execution_report_from_profiles(
+                &config,
+                &context.profiles_path,
+                report,
+            )?;
+            let mut output = primary;
+            if let Some(result) = secondary {
+                output.push_str(&format!("\n[Pipeline] Snapshot copy completed: {result}"));
+            }
+            if let Some(result) = retention {
+                output.push_str(&format!("\n[Pipeline] Retention prune completed: {result}"));
+            }
+            output.push_str(&format!(
+                "\n[Pipeline] Execution report: {}",
+                report_path.display()
+            ));
+            Ok(CommandOutcome::success_with_changes(
+                output,
+                "",
+                vec![report_path],
+                vec![if options.dry_run {
+                    "pipeline plan rendered".into()
+                } else {
+                    "backup pipeline executed".into()
+                }],
+            ))
+        }
+        Err(error) => {
+            let report_error = crate::commands::run::write_execution_report_from_profiles(
+                &config,
+                &context.profiles_path,
+                crate::commands::run::ExecutionReport::failure(&report_profile, stage, &error),
+            )
+            .err();
+            if let Some(report_error) = report_error {
+                anyhow::bail!(
+                    "stage '{stage}' failed: {error}; execution report failed: {report_error}"
+                );
+            }
+            anyhow::bail!("stage '{stage}' failed: {error}");
+        }
+    }
+}
+
+fn command_name(command: &Command) -> String {
+    match command {
+        Command::Setup { .. } => "setup",
+        Command::Copy { .. } => "copy",
+        Command::Run { .. } => "run",
+        Command::Database { .. } => "database",
+        Command::Doctor => "doctor",
+        Command::Report { .. } => "report",
+        Command::Schedule { .. } => "schedule",
+        Command::Restore { .. } => "restore",
+        Command::Snapshots => "snapshots",
+        Command::Status { .. } => "status",
+        Command::Update => "update",
+        Command::Version => "version",
+        Command::Uninstall { .. } => "uninstall",
+    }
+    .into()
+}
+
+fn required_profiles_path(context: &CliRuntimeContext) -> Result<PathBuf> {
+    if context.profiles_path.as_os_str().is_empty()
+        || context.profiles_path.to_string_lossy().trim().is_empty()
+    {
+        anyhow::bail!("--profiles path cannot be empty");
+    }
+    Ok(context.profiles_path.clone())
+}
+
+fn load_profiles(context: &CliRuntimeContext) -> Result<ResticProfileConfig> {
+    let path = required_profiles_path(context)?;
+    if !path.is_file() {
+        anyhow::bail!(
+            "Unified profiles configuration not found at {}",
+            path.display()
+        );
+    }
+    ResticProfileConfig::load_from_path(&path).with_context(|| {
+        format!(
+            "failed to load unified profiles configuration at {}",
+            path.display()
+        )
+    })
+}
+
+fn validate_profile(config: &ResticProfileConfig, profile: &str, command: &str) -> Result<()> {
+    if profile.trim().is_empty() || profile != profile.trim() {
+        anyhow::bail!("{command} profile must be an exact, non-empty configured profile name");
+    }
+    if !config.profile_names().iter().any(|name| name == profile) {
+        anyhow::bail!("{command} profile '{profile}' is not configured");
+    }
+    Ok(())
+}
+
+fn resolve_profiles(config: &ResticProfileConfig, profile: Option<&str>) -> Result<Vec<String>> {
+    if let Some(profile) = profile {
+        validate_profile(config, profile, "run")?;
+        return Ok(vec![profile.into()]);
+    }
+    let profiles = config.profile_names();
+    if profiles.is_empty() {
+        anyhow::bail!("No Backup Profiles are configured for backup run");
+    }
+    Ok(profiles)
+}
+
+fn backend_initialization_targets(config: &ResticProfileConfig) -> Result<Vec<String>> {
+    let mut targets = Vec::new();
+    if config.profiles.contains_key("primary") {
+        targets.push("primary".into());
+    }
+    let mut ordinary = config
+        .profiles
+        .keys()
+        .filter(|name| name.as_str() != "primary" && name.as_str() != "secondary")
+        .cloned()
+        .collect::<Vec<_>>();
+    ordinary.sort();
+    targets.extend(ordinary);
+    if config.profiles.contains_key("secondary") {
+        targets.push("secondary".into());
+    }
+    if targets.is_empty() {
+        anyhow::bail!("No Backup Profiles are configured for backend initialization");
+    }
+    Ok(targets)
+}
+
+fn report_paths_from_output(output: &str) -> Vec<PathBuf> {
+    output
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter_map(|value| {
+            value
+                .strip_prefix("ISMS report saved to ")
+                .or_else(|| value.strip_prefix("All 3 sub-reports generated successfully:"))
+                .map(str::trim)
+        })
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
