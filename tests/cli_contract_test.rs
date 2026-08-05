@@ -913,12 +913,6 @@ fn run_contract_covers_every_skip_combination_without_changing_stage_order() {
                     expected_full_pipeline(false, skip_database, skip_secondary, skip_retention),
                 );
 
-                assert!(
-                    outcome.is_success(),
-                    "skip_database={skip_database} skip_secondary={skip_secondary} \
-                     skip_retention={skip_retention}: {}",
-                    outcome.stderr
-                );
                 let mut expected: Vec<String> = Vec::new();
                 if !skip_database {
                     expected.push("database".into());
@@ -936,8 +930,37 @@ fn run_contract_covers_every_skip_combination_without_changing_stage_order() {
                 if !skip_retention {
                     expected.extend(["retention:alpha".into(), "retention:beta".into()]);
                 }
-                assert_eq!(trace, expected);
-                assert!(outcome.stdout.contains("Execution report:"));
+                let case_id = format!(
+                    "run.skip-db={skip_database}.skip-secondary={skip_secondary}.skip-retention={skip_retention}"
+                );
+                let diagnostic = ContractDiagnostic::from_outcome(
+                    case_id,
+                    format!("argv={args:?} profiles={}", fixture.profiles_path().display()),
+                    expected.clone(),
+                    trace.clone(),
+                    &outcome,
+                )
+                .render();
+                assert!(outcome.is_success(), "{diagnostic}");
+                assert_eq!(trace, expected, "{diagnostic}");
+                assert!(outcome.stdout.contains("Execution report:"), "{diagnostic}");
+                let report = std::fs::read_to_string(&outcome.artifacts[0].path).unwrap();
+                assert_eq!(
+                    report.contains("database stream complete"),
+                    !skip_database,
+                    "{diagnostic}"
+                );
+                assert_eq!(
+                    report.contains("copy alpha complete") && report.contains("copy beta complete"),
+                    !skip_secondary,
+                    "{diagnostic}"
+                );
+                assert_eq!(
+                    report.contains("retention alpha complete")
+                        && report.contains("retention beta complete"),
+                    !skip_retention,
+                    "{diagnostic}"
+                );
             }
         }
     }
@@ -1001,7 +1024,7 @@ fn run_contract_partial_failure_stops_later_stages_and_keeps_a_masked_report() {
             Some(false),
             "",
             Some(
-                "copy failed using primary-secret for postgres://backup-user:db-secret@db:5432/app",
+                "copy failed using primary-secret and archive-secret for postgres://backup-user:db-secret@db:5432/app",
             ),
         ),
     ];
@@ -1021,6 +1044,7 @@ fn run_contract_partial_failure_stops_later_stages_and_keeps_a_masked_report() {
     assert!(report.contains("\"succeeded\": false"));
     assert!(report.contains("\"failure_stage\": \"secondary sync\""));
     assert!(!report.contains("primary-secret"));
+    assert!(!report.contains("archive-secret"));
     assert!(!report.contains("postgres://backup-user:db-secret@db:5432/app"));
     assert_eq!(file_mode(report_path), Some(0o600));
 }
@@ -1054,22 +1078,32 @@ struct RunContractExpectations {
 struct StrictRunProfileAdapter {
     calls: Mutex<VecDeque<ProfileCallExpectation>>,
     trace: Arc<Mutex<Vec<String>>>,
+    expected_config_path: PathBuf,
 }
 
 impl StrictRunProfileAdapter {
-    fn new(calls: Vec<ProfileCallExpectation>, trace: Arc<Mutex<Vec<String>>>) -> Self {
+    fn new(
+        config_path: &Path,
+        calls: Vec<ProfileCallExpectation>,
+        trace: Arc<Mutex<Vec<String>>>,
+    ) -> Self {
         Self {
             calls: Mutex::new(calls.into_iter().collect()),
             trace,
+            expected_config_path: config_path.to_path_buf(),
         }
     }
 
     fn consume(
         &self,
+        config_path: &Path,
         operation: &'static str,
         profile: &str,
         dry_run: Option<bool>,
     ) -> Result<String> {
+        if config_path != self.expected_config_path {
+            anyhow::bail!("unexpected profiles configuration path");
+        }
         let trace_value = match dry_run {
             Some(dry_run) => format!("{operation}:{profile}:dry={dry_run}"),
             None => format!("{operation}:{profile}"),
@@ -1110,8 +1144,8 @@ impl StrictRunProfileAdapter {
 }
 
 impl ResticProfileRunner for StrictRunProfileAdapter {
-    fn backup(&self, _: &Path, profile: &str, dry_run: bool) -> Result<String> {
-        self.consume("primary", profile, Some(dry_run))
+    fn backup(&self, config_path: &Path, profile: &str, dry_run: bool) -> Result<String> {
+        self.consume(config_path, "primary", profile, Some(dry_run))
     }
 
     fn init(&self, _: &Path, profile: &str) -> Result<String> {
@@ -1134,16 +1168,16 @@ impl ResticProfileRunner for StrictRunProfileAdapter {
         anyhow::bail!("unexpected snapshots call for profile {profile}")
     }
 
-    fn prune(&self, _: &Path, profile: &str) -> Result<String> {
-        self.consume("retention", profile, None)
+    fn prune(&self, config_path: &Path, profile: &str) -> Result<String> {
+        self.consume(config_path, "retention", profile, None)
     }
 
     fn check(&self, _: &Path, profile: &str) -> Result<String> {
         anyhow::bail!("unexpected check call for profile {profile}")
     }
 
-    fn copy(&self, _: &Path, profile: &str, dry_run: bool) -> Result<String> {
-        self.consume("secondary", profile, Some(dry_run))
+    fn copy(&self, config_path: &Path, profile: &str, dry_run: bool) -> Result<String> {
+        self.consume(config_path, "secondary", profile, Some(dry_run))
     }
 }
 
@@ -1263,7 +1297,7 @@ fn run_contract_fixture() -> RunContractFixture {
         format!(
             "version: '2'\napplication:\n  reports:\n    outputDir: {}\n    enableDailyReports: false\n    enableAnnualDrDrillReport: false\n  database:\n    profile: database\n    type: postgres\n    connection-url: ${{BACKUP_DATABASE_CONNECTION_URL}}\nprofiles:\n  default: {{}}\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  secondary:\n    repository: /secondary-repository\n    password-file: secondary-password\n  alpha:\n    inherit: primary\n    backup:\n      source: ['/alpha']\n    copy:\n      profile: secondary\n  beta:\n    inherit: primary\n    backup:\n      source: ['/beta']\n    copy:\n      profile: secondary\n  database:\n    inherit: primary\n",
             reports.display()
-        ),
+        ) + "  archive:\n    repository: /archive-repository\n    password-file: archive-password\n",
     )
     .unwrap();
     set_mode_600(&profiles);
@@ -1271,6 +1305,10 @@ fn run_contract_fixture() -> RunContractFixture {
     write_mode_600(
         &directory.path().join("secondary-password"),
         "secondary-secret",
+    );
+    write_mode_600(
+        &directory.path().join("archive-password"),
+        "archive-secret",
     );
     write_mode_600(
         &directory.path().join("database-connection-url"),
@@ -1383,7 +1421,11 @@ fn dispatch_run_contract(
     )
     .unwrap();
     let trace = Arc::new(Mutex::new(Vec::new()));
-    let profile_adapter = StrictRunProfileAdapter::new(expected.profile_calls, trace.clone());
+    let profile_adapter = StrictRunProfileAdapter::new(
+        profiles,
+        expected.profile_calls,
+        trace.clone(),
+    );
     let database_adapter = StrictRunDatabaseAdapter::new(expected.database_call, trace.clone());
     let command_runner = StrictCommandRunner::new([]);
     let rclone = RcloneTool::new(&command_runner);

@@ -1,7 +1,7 @@
 use crate::config::model::BackupConfig;
 use crate::runner::restic::ResticRunner;
 use crate::runner::resticprofile::ResticProfileRunner;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
 use serde::Serialize;
 use std::fmt;
@@ -142,11 +142,19 @@ pub fn write_execution_report_from_profiles(
             .values()
             .filter_map(|profile| profile.password.clone()),
     );
-    for profile in ["primary", "secondary"] {
-        if config.profiles.contains_key(profile) {
-            if let Ok((_, password)) = config.backend_credentials(config_dir, profile) {
-                secrets.push(password);
-            }
+    for (profile_name, profile) in &config.profiles {
+        if profile.repository.is_some()
+            || profile.password_file.is_some()
+            || profile.inherit.is_some()
+        {
+            let (_, password) = config
+                .backend_credentials(config_dir, profile_name)
+                .with_context(|| {
+                    format!(
+                        "cannot resolve credentials for execution report profile '{profile_name}'"
+                    )
+                })?;
+            secrets.push(password);
         }
     }
     if config
