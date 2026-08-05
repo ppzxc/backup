@@ -120,7 +120,13 @@ impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {
             &["--config", &config_str, "--name", profile, "init"],
             std::time::Duration::from_secs(15),
         )?;
-        self.check_output(output)
+        match self.check_output(output) {
+            Ok(output) => Ok(output),
+            Err(error) if existing_repository_error(&error) => {
+                Ok("repository already initialized".into())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn schedule_enable(&self, config_path: &Path) -> Result<String> {
@@ -190,4 +196,11 @@ impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {
         let output = self.run_profile_command(config_path, profile, &args)?;
         self.check_output(output)
     }
+}
+
+fn existing_repository_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("config file already exists")
+        || message.contains("repository master key and config already initialized")
+        || message.contains("repository already initialized")
 }

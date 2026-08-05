@@ -5,7 +5,7 @@
 
 use crate::commands::report::{ReportAction, ReportCommand, ReportFormat};
 use crate::commands::restore::RestoreStorage;
-use crate::config::model::{ResticProfileConfig, DEFAULT_PROFILES_PATH};
+use crate::config::model::{DEFAULT_PROFILES_PATH, ResticProfileConfig};
 use crate::i18n::Language;
 use crate::runner::executor::CommandRunner;
 use crate::runner::rclone::RcloneRunner;
@@ -812,6 +812,20 @@ fn dispatch_inner(
                 target_profile,
                 "copy",
             )?;
+            let copy_target = config
+                .effective_copy_profile(target_profile)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Backup Profile '{target_profile}' does not declare a copy target Backend Profile"
+                    )
+                })?;
+            let config_dir = context
+                .profiles_path
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            config.backend_credentials(config_dir, target_profile)?;
+            config.backend_credentials(config_dir, &copy_target)?;
             let output = crate::commands::copy::execute_copy(
                 adapters.resticprofile,
                 &context.profiles_path,
@@ -822,11 +836,11 @@ fn dispatch_inner(
                 output,
                 "",
                 Vec::new(),
-                vec![if dry_run {
-                    "copy plan rendered".into()
+                if dry_run {
+                    Vec::new()
                 } else {
-                    "snapshots copied".into()
-                }],
+                    vec!["snapshots copied".into()]
+                },
             ))
         }
         Command::Run {
@@ -1233,25 +1247,7 @@ fn resolve_profiles(config: &ResticProfileConfig, profile: Option<&str>) -> Resu
 }
 
 fn backend_initialization_targets(config: &ResticProfileConfig) -> Result<Vec<String>> {
-    let mut targets = Vec::new();
-    if config.profiles.contains_key("primary") {
-        targets.push("primary".into());
-    }
-    let mut ordinary = config
-        .profiles
-        .keys()
-        .filter(|name| name.as_str() != "primary" && name.as_str() != "secondary")
-        .cloned()
-        .collect::<Vec<_>>();
-    ordinary.sort();
-    targets.extend(ordinary);
-    if config.profiles.contains_key("secondary") {
-        targets.push("secondary".into());
-    }
-    if targets.is_empty() {
-        anyhow::bail!("No Backup Profiles are configured for backend initialization");
-    }
-    Ok(targets)
+    config.backend_initialization_targets()
 }
 
 fn report_paths_from_output(output: &str) -> Vec<PathBuf> {

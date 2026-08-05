@@ -947,15 +947,10 @@ impl ResticProfileConfig {
         config_dir: &Path,
         profile: &str,
     ) -> Result<Vec<(String, String)>> {
-        let Some(copy) = self
-            .profiles
-            .get(profile)
-            .and_then(|profile| profile.copy.as_ref())
-        else {
+        let Some(target_name) = self.effective_copy_profile(profile)? else {
             return Ok(Vec::new());
         };
-        let target_name = copy.profile.as_deref().unwrap_or("secondary");
-        let Some((access_var, secret_var)) = self.s3_sidecar_references(target_name) else {
+        let Some((access_var, secret_var)) = self.s3_sidecar_references(&target_name) else {
             return Ok(Vec::new());
         };
         let Some(access_file) = sidecar_file_name(&access_var) else {
@@ -1058,6 +1053,64 @@ impl ResticProfileConfig {
         })
     }
 
+    /// Resolves the copy target declared by a Backup Profile through its inheritance chain.
+    /// A copy command must name an existing Backend Profile before it reaches an external runner.
+    pub fn effective_copy_profile(&self, profile: &str) -> Result<Option<String>> {
+        let mut current = profile;
+        let mut remaining = self.profiles.len() + 1;
+        while remaining > 0 {
+            remaining -= 1;
+            let section = self
+                .profiles
+                .get(current)
+                .ok_or_else(|| anyhow::anyhow!("Unknown Backup Profile '{current}'"))?;
+            if let Some(copy) = &section.copy {
+                let target = copy.profile.as_deref().unwrap_or("secondary");
+                if !self.profiles.contains_key(target) {
+                    anyhow::bail!(
+                        "Copy target Backend Profile '{target}' is not configured for '{profile}'"
+                    );
+                }
+                return Ok(Some(target.into()));
+            }
+            let Some(parent) = section.inherit.as_deref() else {
+                return Ok(None);
+            };
+            current = parent;
+        }
+        anyhow::bail!("Backup Profile '{profile}' has a cyclic inheritance chain");
+    }
+
+    /// Returns Backend Adapter initialization targets in the contract-defined order.
+    pub fn backend_initialization_targets(&self) -> Result<Vec<String>> {
+        let mut targets = Vec::new();
+        if self.profiles.contains_key("primary") {
+            targets.push("primary".into());
+        }
+        let mut ordinary = self
+            .profiles
+            .keys()
+            .filter(|name| {
+                !matches!(name.as_str(), "primary" | "secondary")
+                    && !(name.as_str() == "default"
+                        && self
+                            .profiles
+                            .get(*name)
+                            .is_some_and(|profile| profile.backup.is_none()))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        ordinary.sort();
+        targets.extend(ordinary);
+        if self.profiles.contains_key("secondary") {
+            targets.push("secondary".into());
+        }
+        if targets.is_empty() {
+            anyhow::bail!("No Backup Profiles are configured for backend initialization");
+        }
+        Ok(targets)
+    }
+
     /// Resolves a Backend Profile through its inheritance chain without a lossy
     /// projection into the retired operational configuration model.
     pub fn backend_credentials(
@@ -1113,7 +1166,11 @@ fn read_secure_sidecar(path: &Path) -> Result<String> {
             anyhow::bail!("credential sidecar {} must have mode 0600", path.display());
         }
     }
-    Ok(fs::read_to_string(path)?)
+    let value = fs::read_to_string(path)?;
+    if value.trim().is_empty() {
+        anyhow::bail!("credential sidecar {} cannot be empty", path.display());
+    }
+    Ok(value)
 }
 
 fn aws_sidecar_references(
@@ -1141,6 +1198,75 @@ fn env_reference(value: &str) -> Option<String> {
         .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
         .unwrap_or(reference.len());
     (!reference[..end].is_empty()).then(|| reference[..end].to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ResticProfileConfig;
+
+    fn config(yaml: &str) -> ResticProfileConfig {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn effective_copy_profile_resolves_inherited_target_and_rejects_unknown_target() {
+        let profiles = config(
+            r#"
+version: "2"
+profiles:
+  primary:
+    repository: /primary
+  secondary:
+    repository: /secondary
+  default:
+    copy:
+      profile: secondary
+  daily:
+    inherit: default
+    backup:
+      source: [/data]
+"#,
+        );
+        assert_eq!(
+            profiles.effective_copy_profile("daily").unwrap(),
+            Some("secondary".into())
+        );
+
+        let invalid = config(
+            r#"
+version: "2"
+profiles:
+  daily:
+    copy:
+      profile: missing
+"#,
+        );
+        assert!(invalid.effective_copy_profile("daily").is_err());
+    }
+
+    #[test]
+    fn backend_initialization_targets_are_deterministic_and_keep_real_default_profiles() {
+        let profiles = config(
+            r#"
+version: "2"
+profiles:
+  secondary: {}
+  zeta:
+    backup:
+      source: [/zeta]
+  primary: {}
+  alpha:
+    backup:
+      source: [/alpha]
+  default: {}
+"#,
+        );
+
+        assert_eq!(
+            profiles.backend_initialization_targets().unwrap(),
+            ["primary", "alpha", "zeta", "secondary"]
+        );
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

@@ -1,9 +1,11 @@
 mod support;
 
-use backup::runner::executor::CommandOutput;
+use anyhow::Result;
+use backup::runner::executor::{CommandOutput, CommandRunner, StrictCommandRunner};
 use backup::runner::scheduler::{
     BackupScheduler, SchedulerMode, SchedulerSettings, SystemScheduler,
 };
+use std::io;
 use support::MockExecutor;
 use tempfile::tempdir;
 
@@ -69,6 +71,76 @@ fn scheduler_falls_back_to_cron_when_systemd_is_unavailable() {
     );
 }
 
+struct MissingSystemdRunner {
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl MissingSystemdRunner {
+    fn new() -> Self {
+        Self {
+            calls: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl CommandRunner for MissingSystemdRunner {
+    fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput> {
+        self.calls.lock().unwrap().push(program.into());
+        if program == "systemctl" {
+            return Err(anyhow::Error::new(io::Error::new(
+                io::ErrorKind::NotFound,
+                "systemctl not found",
+            )));
+        }
+        if program == "crontab" && args == ["-l"] {
+            return Ok(CommandOutput {
+                status_code: 1,
+                stdout: String::new(),
+                stderr: "no crontab for backup".into(),
+            });
+        }
+        Ok(ok("installed"))
+    }
+}
+
+#[test]
+fn scheduler_falls_back_to_cron_when_systemd_binary_cannot_be_started() {
+    let runner = MissingSystemdRunner::new();
+    let scheduler = SystemScheduler::new(&runner, "/usr/bin/backup");
+
+    assert!(
+        scheduler
+            .enable(tempdir().unwrap().path())
+            .unwrap()
+            .contains("cron")
+    );
+    assert_eq!(
+        runner.calls.lock().unwrap().as_slice(),
+        ["systemctl", "crontab", "crontab"]
+    );
+}
+
+#[test]
+fn scheduler_does_not_fallback_when_systemd_capability_probe_fails() {
+    let runner = StrictCommandRunner::new([StrictCommandRunner::expectation(
+        "systemctl",
+        ["--version"],
+        &[],
+        CommandOutput {
+            status_code: 1,
+            stdout: String::new(),
+            stderr: "permission denied".into(),
+        },
+    )]);
+    let scheduler = SystemScheduler::new(&runner, "/usr/bin/backup");
+
+    let error = scheduler.enable(tempdir().unwrap().path()).unwrap_err();
+
+    assert!(error.to_string().contains("capability probe"));
+    assert!(runner.calls().iter().all(|call| call.program != "crontab"));
+    runner.assert_exhausted().unwrap();
+}
+
 #[test]
 fn cron_scheduler_quotes_executable_and_profiles_paths() {
     let executor = MockExecutor::new();
@@ -85,7 +157,7 @@ fn cron_scheduler_quotes_executable_and_profiles_paths() {
         CommandOutput {
             status_code: 1,
             stdout: String::new(),
-            stderr: String::new(),
+            stderr: "no crontab for backup".into(),
         },
     );
     executor.push_output("crontab", ok("installed"));
@@ -131,7 +203,7 @@ fn scheduler_settings_control_calendar_and_auto_cron_fallback() {
         CommandOutput {
             status_code: 1,
             stdout: String::new(),
-            stderr: String::new(),
+            stderr: "no crontab for backup".into(),
         },
     );
     cron_executor.push_output("crontab", ok("installed"));
@@ -151,7 +223,7 @@ fn cron_scheduler_rejects_calendars_that_cannot_be_represented_safely() {
         CommandOutput {
             status_code: 1,
             stdout: String::new(),
-            stderr: String::new(),
+            stderr: "no crontab for backup".into(),
         },
     );
     let scheduler = SystemScheduler::new(&executor, "/usr/bin/backup");
@@ -163,6 +235,353 @@ fn cron_scheduler_rejects_calendars_that_cannot_be_represented_safely() {
         .unwrap_err();
     assert!(error.to_string().contains("cannot be represented safely"));
     assert_eq!(executor.call_count("crontab"), 1);
+}
+
+#[test]
+fn cron_query_failure_with_empty_output_is_not_treated_as_no_crontab() {
+    let runner = StrictCommandRunner::new([
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["--version"],
+            &[],
+            CommandOutput {
+                status_code: 1,
+                stdout: String::new(),
+                stderr: "systemd unavailable".into(),
+            },
+        ),
+        StrictCommandRunner::expectation(
+            "crontab",
+            ["-l"],
+            &[],
+            CommandOutput {
+                status_code: 1,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        ),
+    ]);
+
+    let error = SystemScheduler::new(&runner, "/usr/bin/backup")
+        .status()
+        .unwrap_err();
+    assert!(error.to_string().contains("crontab failed"));
+    runner.assert_exhausted().unwrap();
+}
+
+#[test]
+fn systemd_scheduler_failure_does_not_fallback_to_cron() {
+    let path = std::path::Path::new("/tmp/profiles.yaml");
+    let runner = StrictCommandRunner::new([
+        StrictCommandRunner::expectation("systemctl", ["--version"], &[], ok("systemd")),
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["stop", "backup-pipeline.timer"],
+            &[],
+            ok(""),
+        ),
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["reset-failed", "backup-pipeline.timer"],
+            &[],
+            ok(""),
+        ),
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["stop", "backup-pipeline.service"],
+            &[],
+            ok(""),
+        ),
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["reset-failed", "backup-pipeline.service"],
+            &[],
+            ok(""),
+        ),
+        StrictCommandRunner::expectation(
+            "systemd-run",
+            [
+                "--unit",
+                "backup-pipeline",
+                "--on-calendar=*-*-* 03:00:00",
+                "--timer-property=Persistent=true",
+                "/usr/bin/backup",
+                "--profiles",
+                "/tmp/profiles.yaml",
+                "run",
+            ],
+            &[],
+            CommandOutput {
+                status_code: 1,
+                stdout: String::new(),
+                stderr: "registration failed".into(),
+            },
+        ),
+    ]);
+    let scheduler = SystemScheduler::new(&runner, "/usr/bin/backup");
+
+    let error = scheduler.enable(path).unwrap_err();
+
+    assert!(error.to_string().contains("registration failed"));
+    assert!(runner.calls().iter().all(|call| call.program != "crontab"));
+    runner.assert_exhausted().unwrap();
+}
+
+#[test]
+fn transactional_systemd_registration_restores_an_active_timer_after_failure() {
+    let runner = StrictCommandRunner::new([
+        StrictCommandRunner::expectation("systemctl", ["--version"], &[], ok("systemd")),
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["is-active", "backup-pipeline.timer"],
+            &[],
+            ok("active\n"),
+        ),
+        StrictCommandRunner::expectation("systemctl", ["--version"], &[], ok("systemd")),
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["stop", "backup-pipeline.timer"],
+            &[],
+            ok(""),
+        ),
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["reset-failed", "backup-pipeline.timer"],
+            &[],
+            ok(""),
+        ),
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["stop", "backup-pipeline.service"],
+            &[],
+            ok(""),
+        ),
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["reset-failed", "backup-pipeline.service"],
+            &[],
+            ok(""),
+        ),
+        StrictCommandRunner::expectation(
+            "systemd-run",
+            [
+                "--unit",
+                "backup-pipeline",
+                "--on-calendar=*-*-* 03:00:00",
+                "--timer-property=Persistent=true",
+                "/usr/bin/backup",
+                "--profiles",
+                "/tmp/profiles.yaml",
+                "run",
+            ],
+            &[],
+            CommandOutput {
+                status_code: 1,
+                stdout: String::new(),
+                stderr: "registration failed".into(),
+            },
+        ),
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["start", "backup-pipeline.timer"],
+            &[],
+            ok(""),
+        ),
+    ]);
+    let scheduler = SystemScheduler::new(&runner, "/usr/bin/backup");
+
+    let error = scheduler
+        .enable_preserving_state(
+            std::path::Path::new("/tmp/profiles.yaml"),
+            &SchedulerSettings::auto(),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("registration failed"));
+    runner.assert_exhausted().unwrap();
+}
+
+#[test]
+fn scheduler_status_distinguishes_active_inactive_and_query_failures() {
+    let active_runner = StrictCommandRunner::new([
+        StrictCommandRunner::expectation("systemctl", ["--version"], &[], ok("systemd")),
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["is-active", "backup-pipeline.timer"],
+            &[],
+            ok("active\n"),
+        ),
+    ]);
+    let active = SystemScheduler::new(&active_runner, "/usr/bin/backup")
+        .status()
+        .unwrap();
+    assert_eq!(active, "active\n");
+    active_runner.assert_exhausted().unwrap();
+
+    let inactive_runner = StrictCommandRunner::new([
+        StrictCommandRunner::expectation("systemctl", ["--version"], &[], ok("systemd")),
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["is-active", "backup-pipeline.timer"],
+            &[],
+            CommandOutput {
+                status_code: 3,
+                stdout: "inactive\n".into(),
+                stderr: String::new(),
+            },
+        ),
+    ]);
+    let inactive = SystemScheduler::new(&inactive_runner, "/usr/bin/backup")
+        .status()
+        .unwrap();
+    assert_eq!(inactive, "inactive");
+    inactive_runner.assert_exhausted().unwrap();
+
+    let failure_runner = StrictCommandRunner::new([
+        StrictCommandRunner::expectation("systemctl", ["--version"], &[], ok("systemd")),
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["is-active", "backup-pipeline.timer"],
+            &[],
+            CommandOutput {
+                status_code: 1,
+                stdout: String::new(),
+                stderr: "systemctl unavailable".into(),
+            },
+        ),
+    ]);
+    let error = SystemScheduler::new(&failure_runner, "/usr/bin/backup")
+        .status()
+        .unwrap_err();
+    assert!(error.to_string().contains("systemctl unavailable"));
+    failure_runner.assert_exhausted().unwrap();
+
+    let non_status_runner = StrictCommandRunner::new([
+        StrictCommandRunner::expectation("systemctl", ["--version"], &[], ok("systemd")),
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["is-active", "backup-pipeline.timer"],
+            &[],
+            CommandOutput {
+                status_code: 1,
+                stdout: "unexpected output".into(),
+                stderr: String::new(),
+            },
+        ),
+    ]);
+    assert!(
+        SystemScheduler::new(&non_status_runner, "/usr/bin/backup")
+            .status()
+            .is_err()
+    );
+    non_status_runner.assert_exhausted().unwrap();
+}
+
+#[test]
+fn cron_status_query_failure_is_not_reported_as_inactive() {
+    let runner = StrictCommandRunner::new([
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["--version"],
+            &[],
+            CommandOutput {
+                status_code: 1,
+                stdout: String::new(),
+                stderr: "systemd unavailable".into(),
+            },
+        ),
+        StrictCommandRunner::expectation(
+            "crontab",
+            ["-l"],
+            &[],
+            CommandOutput {
+                status_code: 2,
+                stdout: String::new(),
+                stderr: "permission denied".into(),
+            },
+        ),
+    ]);
+    let error = SystemScheduler::new(&runner, "/usr/bin/backup")
+        .status()
+        .unwrap_err();
+    assert!(error.to_string().contains("permission denied"));
+    runner.assert_exhausted().unwrap();
+}
+
+#[test]
+fn cron_disable_without_owned_entry_is_idempotent_without_reinstalling_crontab() {
+    let runner = StrictCommandRunner::new([
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["--version"],
+            &[],
+            CommandOutput {
+                status_code: 1,
+                stdout: String::new(),
+                stderr: "systemd unavailable".into(),
+            },
+        ),
+        StrictCommandRunner::expectation("crontab", ["-l"], &[], ok("0 4 * * * unrelated-job\n")),
+    ]);
+    let output = SystemScheduler::new(&runner, "/usr/bin/backup")
+        .disable()
+        .unwrap();
+    assert!(output.contains("No scheduled backup"));
+    assert_eq!(runner.calls().len(), 2);
+    runner.assert_exhausted().unwrap();
+}
+
+#[test]
+fn systemd_disable_propagates_cleanup_failures_without_fallback() {
+    let runner = StrictCommandRunner::new([
+        StrictCommandRunner::expectation("systemctl", ["--version"], &[], ok("systemd")),
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["stop", "backup-pipeline.timer"],
+            &[],
+            ok(""),
+        ),
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["reset-failed", "backup-pipeline.timer"],
+            &[],
+            CommandOutput {
+                status_code: 1,
+                stdout: String::new(),
+                stderr: "cleanup failed".into(),
+            },
+        ),
+    ]);
+    let error = SystemScheduler::new(&runner, "/usr/bin/backup")
+        .disable()
+        .unwrap_err();
+    assert!(error.to_string().contains("cleanup failed"));
+    assert!(runner.calls().iter().all(|call| call.program != "crontab"));
+    runner.assert_exhausted().unwrap();
+}
+
+#[test]
+fn systemd_disable_does_not_suppress_unrelated_not_found_text() {
+    let runner = StrictCommandRunner::new([
+        StrictCommandRunner::expectation("systemctl", ["--version"], &[], ok("systemd")),
+        StrictCommandRunner::expectation(
+            "systemctl",
+            ["stop", "backup-pipeline.timer"],
+            &[],
+            CommandOutput {
+                status_code: 1,
+                stdout: "not found in audit output".into(),
+                stderr: String::new(),
+            },
+        ),
+    ]);
+
+    let error = SystemScheduler::new(&runner, "/usr/bin/backup")
+        .disable()
+        .unwrap_err();
+
+    assert!(error.to_string().contains("not found in audit output"));
+    runner.assert_exhausted().unwrap();
 }
 
 fn ok(stdout: &str) -> CommandOutput {

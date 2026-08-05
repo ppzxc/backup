@@ -100,6 +100,27 @@ fn restore_rejects_nonempty_target_without_force() {
 }
 
 #[test]
+fn restore_force_rejects_success_without_new_output() {
+    let target = tempfile::tempdir().unwrap();
+    std::fs::write(target.path().join("existing.txt"), "keep").unwrap();
+
+    let error = execute_restore(
+        &BackupConfig::default(),
+        &MockResticRunner::new(0, "restored"),
+        "latest",
+        target.path().to_str().unwrap(),
+        true,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("no new output"));
+    assert_eq!(
+        std::fs::read_to_string(target.path().join("existing.txt")).unwrap(),
+        "keep"
+    );
+}
+
+#[test]
 fn restore_propagates_runner_failure_after_explicit_force() {
     let target = tempfile::tempdir().unwrap();
     std::fs::write(target.path().join("existing.txt"), "replace").unwrap();

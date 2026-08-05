@@ -11,7 +11,7 @@ use backup::runner::executor::{CommandOutput, CommandRunner, StrictCommandRunner
 use backup::runner::rclone::RcloneTool;
 use backup::runner::restic::{ResticRunner, ResticTool};
 use backup::runner::resticprofile::{ResticProfileRunner, ResticProfileTool};
-use backup::runner::scheduler::SystemScheduler;
+use backup::runner::scheduler::{BackupScheduler, SystemScheduler};
 use clap::{CommandFactory, Parser};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -639,9 +639,11 @@ fn shared_dispatch_reaches_the_strict_adapter_with_exact_profile_and_dry_run() {
     let profiles = temp.path().join("profiles.yaml");
     std::fs::write(
         &profiles,
-        "version: '2'\nprofiles:\n  default:\n    repository: /tmp/repo\n    backup:\n      source: ['/tmp']\n",
+        "version: '2'\nprofiles:\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  secondary:\n    repository: /secondary-repository\n    password-file: secondary-password\n  default:\n    inherit: primary\n    backup:\n      source: ['/tmp']\n    copy:\n      profile: secondary\n",
     )
     .unwrap();
+    write_mode_600(&temp.path().join("primary-password"), "primary-secret");
+    write_mode_600(&temp.path().join("secondary-password"), "secondary-secret");
     let runner = StrictCommandRunner::new([StrictCommandRunner::expectation(
         "resticprofile",
         [
@@ -750,7 +752,11 @@ fn shared_dispatch_preserves_run_failure_report_artifacts_and_state() {
 
     let outcome = dispatch(&context, cli.command, &adapters);
     assert_eq!(outcome.exit_status, 1);
-    assert!(outcome.stderr.contains("primary backup"), "{}", outcome.stderr);
+    assert!(
+        outcome.stderr.contains("primary backup"),
+        "{}",
+        outcome.stderr
+    );
     assert_eq!(outcome.artifacts.len(), 1);
     assert_eq!(
         outcome.external_state_changes,
@@ -935,7 +941,10 @@ fn run_contract_covers_every_skip_combination_without_changing_stage_order() {
                 );
                 let diagnostic = ContractDiagnostic::from_outcome(
                     case_id,
-                    format!("argv={args:?} profiles={}", fixture.profiles_path().display()),
+                    format!(
+                        "argv={args:?} profiles={}",
+                        fixture.profiles_path().display()
+                    ),
                     expected.clone(),
                     trace.clone(),
                     &outcome,
@@ -968,7 +977,11 @@ fn run_contract_covers_every_skip_combination_without_changing_stage_order() {
 
 #[test]
 fn run_contract_covers_profile_selection_and_flag_matrix() {
-    for selection in [RunSelection::All, RunSelection::Alpha, RunSelection::Database] {
+    for selection in [
+        RunSelection::All,
+        RunSelection::Alpha,
+        RunSelection::Database,
+    ] {
         for skip_database in [false, true] {
             for skip_secondary in [false, true] {
                 for skip_retention in [false, true] {
@@ -1015,7 +1028,10 @@ fn run_contract_covers_profile_selection_and_flag_matrix() {
                         );
                         let diagnostic = ContractDiagnostic::from_outcome(
                             case_id,
-                            format!("argv={args:?} profiles={}", fixture.profiles_path().display()),
+                            format!(
+                                "argv={args:?} profiles={}",
+                                fixture.profiles_path().display()
+                            ),
                             expected_trace.clone(),
                             trace.clone(),
                             &outcome,
@@ -1112,6 +1128,471 @@ fn run_contract_partial_failure_stops_later_stages_and_keeps_a_masked_report() {
     assert!(!report.contains("archive-secret"));
     assert!(!report.contains("postgres://backup-user:db-secret@db:5432/app"));
     assert_eq!(file_mode(report_path), Some(0o600));
+}
+
+#[test]
+fn copy_and_sync_contract_share_exact_profile_and_native_dry_run_behavior() {
+    for alias in ["copy", "sync"] {
+        for dry_run in [false, true] {
+            let fixture = copy_contract_fixture(true);
+            let mut argv = vec![
+                "backup".to_string(),
+                "--profiles".to_string(),
+                fixture.profiles.to_string_lossy().into_owned(),
+                alias.to_string(),
+                "--profile".to_string(),
+                "default".to_string(),
+            ];
+            if dry_run {
+                argv.push("--dry-run".into());
+            }
+
+            let native_args = if dry_run {
+                vec![
+                    "--config",
+                    fixture.profiles.to_str().unwrap(),
+                    "--name",
+                    "default",
+                    "--dry-run",
+                    "copy",
+                ]
+            } else {
+                vec![
+                    "--config",
+                    fixture.profiles.to_str().unwrap(),
+                    "--name",
+                    "default",
+                    "copy",
+                ]
+            };
+            let runner = StrictCommandRunner::new([StrictCommandRunner::expectation(
+                "resticprofile",
+                native_args,
+                &[],
+                CommandOutput {
+                    status_code: 0,
+                    stdout: if dry_run {
+                        "copy planned\n".into()
+                    } else {
+                        "copy completed\n".into()
+                    },
+                    stderr: String::new(),
+                },
+            )]);
+            let resticprofile = ResticProfileTool::new(&runner);
+            let restic = ResticTool::new(&runner);
+            let rclone = RcloneTool::new(&runner);
+            let scheduler = SystemScheduler::new(&runner, "backup");
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let context = CliRuntimeContext::from_cli(
+                &cli,
+                Language::En,
+                None,
+                SchedulerMode::Auto,
+                AdapterSelection::StrictTest,
+            )
+            .unwrap();
+            let adapters = AdapterSet {
+                command: &runner,
+                rclone: &rclone,
+                restic: &restic,
+                resticprofile: &resticprofile,
+                scheduler: &scheduler,
+                selection: AdapterSelection::StrictTest,
+            };
+
+            let outcome = dispatch(&context, cli.command, &adapters);
+            assert!(outcome.is_success(), "{}", outcome.stderr);
+            assert!(outcome.stdout.contains(if dry_run {
+                "copy planned"
+            } else {
+                "copy completed"
+            }));
+            assert_eq!(
+                outcome.external_state_changes,
+                if dry_run {
+                    Vec::<String>::new()
+                } else {
+                    vec!["snapshots copied".into()]
+                },
+                "alias={alias} dry_run={dry_run}"
+            );
+            runner.assert_exhausted().unwrap();
+        }
+    }
+}
+
+#[test]
+fn copy_contract_rejects_invalid_profiles_and_missing_secondary_before_adapter_calls() {
+    for invalid_profile in ["unknown", "", " ", " default "] {
+        let fixture = copy_contract_fixture(true);
+        let runner = StrictCommandRunner::new([]);
+        let resticprofile = ResticProfileTool::new(&runner);
+        let restic = ResticTool::new(&runner);
+        let rclone = RcloneTool::new(&runner);
+        let scheduler = SystemScheduler::new(&runner, "backup");
+        let cli = Cli::try_parse_from([
+            "backup",
+            "--profiles",
+            fixture.profiles.to_str().unwrap(),
+            "copy",
+            "--profile",
+            invalid_profile,
+        ])
+        .unwrap();
+        let context = CliRuntimeContext::from_cli(
+            &cli,
+            Language::En,
+            None,
+            SchedulerMode::Auto,
+            AdapterSelection::StrictTest,
+        )
+        .unwrap();
+        let adapters = AdapterSet {
+            command: &runner,
+            rclone: &rclone,
+            restic: &restic,
+            resticprofile: &resticprofile,
+            scheduler: &scheduler,
+            selection: AdapterSelection::StrictTest,
+        };
+
+        let outcome = dispatch(&context, cli.command, &adapters);
+        assert_eq!(outcome.exit_status, 1, "profile={invalid_profile:?}");
+        runner.assert_exhausted().unwrap();
+    }
+
+    let fixture = copy_contract_fixture(false);
+    let runner = StrictCommandRunner::new([]);
+    let resticprofile = ResticProfileTool::new(&runner);
+    let restic = ResticTool::new(&runner);
+    let rclone = RcloneTool::new(&runner);
+    let scheduler = SystemScheduler::new(&runner, "backup");
+    let cli = Cli::try_parse_from([
+        "backup",
+        "--profiles",
+        fixture.profiles.to_str().unwrap(),
+        "copy",
+    ])
+    .unwrap();
+    let context = CliRuntimeContext::from_cli(
+        &cli,
+        Language::En,
+        None,
+        SchedulerMode::Auto,
+        AdapterSelection::StrictTest,
+    )
+    .unwrap();
+    let adapters = AdapterSet {
+        command: &runner,
+        rclone: &rclone,
+        restic: &restic,
+        resticprofile: &resticprofile,
+        scheduler: &scheduler,
+        selection: AdapterSelection::StrictTest,
+    };
+
+    let outcome = dispatch(&context, cli.command, &adapters);
+    assert_eq!(outcome.exit_status, 1);
+    assert!(
+        runner.calls().is_empty(),
+        "missing secondary must fail before copy"
+    );
+    runner.assert_exhausted().unwrap();
+}
+
+#[test]
+fn database_contract_runs_one_stream_and_dry_run_performs_no_external_call() {
+    let fixture = lifecycle_fixture(true);
+
+    let runner = LifecycleResticAdapter::new(false, false);
+    let outcome = dispatch_lifecycle(&fixture.profiles, ["database"], &runner);
+    assert!(outcome.is_success(), "{}", outcome.stderr);
+    let database_call = &runner.database_calls()[0];
+    assert_eq!(database_call.repository, "/primary-repository");
+    assert_eq!(database_call.filename, "app.sql");
+    assert_eq!(database_call.program, "pg_dump");
+    assert_eq!(
+        database_call.args,
+        vec![
+            "--host=db",
+            "--username=backup-user",
+            "--dbname=app",
+            "--port=5432"
+        ]
+    );
+    assert_eq!(
+        database_call.environment,
+        vec![("PGPASSWORD".into(), "db-secret".into())]
+    );
+    assert_eq!(runner.restore_calls().len(), 0);
+    assert!(outcome.stdout.contains("database stream complete"));
+
+    let dry_runner = LifecycleResticAdapter::new(false, false);
+    let dry_outcome = dispatch_lifecycle(&fixture.profiles, ["database", "--dry-run"], &dry_runner);
+    assert!(dry_outcome.is_success(), "{}", dry_outcome.stderr);
+    assert!(dry_runner.database_calls().is_empty());
+    assert!(!dry_outcome.stdout.contains("postgres://"));
+    assert!(!dry_outcome.stdout.contains("db-secret"));
+    assert!(!dry_outcome.stdout.contains("backup-user"));
+}
+
+#[test]
+fn database_contract_rejects_invalid_credentials_before_the_backup_adapter() {
+    let fixture = lifecycle_fixture(true);
+    std::fs::write(
+        fixture.directory.path().join("database-connection-url"),
+        "postgres://backup-user@db:5432/app",
+    )
+    .unwrap();
+    set_mode_600(&fixture.directory.path().join("database-connection-url"));
+
+    let runner = LifecycleResticAdapter::new(false, false);
+    let outcome = dispatch_lifecycle(&fixture.profiles, ["database"], &runner);
+    assert_eq!(outcome.exit_status, 1);
+    assert!(runner.database_calls().is_empty());
+}
+
+#[test]
+fn database_dry_run_rejects_an_unresolved_backend_before_rendering() {
+    let fixture = lifecycle_fixture(true);
+    let profiles = std::fs::read_to_string(&fixture.profiles).unwrap().replace(
+        "  database:\n    inherit: primary\n",
+        "  database:\n    inherit: primary\n    password-file: missing-password\n",
+    );
+    std::fs::write(&fixture.profiles, profiles).unwrap();
+
+    let runner = LifecycleResticAdapter::new(false, false);
+    let outcome = dispatch_lifecycle(&fixture.profiles, ["database", "--dry-run"], &runner);
+
+    assert_eq!(outcome.exit_status, 1);
+    assert!(!outcome.stderr.is_empty());
+    assert!(runner.database_calls().is_empty());
+}
+
+#[test]
+fn restore_contract_selects_one_storage_and_forwards_snapshot_behavior_classes() {
+    for (storage, repository) in [
+        ("primary", "/primary-repository"),
+        ("secondary", "/secondary-repository"),
+    ] {
+        for snapshot in ["latest", "abcdef12", "abcdef"] {
+            let fixture = lifecycle_fixture(false);
+            let target = fixture
+                .directory
+                .path()
+                .join(format!("restore-{storage}-{snapshot}"));
+            let runner = LifecycleResticAdapter::new(false, false);
+            let outcome = dispatch_lifecycle(
+                &fixture.profiles,
+                [
+                    "restore",
+                    "--storage",
+                    storage,
+                    "--snapshot",
+                    snapshot,
+                    "--target",
+                    target.to_str().unwrap(),
+                ],
+                &runner,
+            );
+            assert!(outcome.is_success(), "{}", outcome.stderr);
+            let calls = runner.restore_calls();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].repository, repository);
+            assert_eq!(calls[0].snapshot, snapshot);
+            assert_eq!(calls[0].target, target.to_string_lossy());
+        }
+    }
+}
+
+#[test]
+fn restore_contract_distinguishes_invalid_snapshot_values_from_native_resolution_failures() {
+    let fixture = lifecycle_fixture(false);
+    let target = fixture.directory.path().join("restore-failure");
+    for snapshot in ["missing-id", "ambiguous-prefix"] {
+        let runner = LifecycleResticAdapter::new(false, true);
+        let outcome = dispatch_lifecycle(
+            &fixture.profiles,
+            [
+                "restore",
+                "--snapshot",
+                snapshot,
+                "--storage",
+                "secondary",
+                "--target",
+                target.to_str().unwrap(),
+            ],
+            &runner,
+        );
+        assert_eq!(outcome.exit_status, 1);
+        assert_eq!(runner.restore_calls().len(), 1);
+    }
+
+    for snapshot in ["", " ", " latest "] {
+        let runner = LifecycleResticAdapter::new(false, false);
+        let outcome = dispatch_lifecycle(
+            &fixture.profiles,
+            [
+                "restore",
+                "--snapshot",
+                snapshot,
+                "--target",
+                target.to_str().unwrap(),
+            ],
+            &runner,
+        );
+        assert_eq!(outcome.exit_status, 1, "snapshot={snapshot:?}");
+        assert!(runner.restore_calls().is_empty(), "snapshot={snapshot:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_contract_rejects_non_writable_missing_target_parent_before_adapter_call() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = lifecycle_fixture(false);
+    let parent = fixture.directory.path().join("read-only-parent");
+    std::fs::create_dir(&parent).unwrap();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let target = parent.join("restore");
+    let runner = LifecycleResticAdapter::new(false, false);
+    let outcome = dispatch_lifecycle(
+        &fixture.profiles,
+        ["restore", "--target", target.to_str().unwrap()],
+        &runner,
+    );
+    assert_eq!(outcome.exit_status, 1);
+    assert!(runner.restore_calls().is_empty());
+}
+
+#[test]
+fn restore_contract_rejects_invalid_targets_before_the_restore_adapter() {
+    let fixture = lifecycle_fixture(false);
+    let existing_file = fixture.directory.path().join("existing-file");
+    std::fs::write(&existing_file, "not a directory").unwrap();
+    let non_empty = fixture.directory.path().join("non-empty");
+    std::fs::create_dir(&non_empty).unwrap();
+    std::fs::write(non_empty.join("existing.txt"), "keep me").unwrap();
+    let missing_parent = fixture.directory.path().join("missing-parent/restore");
+    let mut invalid_targets = vec![
+        ("missing target parent", missing_parent),
+        ("regular file", existing_file),
+        ("non-empty without force", non_empty),
+    ];
+    #[cfg(unix)]
+    {
+        let symlink_target = fixture.directory.path().join("symlink-target");
+        std::fs::create_dir(&symlink_target).unwrap();
+        let symlink = fixture.directory.path().join("restore-symlink");
+        std::os::unix::fs::symlink(&symlink_target, &symlink).unwrap();
+        invalid_targets.push(("symlink", symlink));
+    }
+
+    for (case, target) in invalid_targets {
+        let runner = LifecycleResticAdapter::new(false, false);
+        let outcome = dispatch_lifecycle(
+            &fixture.profiles,
+            ["restore", "--target", target.to_str().unwrap()],
+            &runner,
+        );
+        assert_eq!(outcome.exit_status, 1, "case={case}: {}", outcome.stderr);
+        assert!(runner.restore_calls().is_empty(), "case={case}");
+    }
+}
+
+#[test]
+fn restore_force_preserves_existing_target_and_sql_validation_controls_status() {
+    let fixture = lifecycle_fixture(false);
+    let target = fixture.directory.path().join("force-target");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("existing.txt"), "keep me").unwrap();
+
+    let runner = LifecycleResticAdapter::new(false, false);
+    let outcome = dispatch_lifecycle(
+        &fixture.profiles,
+        ["restore", "--force", "--target", target.to_str().unwrap()],
+        &runner,
+    );
+    assert!(outcome.is_success(), "{}", outcome.stderr);
+    assert_eq!(
+        std::fs::read_to_string(target.join("existing.txt")).unwrap(),
+        "keep me"
+    );
+
+    let database_fixture = lifecycle_fixture(true);
+    let database_target = database_fixture.directory.path().join("invalid-sql");
+    let invalid_sql_runner = LifecycleResticAdapter::new(true, false);
+    let invalid_sql_outcome = dispatch_lifecycle(
+        &database_fixture.profiles,
+        ["restore", "--target", database_target.to_str().unwrap()],
+        &invalid_sql_runner,
+    );
+    assert_eq!(invalid_sql_outcome.exit_status, 1);
+    assert_eq!(invalid_sql_runner.restore_calls().len(), 1);
+}
+
+#[test]
+fn setup_backend_init_contract_attempts_every_target_in_deterministic_order() {
+    let fixture = setup_contract_fixture();
+    let before = std::fs::read(&fixture.profiles).unwrap();
+    let runner = SetupTraceAdapter::new(Some("alpha"));
+    let outcome = dispatch_setup(&fixture.profiles, ["setup", "backend-init"], &runner);
+
+    assert_eq!(outcome.exit_status, 1);
+    assert!(outcome.stderr.contains("alpha"));
+    assert_eq!(
+        runner.calls(),
+        vec!["primary", "alpha", "zeta", "secondary"]
+    );
+    assert_eq!(std::fs::read(&fixture.profiles).unwrap(), before);
+}
+
+#[test]
+fn setup_non_interactive_contract_initializes_existing_targets_without_prompts() {
+    let fixture = setup_contract_fixture();
+    let runner = SetupTraceAdapter::new(None);
+    let scheduler = SetupTraceScheduler::new();
+    let command_runner = StrictCommandRunner::new([]);
+    let resticprofile = SetupResticProfileAdapter { inner: &runner };
+    let rclone = RcloneTool::new(&command_runner);
+    let restic = ResticTool::new(&command_runner);
+    let system_scheduler = SetupSchedulerAdapter { inner: &scheduler };
+    let cli = Cli::try_parse_from([
+        "backup",
+        "--profiles",
+        fixture.profiles.to_str().unwrap(),
+        "setup",
+        "--non-interactive",
+    ])
+    .unwrap();
+    let context = CliRuntimeContext::from_cli(
+        &cli,
+        Language::En,
+        None,
+        SchedulerMode::Auto,
+        AdapterSelection::StrictTest,
+    )
+    .unwrap();
+    let adapters = AdapterSet {
+        command: &command_runner,
+        rclone: &rclone,
+        restic: &restic,
+        resticprofile: &resticprofile,
+        scheduler: &system_scheduler,
+        selection: AdapterSelection::StrictTest,
+    };
+
+    let outcome = dispatch(&context, cli.command, &adapters);
+
+    assert!(outcome.is_success(), "{}", outcome.stderr);
+    assert_eq!(
+        runner.calls(),
+        vec!["primary", "alpha", "zeta", "secondary"]
+    );
+    assert_eq!(scheduler.enable_calls(), 1);
+    command_runner.assert_exhausted().unwrap();
 }
 
 #[derive(Debug, Clone)]
@@ -1364,10 +1845,410 @@ struct RunContractFixture {
     profiles: PathBuf,
 }
 
+struct CopyContractFixture {
+    _directory: tempfile::TempDir,
+    profiles: PathBuf,
+}
+
+struct LifecycleFixture {
+    directory: tempfile::TempDir,
+    profiles: PathBuf,
+}
+
+struct SetupFixture {
+    _directory: tempfile::TempDir,
+    profiles: PathBuf,
+}
+
+struct SetupTraceAdapter {
+    calls: Mutex<Vec<String>>,
+    failure: Option<String>,
+}
+
+impl SetupTraceAdapter {
+    fn new(failure: Option<&str>) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            failure: failure.map(Into::into),
+        }
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn init(&self, profile: &str) -> Result<String> {
+        self.calls.lock().unwrap().push(profile.into());
+        if self.failure.as_deref() == Some(profile) {
+            anyhow::bail!("{profile} repository unavailable")
+        }
+        Ok(format!("{profile} initialized"))
+    }
+}
+
+struct SetupResticProfileAdapter<'a> {
+    inner: &'a SetupTraceAdapter,
+}
+
+impl ResticProfileRunner for SetupResticProfileAdapter<'_> {
+    fn backup(&self, _: &Path, _: &str, _: bool) -> Result<String> {
+        anyhow::bail!("unexpected setup backup call")
+    }
+
+    fn init(&self, _: &Path, profile: &str) -> Result<String> {
+        self.inner.init(profile)
+    }
+
+    fn schedule_enable(&self, _: &Path) -> Result<String> {
+        anyhow::bail!("unexpected setup profile scheduler call")
+    }
+
+    fn schedule_disable(&self, _: &Path) -> Result<String> {
+        anyhow::bail!("unexpected setup profile scheduler call")
+    }
+
+    fn schedule_status(&self, _: &Path) -> Result<String> {
+        anyhow::bail!("unexpected setup profile scheduler call")
+    }
+
+    fn list_snapshots(&self, _: &Path, _: &str) -> Result<String> {
+        anyhow::bail!("unexpected setup snapshots call")
+    }
+
+    fn prune(&self, _: &Path, _: &str) -> Result<String> {
+        anyhow::bail!("unexpected setup prune call")
+    }
+
+    fn check(&self, _: &Path, _: &str) -> Result<String> {
+        anyhow::bail!("unexpected setup check call")
+    }
+
+    fn copy(&self, _: &Path, _: &str, _: bool) -> Result<String> {
+        anyhow::bail!("unexpected setup copy call")
+    }
+}
+
+struct SetupTraceScheduler {
+    enable_calls: Mutex<usize>,
+}
+
+impl SetupTraceScheduler {
+    fn new() -> Self {
+        Self {
+            enable_calls: Mutex::new(0),
+        }
+    }
+
+    fn enable_calls(&self) -> usize {
+        *self.enable_calls.lock().unwrap()
+    }
+}
+
+struct SetupSchedulerAdapter<'a> {
+    inner: &'a SetupTraceScheduler,
+}
+
+impl BackupScheduler for SetupSchedulerAdapter<'_> {
+    fn enable(&self, _: &Path) -> Result<String> {
+        *self.inner.enable_calls.lock().unwrap() += 1;
+        Ok("scheduled".into())
+    }
+
+    fn disable(&self) -> Result<String> {
+        anyhow::bail!("unexpected setup scheduler disable call")
+    }
+
+    fn status(&self) -> Result<String> {
+        anyhow::bail!("unexpected setup scheduler status call")
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RestoreCall {
+    repository: String,
+    snapshot: String,
+    target: String,
+}
+
+#[derive(Debug, Clone)]
+struct DatabaseCall {
+    repository: String,
+    filename: String,
+    program: String,
+    args: Vec<String>,
+    environment: Vec<(String, String)>,
+}
+
+struct LifecycleResticAdapter {
+    invalid_sql: bool,
+    fail_restore: bool,
+    restore_calls: Mutex<Vec<RestoreCall>>,
+    database_calls: Mutex<Vec<DatabaseCall>>,
+}
+
+impl LifecycleResticAdapter {
+    fn new(invalid_sql: bool, fail_restore: bool) -> Self {
+        Self {
+            invalid_sql,
+            fail_restore,
+            restore_calls: Mutex::new(Vec::new()),
+            database_calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn restore_calls(&self) -> Vec<RestoreCall> {
+        self.restore_calls.lock().unwrap().clone()
+    }
+
+    fn database_calls(&self) -> Vec<DatabaseCall> {
+        self.database_calls.lock().unwrap().clone()
+    }
+
+    fn unexpected(operation: &str) -> Result<String> {
+        anyhow::bail!("unexpected lifecycle restic {operation} call")
+    }
+}
+
+impl ResticRunner for LifecycleResticAdapter {
+    fn init_repo(&self, _: &str, _: &str) -> Result<String> {
+        Self::unexpected("init")
+    }
+
+    fn backup_paths(&self, _: &str, _: &str, _: &[String], _: &[String]) -> Result<String> {
+        Self::unexpected("backup paths")
+    }
+
+    fn list_snapshots(&self, _: &str, _: &str) -> Result<String> {
+        Self::unexpected("snapshots")
+    }
+
+    fn restore(&self, _: &str, _: &str, _: &str, _: &str) -> Result<String> {
+        Self::unexpected("restore")
+    }
+
+    fn restore_with_env(
+        &self,
+        repository: &str,
+        _: &str,
+        snapshot: &str,
+        target: &str,
+        _: &[(&str, &str)],
+    ) -> Result<String> {
+        self.restore_calls.lock().unwrap().push(RestoreCall {
+            repository: repository.into(),
+            snapshot: snapshot.into(),
+            target: target.into(),
+        });
+        if self.fail_restore {
+            anyhow::bail!("snapshot {snapshot} was not found or is ambiguous")
+        }
+        std::fs::create_dir_all(target)?;
+        if self.invalid_sql {
+            std::fs::write(std::path::Path::new(target).join("dump.sql"), "not sql")?;
+        } else {
+            std::fs::write(
+                std::path::Path::new(target).join("restored.txt"),
+                "restored",
+            )?;
+        }
+        Ok("restore complete\n".into())
+    }
+
+    fn backup_command(&self, _: &str, _: &str, _: &str, _: &str, _: &[String]) -> Result<String> {
+        Self::unexpected("backup command")
+    }
+
+    fn backup_command_with_env(
+        &self,
+        repository: &str,
+        _: &str,
+        filename: &str,
+        program: &str,
+        args: &[String],
+        environment: &[(&str, &str)],
+    ) -> Result<String> {
+        self.database_calls.lock().unwrap().push(DatabaseCall {
+            repository: repository.into(),
+            filename: filename.into(),
+            program: program.into(),
+            args: args.to_vec(),
+            environment: environment
+                .iter()
+                .map(|(key, value)| ((*key).into(), (*value).into()))
+                .collect(),
+        });
+        Ok("database stream complete\n".into())
+    }
+}
+
 impl RunContractFixture {
     fn profiles_path(&self) -> &Path {
         &self.profiles
     }
+}
+
+fn copy_contract_fixture(with_secondary: bool) -> CopyContractFixture {
+    let directory = tempfile::tempdir().unwrap();
+    let profiles = directory.path().join("profiles.yaml");
+    let secondary_profile = if with_secondary {
+        "  secondary:\n    repository: /secondary-repository\n    password-file: secondary-password\n"
+    } else {
+        ""
+    };
+    std::fs::write(
+        &profiles,
+        format!(
+            "version: '2'\nprofiles:\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n{secondary_profile}  default:\n    inherit: primary\n    backup:\n      source: ['/data']\n    copy:\n      profile: secondary\n"
+        ),
+    )
+    .unwrap();
+    write_mode_600(&directory.path().join("primary-password"), "primary-secret");
+    if with_secondary {
+        write_mode_600(
+            &directory.path().join("secondary-password"),
+            "secondary-secret",
+        );
+    }
+    backup::config::model::ResticProfileConfig::load_from_path(&profiles).unwrap();
+    CopyContractFixture {
+        _directory: directory,
+        profiles,
+    }
+}
+
+fn lifecycle_fixture(database: bool) -> LifecycleFixture {
+    let directory = tempfile::tempdir().unwrap();
+    let profiles = directory.path().join("profiles.yaml");
+    let application = if database {
+        "application:\n  database:\n    profile: database\n    type: postgres\n    connection-url: ${BACKUP_DATABASE_CONNECTION_URL}\n"
+    } else {
+        ""
+    };
+    let database_profile = if database {
+        "  database:\n    inherit: primary\n"
+    } else {
+        ""
+    };
+    std::fs::write(
+        &profiles,
+        format!(
+            "version: '2'\n{application}profiles:\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  secondary:\n    repository: /secondary-repository\n    password-file: secondary-password\n{database_profile}"
+        ),
+    )
+    .unwrap();
+    write_mode_600(&directory.path().join("primary-password"), "primary-secret");
+    write_mode_600(
+        &directory.path().join("secondary-password"),
+        "secondary-secret",
+    );
+    if database {
+        write_mode_600(
+            &directory.path().join("database-connection-url"),
+            "postgres://backup-user:db-secret@db:5432/app",
+        );
+    }
+    backup::config::model::ResticProfileConfig::load_from_path(&profiles).unwrap();
+    LifecycleFixture {
+        directory,
+        profiles,
+    }
+}
+
+fn setup_contract_fixture() -> SetupFixture {
+    let directory = tempfile::tempdir().unwrap();
+    let profiles = directory.path().join("profiles.yaml");
+    std::fs::write(
+        &profiles,
+        "version: '2'\nprofiles:\n  secondary:\n    repository: /secondary-repository\n    password-file: secondary-password\n  zeta:\n    inherit: primary\n    backup:\n      source: ['/zeta']\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  alpha:\n    inherit: primary\n    backup:\n      source: ['/alpha']\n  default: {}\n",
+    )
+    .unwrap();
+    write_mode_600(&directory.path().join("primary-password"), "primary-secret");
+    write_mode_600(
+        &directory.path().join("secondary-password"),
+        "secondary-secret",
+    );
+    backup::config::model::ResticProfileConfig::load_from_path(&profiles).unwrap();
+    SetupFixture {
+        _directory: directory,
+        profiles,
+    }
+}
+
+fn dispatch_setup<I>(profiles: &Path, args: I, resticprofile: &SetupTraceAdapter) -> CommandOutcome
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let mut argv = vec![
+        "backup".to_string(),
+        "--profiles".to_string(),
+        profiles.to_string_lossy().into_owned(),
+    ];
+    argv.extend(args.into_iter().map(|arg| arg.as_ref().to_string()));
+    let cli = Cli::try_parse_from(argv).unwrap();
+    let context = CliRuntimeContext::from_cli(
+        &cli,
+        Language::En,
+        None,
+        SchedulerMode::Auto,
+        AdapterSelection::StrictTest,
+    )
+    .unwrap();
+    let command_runner = StrictCommandRunner::new([]);
+    let adapter = SetupResticProfileAdapter {
+        inner: resticprofile,
+    };
+    let restic = ResticTool::new(&command_runner);
+    let rclone = RcloneTool::new(&command_runner);
+    let scheduler = SystemScheduler::new(&command_runner, "backup");
+    let adapters = AdapterSet {
+        command: &command_runner,
+        rclone: &rclone,
+        restic: &restic,
+        resticprofile: &adapter,
+        scheduler: &scheduler,
+        selection: AdapterSelection::StrictTest,
+    };
+    dispatch(&context, cli.command, &adapters)
+}
+
+fn dispatch_lifecycle<I>(
+    profiles: &Path,
+    args: I,
+    restic: &LifecycleResticAdapter,
+) -> CommandOutcome
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let mut argv = vec![
+        "backup".to_string(),
+        "--profiles".to_string(),
+        profiles.to_string_lossy().into_owned(),
+    ];
+    argv.extend(args.into_iter().map(|arg| arg.as_ref().to_string()));
+    let cli = Cli::try_parse_from(argv).unwrap();
+    let context = CliRuntimeContext::from_cli(
+        &cli,
+        Language::En,
+        None,
+        SchedulerMode::Auto,
+        AdapterSelection::StrictTest,
+    )
+    .unwrap();
+    let command_runner = StrictCommandRunner::new([]);
+    let resticprofile = ResticProfileTool::new(&command_runner);
+    let rclone = RcloneTool::new(&command_runner);
+    let scheduler = SystemScheduler::new(&command_runner, "backup");
+    let adapters = AdapterSet {
+        command: &command_runner,
+        rclone: &rclone,
+        restic,
+        resticprofile: &resticprofile,
+        scheduler: &scheduler,
+        selection: AdapterSelection::StrictTest,
+    };
+    dispatch(&context, cli.command, &adapters)
 }
 
 fn run_contract_fixture() -> RunContractFixture {
@@ -1388,10 +2269,7 @@ fn run_contract_fixture() -> RunContractFixture {
         &directory.path().join("secondary-password"),
         "secondary-secret",
     );
-    write_mode_600(
-        &directory.path().join("archive-password"),
-        "archive-secret",
-    );
+    write_mode_600(&directory.path().join("archive-password"), "archive-secret");
     write_mode_600(
         &directory.path().join("database-connection-url"),
         "postgres://backup-user:db-secret@db:5432/app",
@@ -1480,9 +2358,7 @@ fn expected_trace(
     skip_retention: bool,
 ) -> Vec<String> {
     let mut trace = Vec::new();
-    if matches!(selection, RunSelection::All | RunSelection::Database)
-        && !skip_database
-        && !dry_run
+    if matches!(selection, RunSelection::All | RunSelection::Database) && !skip_database && !dry_run
     {
         trace.push("database".into());
     }
@@ -1562,11 +2438,8 @@ fn dispatch_run_contract(
     )
     .unwrap();
     let trace = Arc::new(Mutex::new(Vec::new()));
-    let profile_adapter = StrictRunProfileAdapter::new(
-        profiles,
-        expected.profile_calls,
-        trace.clone(),
-    );
+    let profile_adapter =
+        StrictRunProfileAdapter::new(profiles, expected.profile_calls, trace.clone());
     let database_adapter = StrictRunDatabaseAdapter::new(expected.database_call, trace.clone());
     let command_runner = StrictCommandRunner::new([]);
     let rclone = RcloneTool::new(&command_runner);
