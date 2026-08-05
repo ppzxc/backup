@@ -142,11 +142,8 @@ pub fn write_execution_report_from_profiles(
             .values()
             .filter_map(|profile| profile.password.clone()),
     );
-    for (profile_name, profile) in &config.profiles {
-        if profile.repository.is_some()
-            || profile.password_file.is_some()
-            || profile.inherit.is_some()
-        {
+    for profile_name in config.profiles.keys() {
+        if backend_password_file_exists(config, config_dir, profile_name) {
             let (_, password) = config
                 .backend_credentials(config_dir, profile_name)
                 .with_context(|| {
@@ -190,6 +187,35 @@ pub fn write_execution_report_from_profiles(
         &String::from_utf8(serde_json::to_vec_pretty(&report)?)?,
     )?;
     Ok(path)
+}
+
+fn backend_password_file_exists(
+    config: &crate::config::model::ResticProfileConfig,
+    config_dir: &Path,
+    profile: &str,
+) -> bool {
+    let mut current = profile;
+    let mut remaining = config.profiles.len() + 1;
+    while remaining > 0 {
+        remaining -= 1;
+        let Some(section) = config.profiles.get(current) else {
+            return false;
+        };
+        if let Some(password_file) = &section.password_file {
+            let path = Path::new(password_file);
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                config_dir.join(path)
+            };
+            return path.is_file();
+        }
+        let Some(parent) = section.inherit.as_deref() else {
+            return false;
+        };
+        current = parent;
+    }
+    false
 }
 
 fn now_nanos() -> u128 {
