@@ -38,7 +38,9 @@ impl ResticRunner for SnapshotRunner {
         self.next("backup")
     }
 
-    fn list_snapshots(&self, _: &str, _: &str) -> Result<String> {
+    fn list_snapshots(&self, repository: &str, password: &str) -> Result<String> {
+        assert!(repository.starts_with("s3:https://"));
+        assert!(!password.is_empty());
         self.next("list_snapshots")
     }
 
@@ -176,7 +178,9 @@ impl ResticProfileRunner for StatusRunner {
     fn schedule_status(&self, _: &Path) -> Result<String> {
         anyhow::bail!("not expected")
     }
-    fn list_snapshots(&self, _: &Path, profile: &str) -> Result<String> {
+    fn list_snapshots(&self, config_path: &Path, profile: &str) -> Result<String> {
+        assert!(config_path.ends_with("profiles.yaml"));
+        assert!(!profile.is_empty());
         self.calls.lock().unwrap().push(profile.into());
         match self.responses.lock().unwrap().remove(0) {
             Ok(output) => Ok(output),

@@ -23,7 +23,13 @@ fn test_perform_uninstall_with_yes() {
         perform_uninstall(Path::new("/etc/backup/profiles.yaml"), &runner, true, false).unwrap();
     assert!(res.contains("Uninstalled"));
     let calls = runner.calls.lock().unwrap();
-    assert!(calls.is_empty());
+    assert_eq!(
+        calls.as_slice(),
+        [(
+            "schedule_disable".into(),
+            "/etc/backup/profiles.yaml".into()
+        )]
+    );
 }
 
 #[test]
@@ -93,6 +99,7 @@ fn purge_removes_only_the_selected_configuration_scope() {
     std::fs::write(cache.join("index"), "cache").unwrap();
     std::fs::write(scope.join("keep.txt"), "unrelated").unwrap();
     std::fs::write(systemd.join("backup.timer"), "owned").unwrap();
+    std::fs::write(systemd.join("backup.timer.bak"), "unrelated").unwrap();
     std::fs::write(systemd.join("other.timer"), "unrelated").unwrap();
     let password = scope.join("primary-password");
     std::fs::write(&password, "uninstall-password").unwrap();
@@ -135,6 +142,7 @@ fn purge_removes_only_the_selected_configuration_scope() {
     assert!(scope.exists());
     assert!(scope.join("keep.txt").exists());
     assert!(!systemd.join("backup.timer").exists());
+    assert!(systemd.join("backup.timer.bak").exists());
     assert!(systemd.join("other.timer").exists());
     assert_eq!(
         scheduler.calls.lock().unwrap().as_slice(),

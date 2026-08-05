@@ -356,6 +356,7 @@ fn contract_expectation(
             "rclone lsd syno_backup env=[] timeout=None".into(),
             "chronyc tracking env=[] timeout=None".into(),
             "timedatectl status env=[] timeout=None".into(),
+            "systemctl is-active backup-pipeline.timer env=[] timeout=None".into(),
         ]
     } else if command_path == "backup.update" {
         vec![

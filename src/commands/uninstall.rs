@@ -106,9 +106,9 @@ pub fn perform_uninstall_with_executor_at_path_and_targets<
         }
     }
 
-    if profiles_path.exists() {
-        runner.schedule_disable(profiles_path)?;
-    }
+    // Scheduler cleanup is configuration-independent.  The scheduler adapter owns detection of
+    // stale markers and systemd units, so it must run even when --profiles was already removed.
+    runner.schedule_disable(profiles_path)?;
 
     let systemd_removed = remove_owned_systemd_units(&targets.systemd_dir)?;
 
@@ -143,8 +143,8 @@ fn remove_owned_systemd_units(systemd_dir: &Path) -> Result<bool> {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.starts_with("resticprofile-backup@")
-            || name.starts_with("backup.service")
-            || name.starts_with("backup.timer")
+            || name == "backup.service"
+            || name == "backup.timer"
         {
             let path = entry.path();
             if path.is_dir() {

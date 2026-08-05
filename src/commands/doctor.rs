@@ -180,6 +180,14 @@ impl SystemHealthDiagnoser {
             detail: ntp_detail,
         });
 
+        let (scheduler_status, scheduler_detail) = check_scheduler_with_runner(runner);
+        items.push(DoctorItem {
+            category: DoctorCategory::System,
+            criterion: "타이머 스케줄러 헬스체크".into(),
+            status: scheduler_status,
+            detail: scheduler_detail,
+        });
+
         // 4. Restore Drill RTO Item: non-destructively restore the latest snapshot.
         let start_time = std::time::Instant::now();
         let restic_res = (|| -> anyhow::Result<_> {
@@ -322,6 +330,20 @@ pub fn run_doctor_contract_with_runner<R: RcloneRunner + ?Sized, C: CommandRunne
     config_path: Option<&Path>,
     host_name: &str,
 ) -> Result<(String, bool)> {
+    let (report, passed, _) =
+        run_doctor_contract_with_runner_and_diagnostics(rclone, runner, config_path, host_name)?;
+    Ok((report, passed))
+}
+
+pub fn run_doctor_contract_with_runner_and_diagnostics<
+    R: RcloneRunner + ?Sized,
+    C: CommandRunner + ?Sized,
+>(
+    rclone: &R,
+    runner: &C,
+    config_path: Option<&Path>,
+    host_name: &str,
+) -> Result<(String, bool, String)> {
     tracing::info!("Executing system health diagnostics checks");
     let snapshot = SystemHealthDiagnoser::diagnose_with_runner_and_host(
         rclone,
@@ -333,7 +355,33 @@ pub fn run_doctor_contract_with_runner<R: RcloneRunner + ?Sized, C: CommandRunne
         .items
         .iter()
         .all(|item| !matches!(item.status, DoctorStatus::Fail | DoctorStatus::Unavailable));
-    Ok((render_doctor_report(&snapshot), passed))
+    let diagnostics = snapshot
+        .items
+        .iter()
+        .map(|item| format!("{}: {}", item.criterion, item.detail))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok((render_doctor_report(&snapshot), passed, diagnostics))
+}
+
+fn check_scheduler_with_runner<C: CommandRunner + ?Sized>(runner: &C) -> (DoctorStatus, String) {
+    match runner.run("systemctl", &["is-active", "backup-pipeline.timer"]) {
+        Ok(output) if output.status_code == 0 => (
+            DoctorStatus::Pass,
+            "backup-pipeline.timer active".to_string(),
+        ),
+        Ok(output) => (
+            DoctorStatus::Fail,
+            format!(
+                "backup-pipeline.timer inactive (exit {})",
+                output.status_code
+            ),
+        ),
+        Err(error) => (
+            DoctorStatus::Unavailable,
+            format!("scheduler health check unavailable: {error}"),
+        ),
+    }
 }
 
 fn render_doctor_report(snapshot: &SystemHealthSnapshot) -> String {
@@ -346,6 +394,9 @@ fn render_doctor_report(snapshot: &SystemHealthSnapshot) -> String {
             DoctorCategory::System if item.criterion == "Restic binary" => "Restic binary",
             DoctorCategory::System if item.criterion.contains("시각 동기화") => {
                 "NTP Time Sync"
+            }
+            DoctorCategory::System if item.criterion.contains("타이머 스케줄러") => {
+                "Scheduler health"
             }
             _ => &item.criterion,
         };

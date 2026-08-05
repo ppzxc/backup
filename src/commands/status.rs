@@ -237,3 +237,17 @@ fn create_temp_password_file(password: &str) -> Result<NamedTempFile> {
     file.flush()?;
     Ok(file)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::redact_status_text;
+
+    #[test]
+    fn status_text_masks_url_credentials_and_secret_words() {
+        let redacted =
+            redact_status_text("s3://user:password@example/backup status-password token=abc");
+        assert!(!redacted.contains("password"));
+        assert!(!redacted.contains("user:"));
+        assert!(redacted.contains("<redacted>"));
+    }
+}

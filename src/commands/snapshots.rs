@@ -132,3 +132,20 @@ pub fn execute_snapshots<R: ResticRunner>(config: &BackupConfig, runner: &R) -> 
     }
     Ok(output)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::redact_snapshot_diagnostic;
+
+    #[test]
+    fn snapshot_diagnostics_mask_credentials_and_repository() {
+        let redacted = redact_snapshot_diagnostic(
+            "repository=s3:https://user:password@example/backup token=abc",
+            "s3:https://user:password@example/backup",
+            "password",
+        );
+        assert!(!redacted.contains("password"));
+        assert!(!redacted.contains("s3:https://user:password@example/backup"));
+        assert!(redacted.contains("<redacted>"));
+    }
+}

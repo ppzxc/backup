@@ -880,18 +880,19 @@ fn dispatch_inner(
             ))
         }
         Command::Doctor => {
-            let (output, passed) = crate::commands::doctor::run_doctor_contract_with_runner(
-                adapters.rclone,
-                adapters.command,
-                Some(&context.profiles_path),
-                &context.host_name,
-            )?;
-            let mut outcome = CommandOutcome::success(output, "", Vec::new());
+            let (output, passed, diagnostics) =
+                crate::commands::doctor::run_doctor_contract_with_runner_and_diagnostics(
+                    adapters.rclone,
+                    adapters.command,
+                    Some(&context.profiles_path),
+                    &context.host_name,
+                )?;
+            let mut outcome = CommandOutcome::success(output, diagnostics, Vec::new());
             if !passed {
                 outcome.exit_status = 1;
                 outcome
                     .stderr
-                    .push_str("doctor reported one or more failed diagnostics");
+                    .push_str("\ndoctor reported one or more failed diagnostics");
             }
             Ok(outcome)
         }

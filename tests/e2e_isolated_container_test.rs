@@ -248,40 +248,52 @@ fn runner(resources: &E2eResources, script: &str) -> String {
     runner_attempt(resources, script).unwrap_or_else(|error| {
         let case_id = e2e_case_id(script);
         let invariant = e2e_invariant(script);
+        let external_state = e2e_external_state(script);
         panic!(
-            "Docker E2E runner command failed\ncase_id={case_id}\ninvariant={invariant}\nexternal_state=runner,storage,database,scheduler\n{error}\n{}",
+            "Docker E2E runner command failed\ncase_id={case_id}\ninvariant={invariant}\nexternal_state={external_state}\n{error}\n{}",
             docker_diagnostics(&resources.container_names())
         )
     })
 }
 
 fn e2e_case_id(script: &str) -> String {
-    let work_path = script
+    let profile = script
         .split_whitespace()
-        .find(|token| token.starts_with("/work/") && token.len() > "/work/".len())
-        .unwrap_or("/work/unknown");
-    let name = work_path
-        .trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '/')
-        .trim_start_matches("/work/")
-        .split('/')
-        .next()
+        .find_map(|token| {
+            let token = token.trim_matches(|character: char| {
+                !character.is_ascii_alphanumeric() && character != '/'
+            });
+            token
+                .strip_prefix("/work/")
+                .and_then(|value| value.strip_suffix("/profiles.yaml"))
+        })
         .unwrap_or("unknown");
     if script.contains("schedule enable") {
-        format!("{name}.scheduler")
+        format!("{profile}.scheduler")
     } else {
-        name.to_owned()
+        profile.to_owned()
     }
 }
 
 fn e2e_invariant(script: &str) -> &'static str {
     if script.contains("CREATE TABLE") && script.contains("restore --target") {
         "database-dump-restore-integrity"
-    } else if script.contains("assert_tree") {
-        "backup-copy-snapshot-restore-tree"
     } else if script.contains("schedule enable") {
         "scheduler-enable-disable-execution-report"
+    } else if script.contains("assert_tree") {
+        "backup-copy-snapshot-restore-tree"
     } else {
         "container-command-contract"
+    }
+}
+
+fn e2e_external_state(script: &str) -> &'static str {
+    if script.contains("CREATE TABLE") {
+        "runner,minio,database-containers,restic-repository,restore-target"
+    } else if script.contains("schedule enable") {
+        "runner,systemd-or-cron,execution-report,restic-repository"
+    } else {
+        "runner,minio-or-sftp,restic-repositories,restore-target"
     }
 }
 

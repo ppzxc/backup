@@ -1053,7 +1053,10 @@ fn escape_html(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReportFormat, escape_html, render_failure_metadata};
+    use super::{
+        ReportFormat, ReportType, batch_report_path, escape_html, render_failure_metadata,
+    };
+    use std::path::Path;
 
     #[test]
     fn failure_metadata_escapes_html_diagnostics() {
@@ -1080,6 +1083,16 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         assert_eq!(value["report_status"], "Fail");
         assert_eq!(value["failure_diagnostic"], "failed");
+    }
+
+    #[test]
+    fn batch_report_paths_are_distinct_per_action() {
+        let base = Path::new("/tmp/audit.json");
+        assert_ne!(
+            batch_report_path(base, ReportType::Environment),
+            batch_report_path(base, ReportType::TimeSync)
+        );
+        assert!(batch_report_path(base, ReportType::RestoreDrill).ends_with("audit-restore-drill"));
     }
 }
 
