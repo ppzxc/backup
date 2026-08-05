@@ -23,13 +23,7 @@ fn test_perform_uninstall_with_yes() {
         perform_uninstall(Path::new("/etc/backup/profiles.yaml"), &runner, true, false).unwrap();
     assert!(res.contains("Uninstalled"));
     let calls = runner.calls.lock().unwrap();
-    assert_eq!(
-        calls.as_slice(),
-        [(
-            "schedule_disable".into(),
-            "/etc/backup/profiles.yaml".into()
-        )]
-    );
+    assert!(calls.is_empty());
 }
 
 #[test]

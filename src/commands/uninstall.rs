@@ -106,9 +106,14 @@ pub fn perform_uninstall_with_executor_at_path_and_targets<
         }
     }
 
-    // Scheduler cleanup is configuration-independent.  The scheduler adapter owns detection of
-    // stale markers and systemd units, so it must run even when --profiles was already removed.
-    runner.schedule_disable(profiles_path)?;
+    // Scheduler cleanup is configuration-independent.  When the profiles file still exists, the
+    // resticprofile adapter removes its configured schedules.  If it is already gone, remove the
+    // CLI-owned Cron marker directly so stale schedules are not left behind.
+    if profiles_path.exists() {
+        runner.schedule_disable(profiles_path)?;
+    } else {
+        remove_owned_cron_entries(executor)?;
+    }
 
     let systemd_removed = remove_owned_systemd_units(&targets.systemd_dir)?;
 
@@ -156,6 +161,40 @@ fn remove_owned_systemd_units(systemd_dir: &Path) -> Result<bool> {
         }
     }
     Ok(removed)
+}
+
+fn remove_owned_cron_entries<E: CommandRunner + ?Sized>(executor: &E) -> Result<()> {
+    use std::io::Write;
+
+    let output = executor.run("crontab", &["-l"])?;
+    if output.status_code != 0 {
+        if output.status_code == 1 && output.stderr.to_ascii_lowercase().contains("no crontab") {
+            return Ok(());
+        }
+        anyhow::bail!("crontab listing failed: {}", output.stderr.trim());
+    }
+    if !output
+        .stdout
+        .lines()
+        .any(|line| line.contains("# backup-pipeline"))
+    {
+        return Ok(());
+    }
+
+    let filtered = output
+        .stdout
+        .lines()
+        .filter(|line| !line.contains("# backup-pipeline"))
+        .collect::<Vec<_>>();
+    let mut file = tempfile::NamedTempFile::new()?;
+    writeln!(file, "{}", filtered.join("\n"))?;
+    file.flush()?;
+    let path = file.path().to_string_lossy();
+    let installed = executor.run("crontab", &[&path])?;
+    if installed.status_code != 0 {
+        anyhow::bail!("crontab cleanup failed: {}", installed.stderr.trim());
+    }
+    Ok(())
 }
 
 fn purge_configuration_scope(profiles_path: &Path) -> Result<()> {
