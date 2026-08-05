@@ -1,3 +1,4 @@
+use anyhow::Result;
 use backup::cli::{
     AdapterSelection, AdapterSet, Cli, CliRuntimeContext, CommandOutcome, ContractCaseSpec,
     ContractDiagnostic, SchedulerMode, authoritative_cli_axes, authoritative_cli_command_paths,
@@ -8,11 +9,13 @@ use backup::commands::report::ReportConfig;
 use backup::i18n::Language;
 use backup::runner::executor::{CommandOutput, CommandRunner, StrictCommandRunner};
 use backup::runner::rclone::RcloneTool;
-use backup::runner::restic::ResticTool;
-use backup::runner::resticprofile::ResticProfileTool;
+use backup::runner::restic::{ResticRunner, ResticTool};
+use backup::runner::resticprofile::{ResticProfileRunner, ResticProfileTool};
 use backup::runner::scheduler::SystemScheduler;
 use clap::{CommandFactory, Parser};
-use std::path::PathBuf;
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 const CONTRACT_COMMAND_PATHS: &[&str] = &[
     "backup",
@@ -803,4 +806,628 @@ fn invalid_profile_fails_before_any_strict_adapter_call() {
     assert_eq!(outcome.exit_status, 1);
     assert!(outcome.stderr.contains("not configured"));
     runner.assert_exhausted().unwrap();
+}
+
+#[test]
+fn run_contract_resolves_all_runnable_profiles_or_one_exact_profile() {
+    let fixture = run_contract_fixture();
+
+    let (outcome, trace) = dispatch_run_contract(
+        fixture.profiles_path(),
+        &[],
+        expected_full_pipeline(false, false, false, false),
+    );
+    assert!(outcome.is_success(), "{}", outcome.stderr);
+    assert_eq!(
+        trace,
+        vec![
+            "database",
+            "primary:alpha:dry=false",
+            "primary:beta:dry=false",
+            "secondary:alpha:dry=false",
+            "secondary:beta:dry=false",
+            "retention:alpha",
+            "retention:beta",
+        ]
+    );
+
+    let (outcome, trace) = dispatch_run_contract(
+        fixture.profiles_path(),
+        &["--profile", "alpha"],
+        RunContractExpectations {
+            profile_calls: vec![
+                profile_call(
+                    "primary",
+                    "alpha",
+                    Some(false),
+                    "snapshot alpha-id saved\n",
+                    None,
+                ),
+                profile_call(
+                    "secondary",
+                    "alpha",
+                    Some(false),
+                    "copy alpha complete\n",
+                    None,
+                ),
+                profile_call(
+                    "retention",
+                    "alpha",
+                    None,
+                    "retention alpha complete\n",
+                    None,
+                ),
+            ],
+            database_call: None,
+        },
+    );
+    assert!(outcome.is_success(), "{}", outcome.stderr);
+    assert_eq!(
+        trace,
+        vec![
+            "primary:alpha:dry=false",
+            "secondary:alpha:dry=false",
+            "retention:alpha",
+        ]
+    );
+    assert!(outcome.stdout.contains("Execution report:"));
+}
+
+#[test]
+fn run_contract_executes_database_profile_once_and_excludes_it_from_file_stages() {
+    let fixture = run_contract_fixture();
+    let (outcome, trace) = dispatch_run_contract(
+        fixture.profiles_path(),
+        &["--profile", "database"],
+        RunContractExpectations {
+            profile_calls: Vec::new(),
+            database_call: Some(database_call_expectation()),
+        },
+    );
+
+    assert!(outcome.is_success(), "{}", outcome.stderr);
+    assert_eq!(trace, vec!["database"]);
+    assert!(!outcome.stdout.contains("primary:alpha"));
+    assert!(!outcome.stdout.contains("secondary:alpha"));
+}
+
+#[test]
+fn run_contract_covers_every_skip_combination_without_changing_stage_order() {
+    for skip_database in [false, true] {
+        for skip_secondary in [false, true] {
+            for skip_retention in [false, true] {
+                let fixture = run_contract_fixture();
+                let mut args = Vec::new();
+                if skip_database {
+                    args.push("--skip-database");
+                }
+                if skip_secondary {
+                    args.push("--skip-secondary-sync");
+                }
+                if skip_retention {
+                    args.push("--skip-retention");
+                }
+                let (outcome, trace) = dispatch_run_contract(
+                    fixture.profiles_path(),
+                    &args,
+                    expected_full_pipeline(false, skip_database, skip_secondary, skip_retention),
+                );
+
+                assert!(
+                    outcome.is_success(),
+                    "skip_database={skip_database} skip_secondary={skip_secondary} \
+                     skip_retention={skip_retention}: {}",
+                    outcome.stderr
+                );
+                let mut expected: Vec<String> = Vec::new();
+                if !skip_database {
+                    expected.push("database".into());
+                }
+                expected.extend([
+                    "primary:alpha:dry=false".into(),
+                    "primary:beta:dry=false".into(),
+                ]);
+                if !skip_secondary {
+                    expected.extend([
+                        "secondary:alpha:dry=false".into(),
+                        "secondary:beta:dry=false".into(),
+                    ]);
+                }
+                if !skip_retention {
+                    expected.extend(["retention:alpha".into(), "retention:beta".into()]);
+                }
+                assert_eq!(trace, expected);
+                assert!(outcome.stdout.contains("Execution report:"));
+            }
+        }
+    }
+}
+
+#[test]
+fn run_contract_dry_run_forwards_native_flags_and_creates_no_snapshot_or_mutation() {
+    let fixture = run_contract_fixture();
+    let (outcome, trace) = dispatch_run_contract(
+        fixture.profiles_path(),
+        &["--dry-run"],
+        expected_full_pipeline(true, false, false, false),
+    );
+
+    assert!(outcome.is_success(), "{}", outcome.stderr);
+    assert_eq!(
+        trace,
+        vec![
+            "primary:alpha:dry=true",
+            "primary:beta:dry=true",
+            "secondary:alpha:dry=true",
+            "secondary:beta:dry=true",
+        ]
+    );
+    assert!(outcome.external_state_changes.is_empty());
+    assert!(
+        outcome
+            .stdout
+            .contains("[Dry-Run] Database Stream: pg_dump -> app.sql")
+    );
+    let report_path = &outcome.artifacts[0].path;
+    let report = std::fs::read_to_string(report_path).unwrap();
+    assert!(report.contains("\"succeeded\": true"));
+    assert!(report.contains("\"snapshot_id\": null"));
+    assert_eq!(file_mode(report_path), Some(0o600));
+    assert_eq!(file_mode(report_path.parent().unwrap()), Some(0o700));
+}
+
+#[test]
+fn run_contract_partial_failure_stops_later_stages_and_keeps_a_masked_report() {
+    let fixture = run_contract_fixture();
+    let mut expected = expected_full_pipeline(false, false, false, false);
+    expected.profile_calls = vec![
+        profile_call(
+            "primary",
+            "alpha",
+            Some(false),
+            "snapshot alpha-id saved\n",
+            None,
+        ),
+        profile_call(
+            "primary",
+            "beta",
+            Some(false),
+            "snapshot beta-id saved\n",
+            None,
+        ),
+        profile_call(
+            "secondary",
+            "alpha",
+            Some(false),
+            "",
+            Some(
+                "copy failed using primary-secret for postgres://backup-user:db-secret@db:5432/app",
+            ),
+        ),
+    ];
+
+    let (outcome, trace) = dispatch_run_contract(fixture.profiles_path(), &[], expected);
+    assert_eq!(outcome.exit_status, 1);
+    assert!(outcome.stdout.is_empty());
+    assert!(outcome.stderr.contains("secondary sync"));
+    assert_eq!(trace.len(), 4);
+    assert_eq!(
+        outcome.external_state_changes,
+        vec!["stage 'secondary sync' attempted"]
+    );
+    assert_eq!(outcome.artifacts.len(), 1);
+    let report_path = &outcome.artifacts[0].path;
+    let report = std::fs::read_to_string(report_path).unwrap();
+    assert!(report.contains("\"succeeded\": false"));
+    assert!(report.contains("\"failure_stage\": \"secondary sync\""));
+    assert!(!report.contains("primary-secret"));
+    assert!(!report.contains("postgres://backup-user:db-secret@db:5432/app"));
+    assert_eq!(file_mode(report_path), Some(0o600));
+}
+
+#[derive(Debug, Clone)]
+struct ProfileCallExpectation {
+    operation: &'static str,
+    profile: String,
+    dry_run: Option<bool>,
+    output: String,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DatabaseCallExpectation {
+    repository: String,
+    password: String,
+    filename: String,
+    program: String,
+    args: Vec<String>,
+    environment: Vec<(String, String)>,
+    output: String,
+}
+
+#[derive(Default)]
+struct RunContractExpectations {
+    profile_calls: Vec<ProfileCallExpectation>,
+    database_call: Option<DatabaseCallExpectation>,
+}
+
+struct StrictRunProfileAdapter {
+    calls: Mutex<VecDeque<ProfileCallExpectation>>,
+    trace: Arc<Mutex<Vec<String>>>,
+}
+
+impl StrictRunProfileAdapter {
+    fn new(calls: Vec<ProfileCallExpectation>, trace: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            calls: Mutex::new(calls.into_iter().collect()),
+            trace,
+        }
+    }
+
+    fn consume(
+        &self,
+        operation: &'static str,
+        profile: &str,
+        dry_run: Option<bool>,
+    ) -> Result<String> {
+        let trace_value = match dry_run {
+            Some(dry_run) => format!("{operation}:{profile}:dry={dry_run}"),
+            None => format!("{operation}:{profile}"),
+        };
+        self.trace.lock().unwrap().push(trace_value);
+        let expected =
+            self.calls.lock().unwrap().pop_front().ok_or_else(|| {
+                anyhow::anyhow!("unexpected {operation} call for profile {profile}")
+            })?;
+        if expected.operation != operation
+            || expected.profile != profile
+            || expected.dry_run != dry_run
+        {
+            anyhow::bail!(
+                "unexpected profile call: expected {}:{}:{:?}, got {}:{}:{:?}",
+                expected.operation,
+                expected.profile,
+                expected.dry_run,
+                operation,
+                profile,
+                dry_run
+            );
+        }
+        if let Some(error) = expected.error {
+            anyhow::bail!("{error}");
+        }
+        Ok(expected.output)
+    }
+
+    fn assert_exhausted(&self) {
+        let remaining = self.calls.lock().unwrap().clone();
+        assert!(
+            remaining.is_empty(),
+            "strict run profile adapter has unconsumed expectations: {remaining:?}; trace: {:?}",
+            self.trace.lock().unwrap()
+        );
+    }
+}
+
+impl ResticProfileRunner for StrictRunProfileAdapter {
+    fn backup(&self, _: &Path, profile: &str, dry_run: bool) -> Result<String> {
+        self.consume("primary", profile, Some(dry_run))
+    }
+
+    fn init(&self, _: &Path, profile: &str) -> Result<String> {
+        anyhow::bail!("unexpected init call for profile {profile}")
+    }
+
+    fn schedule_enable(&self, _: &Path) -> Result<String> {
+        anyhow::bail!("unexpected schedule enable call")
+    }
+
+    fn schedule_disable(&self, _: &Path) -> Result<String> {
+        anyhow::bail!("unexpected schedule disable call")
+    }
+
+    fn schedule_status(&self, _: &Path) -> Result<String> {
+        anyhow::bail!("unexpected schedule status call")
+    }
+
+    fn list_snapshots(&self, _: &Path, profile: &str) -> Result<String> {
+        anyhow::bail!("unexpected snapshots call for profile {profile}")
+    }
+
+    fn prune(&self, _: &Path, profile: &str) -> Result<String> {
+        self.consume("retention", profile, None)
+    }
+
+    fn check(&self, _: &Path, profile: &str) -> Result<String> {
+        anyhow::bail!("unexpected check call for profile {profile}")
+    }
+
+    fn copy(&self, _: &Path, profile: &str, dry_run: bool) -> Result<String> {
+        self.consume("secondary", profile, Some(dry_run))
+    }
+}
+
+struct StrictRunDatabaseAdapter {
+    expected: Mutex<Option<DatabaseCallExpectation>>,
+    trace: Arc<Mutex<Vec<String>>>,
+}
+
+impl StrictRunDatabaseAdapter {
+    fn new(expected: Option<DatabaseCallExpectation>, trace: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            expected: Mutex::new(expected),
+            trace,
+        }
+    }
+
+    fn unexpected(operation: &str) -> Result<String> {
+        anyhow::bail!("unexpected database {operation} call")
+    }
+
+    fn assert_exhausted(&self) {
+        let remaining = self.expected.lock().unwrap().is_some();
+        assert!(
+            !remaining,
+            "strict database adapter has an unconsumed expectation; trace: {:?}",
+            self.trace.lock().unwrap()
+        );
+    }
+}
+
+impl ResticRunner for StrictRunDatabaseAdapter {
+    fn init_repo(&self, _: &str, _: &str) -> Result<String> {
+        Self::unexpected("init")
+    }
+
+    fn backup_paths(&self, _: &str, _: &str, _: &[String], _: &[String]) -> Result<String> {
+        Self::unexpected("backup paths")
+    }
+
+    fn list_snapshots(&self, _: &str, _: &str) -> Result<String> {
+        Self::unexpected("list snapshots")
+    }
+
+    fn list_snapshots_with_env(&self, _: &str, _: &str, _: &[(&str, &str)]) -> Result<String> {
+        Self::unexpected("list snapshots")
+    }
+
+    fn restore(&self, _: &str, _: &str, _: &str, _: &str) -> Result<String> {
+        Self::unexpected("restore")
+    }
+
+    fn restore_with_env(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &[(&str, &str)],
+    ) -> Result<String> {
+        Self::unexpected("restore")
+    }
+
+    fn backup_command(&self, _: &str, _: &str, _: &str, _: &str, _: &[String]) -> Result<String> {
+        Self::unexpected("backup command")
+    }
+
+    fn backup_command_with_env(
+        &self,
+        repository: &str,
+        password: &str,
+        filename: &str,
+        program: &str,
+        args: &[String],
+        environment: &[(&str, &str)],
+    ) -> Result<String> {
+        self.trace.lock().unwrap().push("database".into());
+        let expected = self
+            .expected
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("unexpected database backup call"))?;
+        let actual_environment = environment
+            .iter()
+            .map(|(key, value)| ((*key).into(), (*value).into()))
+            .collect::<Vec<_>>();
+        if repository != expected.repository
+            || password != expected.password
+            || filename != expected.filename
+            || program != expected.program
+            || args != expected.args
+            || actual_environment != expected.environment
+        {
+            anyhow::bail!("unexpected database adapter arguments or environment");
+        }
+        Ok(expected.output)
+    }
+}
+
+struct RunContractFixture {
+    _directory: tempfile::TempDir,
+    profiles: PathBuf,
+}
+
+impl RunContractFixture {
+    fn profiles_path(&self) -> &Path {
+        &self.profiles
+    }
+}
+
+fn run_contract_fixture() -> RunContractFixture {
+    let directory = tempfile::tempdir().unwrap();
+    let profiles = directory.path().join("profiles.yaml");
+    let reports = directory.path().join("reports");
+    std::fs::write(
+        &profiles,
+        format!(
+            "version: '2'\napplication:\n  reports:\n    outputDir: {}\n    enableDailyReports: false\n    enableAnnualDrDrillReport: false\n  database:\n    profile: database\n    type: postgres\n    connection-url: ${{BACKUP_DATABASE_CONNECTION_URL}}\nprofiles:\n  default: {{}}\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  secondary:\n    repository: /secondary-repository\n    password-file: secondary-password\n  alpha:\n    inherit: primary\n    backup:\n      source: ['/alpha']\n    copy:\n      profile: secondary\n  beta:\n    inherit: primary\n    backup:\n      source: ['/beta']\n    copy:\n      profile: secondary\n  database:\n    inherit: primary\n",
+            reports.display()
+        ),
+    )
+    .unwrap();
+    set_mode_600(&profiles);
+    write_mode_600(&directory.path().join("primary-password"), "primary-secret");
+    write_mode_600(
+        &directory.path().join("secondary-password"),
+        "secondary-secret",
+    );
+    write_mode_600(
+        &directory.path().join("database-connection-url"),
+        "postgres://backup-user:db-secret@db:5432/app",
+    );
+    backup::config::model::ResticProfileConfig::load_from_path(&profiles).unwrap();
+    RunContractFixture {
+        _directory: directory,
+        profiles,
+    }
+}
+
+fn expected_full_pipeline(
+    dry_run: bool,
+    skip_database: bool,
+    skip_secondary: bool,
+    skip_retention: bool,
+) -> RunContractExpectations {
+    let mut profile_calls = Vec::new();
+    let database_call = (!skip_database && !dry_run).then(database_call_expectation);
+    for profile in ["alpha", "beta"] {
+        profile_calls.push(profile_call(
+            "primary",
+            profile,
+            Some(dry_run),
+            &format!("snapshot {profile}-id saved\n"),
+            None,
+        ));
+    }
+    if !skip_secondary {
+        for profile in ["alpha", "beta"] {
+            profile_calls.push(profile_call(
+                "secondary",
+                profile,
+                Some(dry_run),
+                &format!("copy {profile} complete\n"),
+                None,
+            ));
+        }
+    }
+    if !skip_retention && !dry_run {
+        for profile in ["alpha", "beta"] {
+            profile_calls.push(profile_call(
+                "retention",
+                profile,
+                None,
+                &format!("retention {profile} complete\n"),
+                None,
+            ));
+        }
+    }
+    RunContractExpectations {
+        profile_calls,
+        database_call,
+    }
+}
+
+fn database_call_expectation() -> DatabaseCallExpectation {
+    DatabaseCallExpectation {
+        repository: "/primary-repository".into(),
+        password: "primary-secret".into(),
+        filename: "app.sql".into(),
+        program: "pg_dump".into(),
+        args: vec![
+            "--host=db".into(),
+            "--username=backup-user".into(),
+            "--dbname=app".into(),
+            "--port=5432".into(),
+        ],
+        environment: vec![("PGPASSWORD".into(), "db-secret".into())],
+        output: "database stream complete\n".into(),
+    }
+}
+
+fn profile_call(
+    operation: &'static str,
+    profile: &str,
+    dry_run: Option<bool>,
+    output: &str,
+    error: Option<&str>,
+) -> ProfileCallExpectation {
+    ProfileCallExpectation {
+        operation,
+        profile: profile.into(),
+        dry_run,
+        output: output.into(),
+        error: error.map(Into::into),
+    }
+}
+
+fn dispatch_run_contract(
+    profiles: &Path,
+    options: &[&str],
+    expected: RunContractExpectations,
+) -> (CommandOutcome, Vec<String>) {
+    let mut argv = vec![
+        "backup".to_string(),
+        "--profiles".to_string(),
+        profiles.to_string_lossy().into_owned(),
+        "run".to_string(),
+    ];
+    argv.extend(options.iter().map(|option| (*option).into()));
+    let cli = Cli::try_parse_from(argv).unwrap();
+    let context = CliRuntimeContext::from_cli(
+        &cli,
+        Language::En,
+        None,
+        SchedulerMode::Auto,
+        AdapterSelection::StrictTest,
+    )
+    .unwrap();
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let profile_adapter = StrictRunProfileAdapter::new(expected.profile_calls, trace.clone());
+    let database_adapter = StrictRunDatabaseAdapter::new(expected.database_call, trace.clone());
+    let command_runner = StrictCommandRunner::new([]);
+    let rclone = RcloneTool::new(&command_runner);
+    let scheduler = SystemScheduler::new(&command_runner, "backup");
+    let adapters = AdapterSet {
+        command: &command_runner,
+        rclone: &rclone,
+        restic: &database_adapter,
+        resticprofile: &profile_adapter,
+        scheduler: &scheduler,
+        selection: AdapterSelection::StrictTest,
+    };
+
+    let outcome = dispatch(&context, cli.command, &adapters);
+    profile_adapter.assert_exhausted();
+    database_adapter.assert_exhausted();
+    command_runner.assert_exhausted().unwrap();
+    (outcome, trace.lock().unwrap().clone())
+}
+
+fn write_mode_600(path: &Path, contents: &str) {
+    std::fs::write(path, contents).unwrap();
+    set_mode_600(path);
+}
+
+fn set_mode_600(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+fn file_mode(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        return std::fs::metadata(path)
+            .ok()
+            .map(|metadata| metadata.permissions().mode() & 0o777);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
 }

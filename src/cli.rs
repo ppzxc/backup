@@ -1120,11 +1120,12 @@ fn dispatch_run(
 
     match result {
         Ok((primary, secondary, retention)) => {
-            let report = crate::commands::run::ExecutionReport::success(
+            let report = crate::commands::run::ExecutionReport::success_with_mode(
                 &report_profile,
                 primary.clone(),
                 secondary.clone(),
                 retention.clone(),
+                options.dry_run,
             );
             let report_path = crate::commands::run::write_execution_report_from_profiles(
                 &config,
@@ -1146,11 +1147,11 @@ fn dispatch_run(
                 output,
                 "",
                 vec![report_path],
-                vec![if options.dry_run {
-                    "pipeline plan rendered".into()
+                if options.dry_run {
+                    Vec::new()
                 } else {
-                    "backup pipeline executed".into()
-                }],
+                    vec!["backup pipeline executed".into()]
+                },
             ))
         }
         Err(error) => {

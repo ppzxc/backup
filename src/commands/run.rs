@@ -53,11 +53,29 @@ impl ExecutionReport {
         secondary_result: Option<String>,
         retention_result: Option<String>,
     ) -> Self {
+        Self::success_with_mode(
+            profile,
+            primary_result,
+            secondary_result,
+            retention_result,
+            false,
+        )
+    }
+
+    pub fn success_with_mode(
+        profile: &str,
+        primary_result: String,
+        secondary_result: Option<String>,
+        retention_result: Option<String>,
+        dry_run: bool,
+    ) -> Self {
         Self {
             timestamp_unix_nanos: now_nanos(),
             profile: profile.into(),
             succeeded: true,
-            snapshot_id: snapshot_id_from(&primary_result),
+            snapshot_id: (!dry_run)
+                .then(|| snapshot_id_from(&primary_result))
+                .flatten(),
             primary_result: Some(primary_result),
             secondary_result,
             retention_result,
@@ -118,6 +136,19 @@ pub fn write_execution_report_from_profiles(
         .into_iter()
         .map(|(_, value)| value)
         .collect::<Vec<_>>();
+    secrets.extend(
+        config
+            .profiles
+            .values()
+            .filter_map(|profile| profile.password.clone()),
+    );
+    for profile in ["primary", "secondary"] {
+        if config.profiles.contains_key(profile) {
+            if let Ok((_, password)) = config.backend_credentials(config_dir, profile) {
+                secrets.push(password);
+            }
+        }
+    }
     if config
         .application
         .as_ref()
