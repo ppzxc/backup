@@ -967,6 +967,71 @@ fn run_contract_covers_every_skip_combination_without_changing_stage_order() {
 }
 
 #[test]
+fn run_contract_covers_profile_selection_and_flag_matrix() {
+    for selection in [RunSelection::All, RunSelection::Alpha, RunSelection::Database] {
+        for skip_database in [false, true] {
+            for skip_secondary in [false, true] {
+                for skip_retention in [false, true] {
+                    for dry_run in [false, true] {
+                        let fixture = run_contract_fixture();
+                        let mut args = match selection {
+                            RunSelection::All => Vec::new(),
+                            RunSelection::Alpha => vec!["--profile", "alpha"],
+                            RunSelection::Database => vec!["--profile", "database"],
+                        };
+                        if skip_database {
+                            args.push("--skip-database");
+                        }
+                        if skip_secondary {
+                            args.push("--skip-secondary-sync");
+                        }
+                        if skip_retention {
+                            args.push("--skip-retention");
+                        }
+                        if dry_run {
+                            args.push("--dry-run");
+                        }
+                        let (outcome, trace) = dispatch_run_contract(
+                            fixture.profiles_path(),
+                            &args,
+                            expected_pipeline(
+                                selection,
+                                dry_run,
+                                skip_database,
+                                skip_secondary,
+                                skip_retention,
+                            ),
+                        );
+                        let expected_trace = expected_trace(
+                            selection,
+                            dry_run,
+                            skip_database,
+                            skip_secondary,
+                            skip_retention,
+                        );
+                        let case_id = format!(
+                            "run.selection={}.skip-db={skip_database}.skip-secondary={skip_secondary}.skip-retention={skip_retention}.dry-run={dry_run}",
+                            selection.label()
+                        );
+                        let diagnostic = ContractDiagnostic::from_outcome(
+                            case_id,
+                            format!("argv={args:?} profiles={}", fixture.profiles_path().display()),
+                            expected_trace.clone(),
+                            trace.clone(),
+                            &outcome,
+                        )
+                        .render();
+                        assert!(outcome.is_success(), "{diagnostic}");
+                        assert_eq!(trace, expected_trace, "{diagnostic}");
+                        assert_eq!(outcome.artifacts.len(), 1, "{diagnostic}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn run_contract_dry_run_forwards_native_flags_and_creates_no_snapshot_or_mutation() {
     let fixture = run_contract_fixture();
     let (outcome, trace) = dispatch_run_contract(
@@ -1073,6 +1138,23 @@ struct DatabaseCallExpectation {
 struct RunContractExpectations {
     profile_calls: Vec<ProfileCallExpectation>,
     database_call: Option<DatabaseCallExpectation>,
+}
+
+#[derive(Clone, Copy)]
+enum RunSelection {
+    All,
+    Alpha,
+    Database,
+}
+
+impl RunSelection {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Alpha => "alpha",
+            Self::Database => "database",
+        }
+    }
 }
 
 struct StrictRunProfileAdapter {
@@ -1327,9 +1409,33 @@ fn expected_full_pipeline(
     skip_secondary: bool,
     skip_retention: bool,
 ) -> RunContractExpectations {
+    expected_pipeline(
+        RunSelection::All,
+        dry_run,
+        skip_database,
+        skip_secondary,
+        skip_retention,
+    )
+}
+
+fn expected_pipeline(
+    selection: RunSelection,
+    dry_run: bool,
+    skip_database: bool,
+    skip_secondary: bool,
+    skip_retention: bool,
+) -> RunContractExpectations {
     let mut profile_calls = Vec::new();
-    let database_call = (!skip_database && !dry_run).then(database_call_expectation);
-    for profile in ["alpha", "beta"] {
+    let database_call = (matches!(selection, RunSelection::All | RunSelection::Database)
+        && !skip_database
+        && !dry_run)
+        .then(database_call_expectation);
+    let profiles = match selection {
+        RunSelection::All => vec!["alpha", "beta"],
+        RunSelection::Alpha => vec!["alpha"],
+        RunSelection::Database => Vec::new(),
+    };
+    for profile in &profiles {
         profile_calls.push(profile_call(
             "primary",
             profile,
@@ -1339,7 +1445,7 @@ fn expected_full_pipeline(
         ));
     }
     if !skip_secondary {
-        for profile in ["alpha", "beta"] {
+        for profile in &profiles {
             profile_calls.push(profile_call(
                 "secondary",
                 profile,
@@ -1350,7 +1456,7 @@ fn expected_full_pipeline(
         }
     }
     if !skip_retention && !dry_run {
-        for profile in ["alpha", "beta"] {
+        for profile in &profiles {
             profile_calls.push(profile_call(
                 "retention",
                 profile,
@@ -1364,6 +1470,41 @@ fn expected_full_pipeline(
         profile_calls,
         database_call,
     }
+}
+
+fn expected_trace(
+    selection: RunSelection,
+    dry_run: bool,
+    skip_database: bool,
+    skip_secondary: bool,
+    skip_retention: bool,
+) -> Vec<String> {
+    let mut trace = Vec::new();
+    if matches!(selection, RunSelection::All | RunSelection::Database)
+        && !skip_database
+        && !dry_run
+    {
+        trace.push("database".into());
+    }
+    let profiles = match selection {
+        RunSelection::All => [Some("alpha"), Some("beta")].as_slice(),
+        RunSelection::Alpha => [Some("alpha"), None].as_slice(),
+        RunSelection::Database => [None, None].as_slice(),
+    };
+    for profile in profiles.iter().flatten() {
+        trace.push(format!("primary:{profile}:dry={dry_run}"));
+    }
+    if !skip_secondary {
+        for profile in profiles.iter().flatten() {
+            trace.push(format!("secondary:{profile}:dry={dry_run}"));
+        }
+    }
+    if !skip_retention && !dry_run {
+        for profile in profiles.iter().flatten() {
+            trace.push(format!("retention:{profile}"));
+        }
+    }
+    trace
 }
 
 fn database_call_expectation() -> DatabaseCallExpectation {
