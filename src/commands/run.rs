@@ -53,7 +53,7 @@ impl ExecutionReport {
         secondary_result: Option<String>,
         retention_result: Option<String>,
     ) -> Self {
-        Self::success_with_mode(
+        Self::success_with_dry_run(
             profile,
             primary_result,
             secondary_result,
@@ -62,7 +62,7 @@ impl ExecutionReport {
         )
     }
 
-    pub fn success_with_mode(
+    pub fn success_with_dry_run(
         profile: &str,
         primary_result: String,
         secondary_result: Option<String>,

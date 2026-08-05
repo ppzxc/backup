@@ -1120,7 +1120,7 @@ fn dispatch_run(
 
     match result {
         Ok((primary, secondary, retention)) => {
-            let report = crate::commands::run::ExecutionReport::success_with_mode(
+            let report = crate::commands::run::ExecutionReport::success_with_dry_run(
                 &report_profile,
                 primary.clone(),
                 secondary.clone(),
