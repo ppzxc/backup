@@ -408,7 +408,7 @@ profiles:
 
     assert_eq!(
         status_res,
-        "No active backup profiles found in configuration."
+        "[WARN] No active backup profiles found in configuration."
     );
 }
 
