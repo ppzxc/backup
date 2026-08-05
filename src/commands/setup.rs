@@ -805,12 +805,14 @@ impl SetupEngine {
             None
         };
 
+        let language = lang_opt.unwrap_or(Language::En);
         if non_interactive {
             return Self::run_existing_profiles_setup(
                 profiles_path,
                 runner,
                 scheduler,
                 scheduler_settings,
+                language,
             );
         }
 
@@ -826,8 +828,7 @@ impl SetupEngine {
             .join(crate::config::model::DEFAULT_PROFILES_FILENAME);
         config.save_to_profiles_path(&staged_profiles)?;
         let staged = crate::config::model::ResticProfileConfig::load_from_path(&staged_profiles)?;
-        let lang = lang_opt.unwrap_or(Language::En);
-        let msg = crate::i18n::I18nMessages::get(lang);
+        let msg = crate::i18n::I18nMessages::get(language);
 
         crate::logger::interactive_notice(msg.initializing_backend_repo);
 
@@ -872,16 +873,18 @@ impl SetupEngine {
                 let save_anyway = prompter
                     .prompt_confirm_save_on_init_failure(msg.backend_init_failed_save_prompt)?;
                 if !save_anyway {
-                    return Err(anyhow::anyhow!(
-                        "Setup cancelled due to repository initialization failure: {}",
-                        err_msg
-                    ));
+                    let prefix = match language {
+                        Language::Ko => "저장소 초기화 실패로 설정을 취소했습니다",
+                        Language::En => "Setup cancelled due to repository initialization failure",
+                    };
+                    return Err(anyhow::anyhow!("{prefix}: {err_msg}"));
                 }
             } else {
-                return Err(anyhow::anyhow!(
-                    "Non-interactive setup failed repository initialization: {}",
-                    err_msg
-                ));
+                let prefix = match language {
+                    Language::Ko => "비대화형 설정의 저장소 초기화에 실패했습니다",
+                    Language::En => "Non-interactive setup failed repository initialization",
+                };
+                return Err(anyhow::anyhow!("{prefix}: {err_msg}"));
             }
         }
         let previous = LiveConfigSnapshot::capture(profiles_path)?;
@@ -911,16 +914,27 @@ impl SetupEngine {
         runner: &R,
         scheduler: &S,
         scheduler_settings: &crate::runner::scheduler::SchedulerSettings,
+        language: Language,
     ) -> Result<()> {
         if !profiles_path.is_file() {
-            anyhow::bail!(
-                "Non-interactive setup requires an existing unified profiles.yaml with real target, repository, and credentials"
-            );
+            let message = match language {
+                Language::Ko => {
+                    "비대화형 설정에는 실제 대상·저장소·자격 증명이 포함된 기존 profiles.yaml이 필요합니다"
+                }
+                Language::En => {
+                    "Non-interactive setup requires an existing unified profiles.yaml with real target, repository, and credentials"
+                }
+            };
+            anyhow::bail!(message);
         }
         let profiles = crate::config::model::ResticProfileConfig::load_from_path(profiles_path)?;
         let profile_names = profiles.profile_names();
         if profile_names.is_empty() {
-            anyhow::bail!("Non-interactive setup requires at least one Backup Profile");
+            let message = match language {
+                Language::Ko => "비대화형 설정에는 하나 이상의 Backup Profile이 필요합니다",
+                Language::En => "Non-interactive setup requires at least one Backup Profile",
+            };
+            anyhow::bail!(message);
         }
 
         let init_result = profile_names
@@ -934,7 +948,11 @@ impl SetupEngine {
                     message = message.replace(&secret, "******");
                 }
             }
-            anyhow::bail!("Non-interactive setup failed repository initialization: {message}");
+            let prefix = match language {
+                Language::Ko => "비대화형 설정의 저장소 초기화에 실패했습니다",
+                Language::En => "Non-interactive setup failed repository initialization",
+            };
+            anyhow::bail!("{prefix}: {message}");
         }
 
         scheduler.enable_with_settings(profiles_path, scheduler_settings)?;

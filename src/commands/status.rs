@@ -1,6 +1,7 @@
 use anyhow::Result;
 use secrecy::ExposeSecret;
 use serde::Deserialize;
+use std::fmt;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -16,6 +17,20 @@ pub struct ResticSnapshotInfo {
     #[serde(default)]
     pub hostname: String,
 }
+
+#[derive(Debug)]
+pub struct StatusCommandFailure {
+    pub message: String,
+    pub output: String,
+}
+
+impl fmt::Display for StatusCommandFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for StatusCommandFailure {}
 
 pub fn execute_status(config: &BackupConfig) -> Result<String> {
     let executor = SystemExecutor;
@@ -37,14 +52,29 @@ pub fn execute_status_from_profiles_config<
     }
 
     let restic_config = crate::config::model::ResticProfileConfig::load_from_path(config_path)?;
-    let resolved_profiles =
-        crate::config::profile_resolver::ProfileResolver::resolve_all_or_filtered(
+    let (resolved_profiles, mut warnings) = match profile_filter {
+        Some(profile) => (
+            crate::config::profile_resolver::ProfileResolver::resolve_for_status(
+                &restic_config,
+                Some(profile),
+            )?,
+            Vec::new(),
+        ),
+        None => crate::config::profile_resolver::ProfileResolver::resolve_all_active_with_failures(
             &restic_config,
-            profile_filter,
-        );
+        ),
+    };
 
     if resolved_profiles.is_empty() {
-        return Ok("No active backup profiles found in configuration.".to_string());
+        let output = "No active backup profiles found in configuration.".to_string();
+        if warnings.is_empty() {
+            return Ok(output);
+        }
+        return Err(StatusCommandFailure {
+            message: warnings.join("; "),
+            output,
+        }
+        .into());
     }
 
     let mut full_output = Vec::new();
@@ -66,6 +96,10 @@ pub fn execute_status_from_profiles_config<
             }
             Err(err) => {
                 tracing::warn!(profile = %profile.name, error = %err, "Failed to fetch snapshots for profile");
+                warnings.push(format!(
+                    "{}: failed to fetch snapshots: {err}",
+                    profile.name
+                ));
                 output_str.push_str(&format!("\n[WARN] Failed to fetch snapshots: {}", err));
             }
         }
@@ -73,7 +107,16 @@ pub fn execute_status_from_profiles_config<
         full_output.push(output_str);
     }
 
-    Ok(full_output.join("\n\n"))
+    let output = full_output.join("\n\n");
+    if warnings.is_empty() {
+        Ok(output)
+    } else {
+        Err(StatusCommandFailure {
+            message: warnings.join("; "),
+            output,
+        }
+        .into())
+    }
 }
 
 pub fn execute_status_with_runner<E: CommandRunner>(

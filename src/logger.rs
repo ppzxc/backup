@@ -5,17 +5,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tracing::field::{Field, Visit};
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::field::RecordFields;
-use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
+use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::EnvFilter;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use tracing_subscriber::Layer;
 use tracing_subscriber::filter::filter_fn;
+use tracing_subscriber::Layer;
 
 pub const MASKED_VALUE: &str = "***MASKED***";
 
@@ -160,12 +160,22 @@ pub fn ensure_secure_log_file(log_file: &Path) -> Result<(), anyhow::Error> {
         }
     }
 
-    if !log_file.exists() {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_file)?;
+    if log_file.exists() {
+        let metadata = std::fs::symlink_metadata(log_file)?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            anyhow::bail!(
+                "explicit log file path is not a regular file: {}",
+                log_file.display()
+            );
+        }
     }
+
+    // Open the selected target before the subscriber is installed so explicit logging failures
+    // cannot be hidden by the fallback pipeline or by a later command dispatch.
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file)?;
 
     #[cfg(unix)]
     {
@@ -416,7 +426,10 @@ mod tests {
         assert_eq!(determine_level_filter(0, false, None), "info");
         assert_eq!(determine_level_filter(1, false, None), "debug");
         assert_eq!(determine_level_filter(2, false, None), "trace");
+        assert_eq!(determine_level_filter(3, false, Some("info")), "trace");
+        assert_eq!(determine_level_filter(1, false, Some("trace")), "debug");
         assert_eq!(determine_level_filter(0, true, None), "warn");
+        assert_eq!(determine_level_filter(0, true, Some("trace")), "warn");
         assert_eq!(determine_level_filter(0, false, Some("debug")), "debug");
     }
 
