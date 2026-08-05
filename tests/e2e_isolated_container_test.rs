@@ -246,11 +246,43 @@ backup() {{
 
 fn runner(resources: &E2eResources, script: &str) -> String {
     runner_attempt(resources, script).unwrap_or_else(|error| {
+        let case_id = e2e_case_id(script);
+        let invariant = e2e_invariant(script);
         panic!(
-            "Docker E2E runner command failed: {error}\n{}",
+            "Docker E2E runner command failed\ncase_id={case_id}\ninvariant={invariant}\nexternal_state=runner,storage,database,scheduler\n{error}\n{}",
             docker_diagnostics(&resources.container_names())
         )
     })
+}
+
+fn e2e_case_id(script: &str) -> String {
+    let work_path = script
+        .split_whitespace()
+        .find(|token| token.starts_with("/work/") && token.len() > "/work/".len())
+        .unwrap_or("/work/unknown");
+    let name = work_path
+        .trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '/')
+        .trim_start_matches("/work/")
+        .split('/')
+        .next()
+        .unwrap_or("unknown");
+    if script.contains("schedule enable") {
+        format!("{name}.scheduler")
+    } else {
+        name.to_owned()
+    }
+}
+
+fn e2e_invariant(script: &str) -> &'static str {
+    if script.contains("CREATE TABLE") && script.contains("restore --target") {
+        "database-dump-restore-integrity"
+    } else if script.contains("assert_tree") {
+        "backup-copy-snapshot-restore-tree"
+    } else if script.contains("schedule enable") {
+        "scheduler-enable-disable-execution-report"
+    } else {
+        "container-command-contract"
+    }
 }
 
 fn redact_diagnostics(value: String) -> String {
@@ -348,8 +380,10 @@ fn wizard_storage_script_verifies_scheduled_execution() {
 
     assert!(script.contains("BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00'"));
     assert!(script.contains("systemctl set-environment HOME=/root"));
-    assert!(script
-        .contains("find /work/reports/s3-primary -maxdepth 1 -name 'execution-*.json' -delete"));
+    assert!(
+        script
+            .contains("find /work/reports/s3-primary -maxdepth 1 -name 'execution-*.json' -delete")
+    );
     assert!(script.contains("scheduled timer active"));
     assert!(script.contains("scheduled timer fired"));
     assert!(script.contains("LastTriggerUSec"));
@@ -357,6 +391,27 @@ fn wizard_storage_script_verifies_scheduled_execution() {
     assert!(script.contains("for _ in {1..150}; do"));
     assert!(!script.contains("systemctl start backup-pipeline.service"));
     assert!(script.contains("backup --profiles /work/s3-primary/profiles.yaml schedule disable"));
+    assert!(script.contains("snapshots | grep -q 'Primary snapshots'"));
+    assert!(script.contains("status | grep -q 'Profile:'"));
+}
+
+#[test]
+fn database_matrix_uses_setup_wizard_configuration_as_its_only_input() {
+    let script = database_setup_script(
+        "database",
+        "postgres",
+        "postgres://postgres:pgpass@backup-e2e-postgres16:5432/app16",
+        "app16",
+        "Postgres16",
+    );
+
+    assert!(script.contains("setup --lang en"));
+    assert!(script.contains("backup --profiles /work/database/profiles.yaml database"));
+    assert!(script.contains("profiles.yaml"));
+    assert!(!script.contains("cat >/work/db-profiles.yml"));
+    assert!(!script.contains("restic -r s3:"));
+    assert!(script.contains("restore --target /work/database-restore"));
+    assert!(script.contains("--host=backup-e2e-postgres16"));
 }
 
 #[test]
@@ -507,6 +562,8 @@ if ! grep -Eq '"succeeded": true' "$scheduled_report" || ! grep -Eq '"snapshot_i
   exit 1
 fi
 backup --profiles /work/{name}/profiles.yaml run --skip-database
+backup --profiles /work/{name}/profiles.yaml snapshots | grep -q 'Primary snapshots'
+backup --profiles /work/{name}/profiles.yaml status | grep -q 'Profile:'
 backup --profiles /work/{name}/profiles.yaml restore --target /work/{name}-primary
 assert_tree /work/source /work/{name}-primary/work/source
 {secondary_restore}
@@ -569,6 +626,98 @@ fn wizard_storage_case(
         resources,
         &wizard_storage_script(name, &answers, has_secondary),
     );
+}
+
+fn database_setup_script(
+    name: &str,
+    database_type: &str,
+    connection_url: &str,
+    database_name: &str,
+    expected_value: &str,
+) -> String {
+    let report_dir = format!("/work/reports/{name}");
+    let answers = vec![
+        name.to_owned(),
+        "2".to_owned(),
+        database_type.to_owned(),
+        connection_url.to_owned(),
+        String::new(),
+        "7".to_owned(),
+        "4".to_owned(),
+        "12".to_owned(),
+        "\x1b[B".to_owned(),
+        String::new(),
+        "http://backup-e2e-minio:9000".to_owned(),
+        "minioadmin".to_owned(),
+        "minioadmin".to_owned(),
+        String::new(),
+        database_name.to_owned(),
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+        report_dir,
+        String::new(),
+        String::new(),
+    ]
+    .into_iter()
+    .map(|answer| shell_quote(&answer))
+    .collect::<Vec<_>>()
+    .join(" ");
+    let table = if database_type == "mysql" {
+        "users"
+    } else {
+        "audit_events"
+    };
+    let seed = if database_type == "mysql" {
+        format!(
+            "CREATE TABLE {table}(id INT PRIMARY KEY, name VARCHAR(32)); INSERT INTO {table} VALUES(201,'{expected_value}');"
+        )
+    } else {
+        format!(
+            "CREATE TABLE {table}(id INT PRIMARY KEY, event TEXT); INSERT INTO {table} VALUES(201,'{expected_value}');"
+        )
+    };
+    let query = if database_type == "mysql" {
+        format!("SELECT name FROM {table} WHERE id=201;")
+    } else {
+        format!("SELECT event FROM {table} WHERE id=201;")
+    };
+    let client = if database_type == "mysql" {
+        "MYSQL_PWD=rootpass mysql"
+    } else {
+        "PGPASSWORD=pgpass psql"
+    };
+    let host = if database_type == "mysql" {
+        if database_name == "app12" {
+            "backup-e2e-mariadb12"
+        } else {
+            "backup-e2e-mariadb55"
+        }
+    } else {
+        "backup-e2e-postgres16"
+    };
+    let connection_args = if database_type == "mysql" {
+        format!("--host={host} --user=root --database={database_name}")
+    } else {
+        format!("--host={host} --user=postgres --dbname={database_name}")
+    };
+    let execute_flag = if database_type == "mysql" { "-e" } else { "-c" };
+    let rows_only_flag = if database_type == "mysql" { "-N" } else { "-t" };
+    format!(
+        r#"mkdir -p /work/{name}
+printf '%s\n' {answers} | BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' TERM=dumb script -qec '/usr/local/bin/backup --profiles /work/{name}/profiles.yaml setup --lang en' /dev/null
+for _ in {{1..60}}; do {client} {connection_args} {execute_flag} 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done
+{client} {connection_args} {execute_flag} "{seed}"
+backup --profiles /work/{name}/profiles.yaml database
+{client} {connection_args} {execute_flag} 'DROP TABLE {table};'
+rm -rf /work/{name}-restore
+backup --profiles /work/{name}/profiles.yaml restore --target /work/{name}-restore
+{client} {connection_args} < "$(find /work/{name}-restore -name '{database_name}.sql' -print -quit)"
+{client} {connection_args} {rows_only_flag} {execute_flag} "{query}" | grep -q '{expected_value}'
+backup --profiles /work/{name}/profiles.yaml snapshots | grep -q 'Primary snapshots'
+backup --profiles /work/{name}/profiles.yaml status | grep -q 'Profile: {name}'"#,
+    )
 }
 
 struct DockerCleanup<'a> {
@@ -1038,69 +1187,38 @@ if [ -z "$cron_report" ] || ! grep -Eq '"succeeded": true' "$cron_report" || ! g
 fi"#
         ),
     );
-    for (host, port, database, kind, seed, query) in [
+    for (kind, database, url, expected) in [
         (
-            "backup-e2e-mariadb12",
-            "3306",
+            "mysql",
             "app12",
-            "mysql",
-            "CREATE TABLE users(id INT PRIMARY KEY, name VARCHAR(32)); INSERT INTO users VALUES(101,'Maria12');",
-            "SELECT name FROM users WHERE id=101;",
+            "mysql://root:rootpass@backup-e2e-mariadb12:3306/app12",
+            "Maria12",
         ),
         (
-            "backup-e2e-mariadb55",
-            "3306",
+            "mysql",
             "app55",
-            "mysql",
-            "CREATE TABLE users(id INT PRIMARY KEY, name VARCHAR(32)); INSERT INTO users VALUES(55,'Maria55');",
-            "SELECT name FROM users WHERE id=55;",
+            "mysql://root:rootpass@backup-e2e-mariadb55:3306/app55",
+            "Maria55",
         ),
         (
-            "backup-e2e-postgres16",
-            "5432",
-            "app16",
             "postgres",
-            "CREATE TABLE audit_events(id INT PRIMARY KEY, event TEXT); INSERT INTO audit_events VALUES(201,'Postgres16');",
-            "SELECT event FROM audit_events WHERE id=201;",
+            "app16",
+            "postgres://postgres:pgpass@backup-e2e-postgres16:5432/app16",
+            "Postgres16",
         ),
     ] {
-        let command = if kind == "mysql" {
-            "MYSQL_PWD=rootpass mysql"
-        } else {
-            "PGPASSWORD=pgpass psql"
-        };
-        let connection_args = if kind == "mysql" {
-            format!("--user=root --database={database}")
-        } else {
-            format!("--username=postgres --dbname={database}")
-        };
-        let execute_flag = if kind == "mysql" { "-e" } else { "-c" };
-        let rows_only_flag = if kind == "mysql" { "-N" } else { "-t" };
         runner(
             &resources,
-            &format!(
-                "for _ in {{1..60}}; do {command} --host={host} --port={port} {connection_args} {execute_flag} 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done; {command} --host={host} --port={port} {connection_args} {execute_flag} 'SELECT 1' >/dev/null",
-            ),
-        );
-        let url = if kind == "mysql" {
-            format!("mysql://root:rootpass@{host}:{port}/{database}")
-        } else {
-            format!("postgres://postgres:pgpass@{host}:{port}/{database}")
-        };
-        runner(
-            &resources,
-            &format!(
-                "cat >/work/db-profiles.yml <<'EOF'\nversion: '2'\napplication:\n  database:\n    profile: database\n    type: {kind}\n    connection-url: ${{BACKUP_DATABASE_CONNECTION_URL}}\nprofiles:\n  primary:\n    repository: s3:http://backup-e2e-minio:9000/db-{database}\n    password-file: /work/db-password\n  database:\n    inherit: primary\n    backup: {{source: []}}\nEOF\nprintf 'e2e-password' >/work/db-password\nprintf '%s' '{url}' >/work/database-connection-url\nchmod 600 /work/db-password /work/database-connection-url\nrestic -r s3:http://backup-e2e-minio:9000/db-{database} --password-command 'printf e2e-password' init\n{command} --host={host} --port={port} {connection_args} {execute_flag} \"{seed}\"\nbackup --profiles /work/db-profiles.yml database\n{command} --host={host} --port={port} {connection_args} {execute_flag} 'DROP TABLE {table};'\nrm -rf /work/db-restore && backup --profiles /work/db-profiles.yml restore --target /work/db-restore\n{command} --host={host} --port={port} {connection_args} < \"$(find /work/db-restore -name '{database}.sql' -print -quit)\"\n{command} --host={host} --port={port} {connection_args} {rows_only_flag} {execute_flag} \"{query}\" | grep -q '{expected}'",
-                table = if kind == "mysql" {
-                    "users"
-                } else {
-                    "audit_events"
+            &database_setup_script(
+                match database {
+                    "app12" => "database-mariadb12",
+                    "app55" => "database-mariadb55",
+                    _ => "database-postgres16",
                 },
-                expected = if kind == "mysql" {
-                    "Maria"
-                } else {
-                    "Postgres16"
-                },
+                kind,
+                url,
+                database,
+                expected,
             ),
         );
     }

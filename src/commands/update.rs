@@ -1,5 +1,6 @@
 use crate::runner::executor::{CommandRunner, SystemExecutor};
 use anyhow::{Result, anyhow};
+use std::path::Path;
 
 /// 시맨틱 버전 수치 파싱 (예: "v0.1.5" -> Some((0, 1, 5)))
 pub fn parse_version(v: &str) -> Option<(u32, u32, u32)> {
@@ -90,18 +91,52 @@ pub fn perform_self_replace_with_runner<R: CommandRunner + ?Sized>(
     runner: &R,
 ) -> Result<()> {
     let current_exe = std::env::current_exe()?;
-    let tmp_dir = tempfile::tempdir()?;
+    let staging_parent = current_exe
+        .parent()
+        .ok_or_else(|| anyhow!("current executable has no parent directory"))?;
+    perform_self_replace_at_path_with_runner(download_url, &current_exe, staging_parent, runner)
+}
+
+/// Download and atomically install an update at an explicit executable path.
+///
+/// All remote and archive work happens inside a private staging directory.  The current binary is
+/// not touched until the extracted replacement exists, has been made executable, and passes the
+/// final filesystem check.  This explicit path seam keeps lifecycle tests away from the running
+/// test binary while preserving the production path through `current_exe`.
+pub fn perform_self_replace_at_path_with_runner<R: CommandRunner + ?Sized>(
+    download_url: &str,
+    current_exe: &Path,
+    staging_parent: &Path,
+    runner: &R,
+) -> Result<()> {
+    if let Some(parent) = current_exe.parent() {
+        if !parent.exists() {
+            return Err(anyhow!(
+                "current executable parent does not exist: {}",
+                parent.display()
+            ));
+        }
+    }
+    std::fs::create_dir_all(staging_parent)?;
+    let tmp_dir = tempfile::Builder::new()
+        .prefix(".backup-update-")
+        .tempdir_in(staging_parent)?;
     let archive_path = tmp_dir.path().join("backup_update.tar.gz");
-    let archive_path_str = archive_path.to_str().unwrap();
-    let tmp_dir_str = tmp_dir.path().to_str().unwrap();
+    let archive_path_str = archive_path
+        .to_str()
+        .ok_or_else(|| anyhow!("update archive path is not valid UTF-8"))?;
+    let tmp_dir_str = tmp_dir
+        .path()
+        .to_str()
+        .ok_or_else(|| anyhow!("update staging path is not valid UTF-8"))?;
 
     // 1. 다운로드
     let out = runner.run("curl", &["-fsSL", download_url, "-o", archive_path_str])?;
     if out.status_code != 0 {
-        return Err(anyhow!(
-            "Failed to download update package from {}",
-            download_url
-        ));
+        return Err(anyhow!("Failed to download update package"));
+    }
+    if !archive_path.is_file() {
+        return Err(anyhow!("Downloaded update package was not created"));
     }
 
     // 2. 압축 해제
@@ -114,6 +149,9 @@ pub fn perform_self_replace_with_runner<R: CommandRunner + ?Sized>(
     if !new_binary.exists() {
         return Err(anyhow!("Extracted binary 'backup' not found"));
     }
+    if !new_binary.is_file() {
+        return Err(anyhow!("Extracted binary 'backup' is not a regular file"));
+    }
 
     // 3. 권한 설정 및 덮어쓰기
     let new_binary_str = new_binary
@@ -124,12 +162,26 @@ pub fn perform_self_replace_with_runner<R: CommandRunner + ?Sized>(
         return Err(anyhow!("Failed to mark extracted update binary executable"));
     }
 
-    std::fs::rename(&new_binary, &current_exe).or_else(|_| {
-        let backup_exe = current_exe.with_extension("old");
-        std::fs::rename(&current_exe, &backup_exe)?;
-        std::fs::copy(&new_binary, &current_exe)?;
-        let _ = std::fs::remove_file(backup_exe);
-        Ok::<(), std::io::Error>(())
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&new_binary)?.permissions().mode();
+        if mode & 0o111 == 0 {
+            return Err(anyhow!("Extracted update binary is not executable"));
+        }
+    }
+    #[cfg(not(unix))]
+    if std::fs::metadata(&new_binary)?.permissions().readonly() {
+        return Err(anyhow!("Extracted update binary is not executable"));
+    }
+
+    // Same-filesystem rename replaces the old executable atomically.  In particular, do not move
+    // the old binary aside and copy over it: a copy failure would leave a partial installation.
+    std::fs::rename(&new_binary, current_exe).map_err(|error| {
+        anyhow!(
+            "Failed to atomically replace {}: {error}",
+            current_exe.display()
+        )
     })?;
 
     Ok(())

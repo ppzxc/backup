@@ -66,7 +66,7 @@ pub fn execute_status_from_profiles_config<
     };
 
     if resolved_profiles.is_empty() {
-        let output = "No active backup profiles found in configuration.".to_string();
+        let output = "[WARN] No active backup profiles found in configuration.".to_string();
         if warnings.is_empty() {
             return Ok(output);
         }
@@ -82,7 +82,10 @@ pub fn execute_status_from_profiles_config<
     for profile in &resolved_profiles {
         let mut output_str = format!(
             "Profile: {}\nBackend: {}\nRepository: {}\nTargets: {:?}",
-            profile.name, profile.backend, profile.repository, profile.targets
+            profile.name,
+            profile.backend,
+            redact_status_text(&profile.repository),
+            profile.targets
         );
 
         match runner.list_snapshots(config_path, &profile.name) {
@@ -91,16 +94,17 @@ pub fn execute_status_from_profiles_config<
                 if trimmed.is_empty() {
                     output_str.push_str("\nSnapshots: None");
                 } else {
-                    output_str.push_str(&format!("\nSnapshots:\n{}", trimmed));
+                    output_str.push_str(&format!("\nSnapshots:\n{}", redact_status_text(trimmed)));
                 }
             }
             Err(err) => {
-                tracing::warn!(profile = %profile.name, error = %err, "Failed to fetch snapshots for profile");
+                let diagnostic = redact_status_text(&err.to_string());
+                tracing::warn!(profile = %profile.name, error = %diagnostic, "Failed to fetch snapshots for profile");
                 warnings.push(format!(
-                    "{}: failed to fetch snapshots: {err}",
+                    "{}: failed to fetch snapshots: {diagnostic}",
                     profile.name
                 ));
-                output_str.push_str(&format!("\n[WARN] Failed to fetch snapshots: {}", err));
+                output_str.push_str(&format!("\n[WARN] Failed to fetch snapshots: {diagnostic}"));
             }
         }
 
@@ -119,6 +123,37 @@ pub fn execute_status_from_profiles_config<
     }
 }
 
+fn redact_status_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(|token| {
+            let lower = token.to_ascii_lowercase();
+            if lower.contains("password")
+                || lower.contains("secret")
+                || lower.contains("token")
+                || lower.contains("credential")
+            {
+                return "<redacted>".to_string();
+            }
+            let Some(scheme_end) = token.find("://") else {
+                return token.to_string();
+            };
+            let authority_start = scheme_end + 3;
+            let Some(at_offset) = token[authority_start..].find('@') else {
+                return token.to_string();
+            };
+            let at = authority_start + at_offset;
+            let credentials = &token[authority_start..at];
+            if credentials.contains(':') {
+                format!("{}://<redacted>@{}", &token[..scheme_end], &token[at + 1..])
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub fn execute_status_with_runner<E: CommandRunner>(
     config: &BackupConfig,
     runner: &E,
@@ -130,7 +165,7 @@ pub fn execute_status_with_runner<E: CommandRunner>(
         "Profile: {}\nBackend: {}\nRepository: {}\nTargets: {:?}",
         target_profile,
         config.storage.primary.backend,
-        config.storage.primary.repository,
+        redact_status_text(&config.storage.primary.repository),
         config.backup.targets
     );
 
@@ -151,8 +186,9 @@ pub fn execute_status_with_runner<E: CommandRunner>(
             }
         }
         Err(err) => {
-            tracing::warn!(error = %err, "Failed to fetch snapshots");
-            output_str.push_str(&format!("\n[WARN] Failed to fetch snapshots: {}", err));
+            let diagnostic = redact_status_text(&err.to_string());
+            tracing::warn!(error = %diagnostic, "Failed to fetch snapshots");
+            output_str.push_str(&format!("\n[WARN] Failed to fetch snapshots: {diagnostic}"));
         }
     }
 

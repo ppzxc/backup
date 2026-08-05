@@ -779,9 +779,10 @@ impl ReportCommand {
                         failures.push(format!("restore drill: {message}"));
                         drill_error = Some(message);
                     }
+                    let report_file = file.as_deref().map(|path| batch_report_path(path, r_type));
                     let opts = ReportExportOptionsForConfig {
                         report_type: r_type,
-                        file: file.as_deref(),
+                        file: report_file.as_deref(),
                         format,
                         output_dir,
                         meta,
@@ -813,6 +814,18 @@ impl ReportCommand {
             }
         }
     }
+}
+
+fn batch_report_path(path: &Path, report_type: ReportType) -> PathBuf {
+    let suffix = match report_type {
+        ReportType::All => "all",
+        ReportType::Environment => "environment",
+        ReportType::TimeSync => "time-sync",
+        ReportType::RestoreDrill => "restore-drill",
+    };
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    parent.join(format!("{stem}-{suffix}"))
 }
 
 fn execute_restore_drill_with_runner<R: ResticRunner + ?Sized>(

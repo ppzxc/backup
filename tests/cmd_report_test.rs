@@ -357,3 +357,104 @@ fn restore_drill_failure_is_recorded_in_the_written_report() {
         "mock restic failed with exit code 1: restore failed for ****** at [repository masked]"
     );
 }
+
+#[test]
+fn report_without_action_separates_each_report_artifact() {
+    let dir = tempdir().unwrap();
+    let base_file = dir.path().join("audit.json");
+    let mut config = backup::commands::report::ReportConfig::default();
+    config.primary_repository = "/tmp/report-repository".into();
+    config.primary_password = secrecy::SecretString::new("report-password".into());
+    let meta = backup::commands::report::AuditReportMeta::new("host-1", "2026-08-04");
+
+    struct RestoringRunner;
+    impl backup::runner::restic::ResticRunner for RestoringRunner {
+        fn init_repo(&self, _: &str, _: &str) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn backup_paths(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[String],
+            _: &[String],
+        ) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn list_snapshots(&self, _: &str, _: &str) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn restore(&self, _: &str, _: &str, _: &str, target: &str) -> anyhow::Result<String> {
+            std::fs::write(
+                std::path::Path::new(target).join("restored.txt"),
+                "restored",
+            )?;
+            Ok(String::new())
+        }
+        fn backup_command(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[String],
+        ) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn backup_command_with_env(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[String],
+            _: &[(&str, &str)],
+        ) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    let output = ReportCommand::run_with_adapters_and_meta(
+        None,
+        Some(base_file.clone()),
+        Some(ReportFormat::Json),
+        &config,
+        &MockExecutor::new(),
+        &RestoringRunner,
+        &meta,
+    )
+    .unwrap();
+
+    assert!(output.contains("audit-environment.json"));
+    assert!(output.contains("audit-time-sync.json"));
+    assert!(output.contains("audit-restore-drill.json"));
+    assert!(dir.path().join("audit-environment.json").exists());
+    assert!(dir.path().join("audit-time-sync.json").exists());
+    assert!(dir.path().join("audit-restore-drill.json").exists());
+    assert!(!base_file.exists());
+}
+
+#[test]
+fn explicit_report_file_is_atomically_overwritten() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("audit.json");
+    fs::write(&file, "old report").unwrap();
+    let config = backup::commands::report::ReportConfig::default();
+    let meta = backup::commands::report::AuditReportMeta::new("host-1", "2026-08-04");
+
+    backup::commands::report::execute_report_export(
+        backup::commands::report::ReportExportOptions {
+            report_type: ReportType::Environment,
+            file: Some(&file),
+            format: Some(ReportFormat::Json),
+            output_dir: dir.path(),
+            meta: &meta,
+            config: &config,
+        },
+    )
+    .unwrap();
+
+    let content = fs::read_to_string(file).unwrap();
+    assert!(content.contains("daily_backup_review"));
+    assert!(!content.contains("old report"));
+}

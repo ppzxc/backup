@@ -138,12 +138,24 @@ impl SystemHealthDiagnoser {
         });
 
         // 2. Storage & Connectivity Item
-        let rclone_pass = rclone.check_connectivity("default").is_ok()
-            || rclone.check_connectivity("syno_backup").is_ok();
+        // These are independent diagnostics.  Always execute both probes so a failed primary
+        // remote cannot hide the state of the secondary remote from the operator.
+        let primary_rclone = rclone.check_connectivity("default");
+        let secondary_rclone = rclone.check_connectivity("syno_backup");
+        let rclone_pass = primary_rclone.is_ok() || secondary_rclone.is_ok();
         let (rclone_status, rclone_result) = if rclone_pass {
             (
                 DoctorStatus::Pass,
-                "Rclone connectivity active (Remote OK)".into(),
+                match (primary_rclone, secondary_rclone) {
+                    (Ok(_), Ok(_)) => "Rclone connectivity active (Remote OK)".into(),
+                    (Ok(_), Err(_)) => {
+                        "Rclone primary connectivity active (secondary unavailable)".into()
+                    }
+                    (Err(_), Ok(_)) => {
+                        "Rclone secondary connectivity active (primary unavailable)".into()
+                    }
+                    (Err(_), Err(_)) => unreachable!("rclone_pass requires one successful probe"),
+                },
             )
         } else {
             (
