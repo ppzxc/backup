@@ -1,4 +1,5 @@
 use anyhow::Result;
+use assert_cmd::Command;
 use backup::cli::{
     AdapterSelection, AdapterSet, Cli, CliRuntimeContext, CommandOutcome, ContractCaseSpec,
     ContractDiagnostic, SchedulerMode, authoritative_cli_axes, authoritative_cli_command_paths,
@@ -192,6 +193,90 @@ fn every_matrix_input_is_accepted_by_the_authoritative_parser() {
 }
 
 #[test]
+fn value_option_missing_arguments_are_rejected_by_the_authoritative_parser() {
+    for axis in CONTRACT_OPTION_AXES.iter().filter(|axis| {
+        matches!(
+            axis.rsplit('.').next().unwrap_or_default(),
+            "file"
+                | "format"
+                | "lang"
+                | "log_file"
+                | "profile"
+                | "profiles"
+                | "snapshot"
+                | "storage"
+                | "target"
+        )
+    }) {
+        let command_path = axis.rsplit_once('.').map(|(path, _)| path).unwrap_or(axis);
+        let flag = format!("--{}", axis.rsplit('.').next().unwrap().replace('_', "-"));
+        let mut argv = command_path_args(command_path);
+        argv.push(flag);
+        assert!(
+            Cli::try_parse_from(&argv).is_err(),
+            "{axis} accepted a missing value"
+        );
+    }
+}
+
+#[test]
+fn option_behavior_classes_cover_empty_whitespace_unicode_and_invalid_values() {
+    for axis in CONTRACT_OPTION_AXES {
+        let option = axis.rsplit('.').next().unwrap_or_default();
+        let command_path = axis.rsplit_once('.').map(|(path, _)| path).unwrap_or(axis);
+        let flag = format!("--{}", option.replace('_', "-"));
+        match option {
+            "dry_run"
+            | "force"
+            | "non_interactive"
+            | "purge"
+            | "quiet"
+            | "skip_database"
+            | "skip_retention"
+            | "skip_secondary_sync"
+            | "verbose"
+            | "yes" => {}
+            "format" | "storage" => {
+                let mut invalid = command_path_args(command_path);
+                invalid.extend([flag.clone(), "invalid".into()]);
+                assert!(
+                    Cli::try_parse_from(&invalid).is_err(),
+                    "{axis} accepted an invalid format value"
+                );
+            }
+            "lang" => {
+                let mut invalid = command_path_args(command_path);
+                invalid.extend([flag.clone(), "invalid".into()]);
+                let cli = Cli::try_parse_from(&invalid).unwrap();
+                assert!(
+                    CliRuntimeContext::from_cli(
+                        &cli,
+                        Language::En,
+                        None,
+                        SchedulerMode::Auto,
+                        AdapterSelection::StrictTest,
+                    )
+                    .is_err(),
+                    "{axis} accepted an invalid language value"
+                );
+            }
+            _ => {
+                for value in ["", " ", "유니코드-값"] {
+                    let mut argv = command_path_args(command_path);
+                    argv.extend([flag.clone(), value.into()]);
+                    let parsed = Cli::try_parse_from(&argv);
+                    if value.is_empty() && matches!(option, "file" | "log_file" | "profiles") {
+                        assert!(parsed.is_err(), "{axis} accepted an empty path");
+                    } else {
+                        parsed.unwrap_or_else(|error| panic!("{axis} rejected {value:?}: {error}"));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn configuration_gated_matrix_cases_use_shared_dispatch_and_strict_adapters() {
     let temp = tempfile::tempdir().unwrap();
     let cases = generate_cli_contract_matrix_with_specs(contract_matrix_specs()).unwrap();
@@ -217,7 +302,7 @@ fn configuration_gated_matrix_cases_use_shared_dispatch_and_strict_adapters() {
         if case.command_path == "backup.uninstall"
             && case.argv.iter().any(|argument| argument == "--yes")
         {
-            std::fs::write(&context.profiles_path, "version: '2'\nprofiles: {}\n").unwrap();
+            write_mode_600(&context.profiles_path, "version: '2'\nprofiles: {}\n");
         }
 
         let runner = StrictCommandRunner::new([]);
@@ -341,6 +426,25 @@ fn contract_matrix_specs() -> Vec<ContractCaseSpec> {
             expectation,
         }
     }));
+    let default_specs = CONTRACT_OPTION_AXES
+        .iter()
+        .filter(|option_axis| **option_axis != "backup.setup.non_interactive")
+        .map(|option_axis| {
+            let option_axis = (*option_axis).to_owned();
+            let command_path = option_axis
+                .rsplit_once('.')
+                .map(|(path, _)| path.to_owned())
+                .unwrap_or_else(|| option_axis.clone());
+            ContractCaseSpec {
+                command_path: command_path.clone(),
+                option_axis: Some(option_axis),
+                behavior_class: "default-omitted".into(),
+                values: vec!["absent".into()],
+                argv: command_path_args(&command_path),
+                expectation: contract_expectation(&command_path, None),
+            }
+        });
+    specs.extend(default_specs);
     specs
 }
 
@@ -352,8 +456,6 @@ fn contract_expectation(
     let adapter_trace = if command_path == "backup.doctor" {
         vec![
             "restic version env=[] timeout=None".into(),
-            "rclone lsd default env=[] timeout=None".into(),
-            "rclone lsd syno_backup env=[] timeout=None".into(),
             "chronyc tracking env=[] timeout=None".into(),
             "timedatectl status env=[] timeout=None".into(),
             "systemctl is-active backup-pipeline.timer env=[] timeout=None".into(),
@@ -403,6 +505,187 @@ fn contract_expectation(
         external_state_changes: Vec::new(),
         adapter_trace,
     }
+}
+
+#[test]
+fn binary_contract_matrix_covers_every_command_and_option_case() {
+    let temp = tempfile::tempdir().unwrap();
+    let profiles = temp.path().join("profiles.yaml");
+    let invalid_profiles = temp.path().join("invalid-profiles.yaml");
+    write_mode_600(
+        &profiles,
+        "version: '2'\nprofiles:\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  default:\n    inherit: primary\n    backup:\n      source: ['/tmp']\n",
+    );
+    write_mode_600(&temp.path().join("primary-password"), "primary-secret");
+    write_mode_600(&invalid_profiles, "version: [invalid\n");
+
+    let cases = generate_cli_contract_matrix_with_specs(contract_matrix_specs()).unwrap();
+    for case in &cases {
+        let mut args = case.argv.iter().skip(1).cloned().collect::<Vec<_>>();
+        if let Some(index) = args.iter().position(|argument| argument == "--profiles") {
+            args[index + 1] = profiles.to_string_lossy().into_owned();
+        } else {
+            args.splice(
+                0..0,
+                [
+                    "--profiles".to_string(),
+                    profiles.to_string_lossy().into_owned(),
+                ],
+            );
+        }
+        args.push("--help".into());
+
+        let output = Command::cargo_bin("backup")
+            .unwrap()
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} rejected by the binary: {}",
+            case.id,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !output.stdout.is_empty(),
+            "{} did not emit help output",
+            case.id
+        );
+    }
+
+    // Help above proves parser wiring for every matrix case.  For commands whose first
+    // operation is configuration loading, run the real binary through dispatch as well.  An
+    // explicitly supplied invalid fixture makes this deterministic and prevents any external
+    // adapter from being reached while still checking main's exit/error wiring.
+    let dispatch_cases = cases.iter().filter(|case| {
+        matches!(
+            case.command_path.as_str(),
+            "backup"
+                | "backup.copy"
+                | "backup.database"
+                | "backup.report"
+                | "backup.report.environment"
+                | "backup.report.restore-drill"
+                | "backup.report.time-sync"
+                | "backup.restore"
+                | "backup.run"
+                | "backup.schedule.enable"
+                | "backup.setup"
+                | "backup.setup.backend-init"
+                | "backup.snapshots"
+                | "backup.status"
+                | "backup.version"
+        )
+    });
+    for case in dispatch_cases {
+        let mut args = case.argv.iter().skip(1).cloned().collect::<Vec<_>>();
+        if let Some(index) = args.iter().position(|argument| argument == "--profiles") {
+            args[index + 1] = invalid_profiles.to_string_lossy().into_owned();
+        } else {
+            args.splice(
+                0..0,
+                [
+                    "--profiles".to_string(),
+                    invalid_profiles.to_string_lossy().into_owned(),
+                ],
+            );
+        }
+        let output = Command::cargo_bin("backup")
+            .unwrap()
+            .args(&args)
+            .output()
+            .unwrap();
+        let is_version = matches!(case.command_path.as_str(), "backup" | "backup.version");
+        assert_eq!(
+            output.status.success(),
+            is_version,
+            "{} dispatch status mismatch: {}",
+            case.id,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if is_version {
+            assert!(
+                !output.stdout.is_empty(),
+                "{} emitted no version data",
+                case.id
+            );
+        } else {
+            assert!(
+                !output.stderr.is_empty(),
+                "{} emitted no diagnostic",
+                case.id
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn binary_contract_reaches_successful_dispatch_and_report_with_explicit_fixture() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    set_mode_700(temp.path());
+    let bin_dir = temp.path().join("bin");
+    let reports = temp.path().join("reports");
+    std::fs::create_dir(&bin_dir).unwrap();
+    let resticprofile = bin_dir.join("resticprofile");
+    std::fs::write(
+        &resticprofile,
+        "#!/bin/sh\nprintf '%s\\n' 'snapshot binary-contract saved'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&resticprofile, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let profiles = temp.path().join("profiles.yaml");
+    write_mode_600(
+        &profiles,
+        format!(
+            "version: '2'\napplication:\n  reports:\n    outputDir: {}\n    enableDailyReports: false\n    enableAnnualDrDrillReport: false\nprofiles:\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  default:\n    inherit: primary\n    backup:\n      source: ['/tmp']\n",
+            reports.display()
+        ),
+    );
+    write_mode_600(&temp.path().join("primary-password"), "primary-secret");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = format!("{}:{}", bin_dir.display(), path.to_string_lossy());
+
+    let output = Command::cargo_bin("backup")
+        .unwrap()
+        .env("PATH", path)
+        .args([
+            "--profiles",
+            profiles.to_str().unwrap(),
+            "run",
+            "--skip-database",
+            "--skip-secondary-sync",
+            "--skip-retention",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("binary-contract"));
+    let report = std::fs::read_dir(&reports)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .expect("binary run should create an execution report");
+    assert!(
+        std::fs::read_to_string(&report)
+            .unwrap()
+            .contains("\"succeeded\": true")
+    );
+    assert_eq!(
+        std::fs::metadata(report).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }
 
 fn command_path_args(path: &str) -> Vec<String> {
@@ -533,14 +816,13 @@ fn unified_report_config_is_derived_from_profiles_without_legacy_operational_con
         std::fs::set_permissions(&password, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
     let profiles_path = temp.path().join("profiles.yaml");
-    std::fs::write(
+    write_mode_600(
         &profiles_path,
         format!(
             "version: '2'\napplication:\n  reports:\n    outputDir: /tmp/reports\n    enableDailyReports: true\n    enableAnnualDrDrillReport: true\n  audit:\n    system-manager: operator\nprofiles:\n  primary:\n    repository: /tmp/repo\n    password-file: {}\n  default:\n    backup:\n      exclude: ['/parent/cache']\n    retention:\n      keep-weekly: 5\n      keep-monthly: 13\n  files:\n    inherit: default\n    repository: /tmp/repo\n    backup:\n      source: ['/work/source']\n    retention:\n      keep-daily: 9\n",
             password.display()
         ),
-    )
-    .unwrap();
+    );
     let profiles =
         backup::config::model::ResticProfileConfig::load_from_path(&profiles_path).unwrap();
 
@@ -638,11 +920,10 @@ fn strict_command_runner_rejects_unexpected_calls_and_requires_exhaustion() {
 fn shared_dispatch_reaches_the_strict_adapter_with_exact_profile_and_dry_run() {
     let temp = tempfile::tempdir().unwrap();
     let profiles = temp.path().join("profiles.yaml");
-    std::fs::write(
+    write_mode_600(
         &profiles,
         "version: '2'\nprofiles:\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  secondary:\n    repository: /secondary-repository\n    password-file: secondary-password\n  default:\n    inherit: primary\n    backup:\n      source: ['/tmp']\n    copy:\n      profile: secondary\n",
-    )
-    .unwrap();
+    );
     write_mode_600(&temp.path().join("primary-password"), "primary-secret");
     write_mode_600(&temp.path().join("secondary-password"), "secondary-secret");
     let runner = StrictCommandRunner::new([StrictCommandRunner::expectation(
@@ -702,14 +983,13 @@ fn shared_dispatch_preserves_run_failure_report_artifacts_and_state() {
     let temp = tempfile::tempdir().unwrap();
     let profiles = temp.path().join("profiles.yaml");
     let reports = temp.path().join("reports");
-    std::fs::write(
+    write_mode_600(
         &profiles,
         format!(
             "version: '2'\napplication:\n  reports:\n    outputDir: {}\n    enableDailyReports: false\n    enableAnnualDrDrillReport: false\nprofiles:\n  primary:\n    repository: /tmp/repo\n    password-file: /tmp/password\n  default:\n    inherit: primary\n    backup:\n      source: ['/tmp']\n",
             reports.display()
         ),
-    )
-    .unwrap();
+    );
     backup::config::model::ResticProfileConfig::load_from_path(&profiles).unwrap();
 
     let runner = StrictCommandRunner::new([StrictCommandRunner::expectation(
@@ -773,11 +1053,10 @@ fn shared_dispatch_preserves_run_failure_report_artifacts_and_state() {
 fn invalid_profile_fails_before_any_strict_adapter_call() {
     let temp = tempfile::tempdir().unwrap();
     let profiles = temp.path().join("profiles.yaml");
-    std::fs::write(
+    write_mode_600(
         &profiles,
         "version: '2'\nprofiles:\n  default:\n    repository: /tmp/repo\n    backup:\n      source: ['/tmp']\n",
-    )
-    .unwrap();
+    );
     let runner = StrictCommandRunner::new([]);
     let resticprofile = ResticProfileTool::new(&runner);
     let restic = ResticTool::new(&runner);
@@ -2096,13 +2375,12 @@ fn copy_contract_fixture(with_secondary: bool) -> CopyContractFixture {
     } else {
         ""
     };
-    std::fs::write(
+    write_mode_600(
         &profiles,
         format!(
             "version: '2'\nprofiles:\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n{secondary_profile}  default:\n    inherit: primary\n    backup:\n      source: ['/data']\n    copy:\n      profile: secondary\n"
         ),
-    )
-    .unwrap();
+    );
     write_mode_600(&directory.path().join("primary-password"), "primary-secret");
     if with_secondary {
         write_mode_600(
@@ -2130,13 +2408,12 @@ fn lifecycle_fixture(database: bool) -> LifecycleFixture {
     } else {
         ""
     };
-    std::fs::write(
+    write_mode_600(
         &profiles,
         format!(
             "version: '2'\n{application}profiles:\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  secondary:\n    repository: /secondary-repository\n    password-file: secondary-password\n{database_profile}"
         ),
-    )
-    .unwrap();
+    );
     write_mode_600(&directory.path().join("primary-password"), "primary-secret");
     write_mode_600(
         &directory.path().join("secondary-password"),
@@ -2158,11 +2435,10 @@ fn lifecycle_fixture(database: bool) -> LifecycleFixture {
 fn setup_contract_fixture() -> SetupFixture {
     let directory = tempfile::tempdir().unwrap();
     let profiles = directory.path().join("profiles.yaml");
-    std::fs::write(
+    write_mode_600(
         &profiles,
         "version: '2'\nprofiles:\n  secondary:\n    repository: /secondary-repository\n    password-file: secondary-password\n  zeta:\n    inherit: primary\n    backup:\n      source: ['/zeta']\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  alpha:\n    inherit: primary\n    backup:\n      source: ['/alpha']\n  default: {}\n",
-    )
-    .unwrap();
+    );
     write_mode_600(&directory.path().join("primary-password"), "primary-secret");
     write_mode_600(
         &directory.path().join("secondary-password"),
@@ -2256,14 +2532,13 @@ fn run_contract_fixture() -> RunContractFixture {
     let directory = tempfile::tempdir().unwrap();
     let profiles = directory.path().join("profiles.yaml");
     let reports = directory.path().join("reports");
-    std::fs::write(
+    write_mode_600(
         &profiles,
         format!(
             "version: '2'\napplication:\n  reports:\n    outputDir: {}\n    enableDailyReports: false\n    enableAnnualDrDrillReport: false\n  database:\n    profile: database\n    type: postgres\n    connection-url: ${{BACKUP_DATABASE_CONNECTION_URL}}\nprofiles:\n  default: {{}}\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  secondary:\n    repository: /secondary-repository\n    password-file: secondary-password\n  alpha:\n    inherit: primary\n    backup:\n      source: ['/alpha']\n    copy:\n      profile: secondary\n  beta:\n    inherit: primary\n    backup:\n      source: ['/beta']\n    copy:\n      profile: secondary\n  database:\n    inherit: primary\n",
             reports.display()
         ) + "  archive:\n    repository: /archive-repository\n    password-file: archive-password\n",
-    )
-    .unwrap();
+    );
     set_mode_600(&profiles);
     write_mode_600(&directory.path().join("primary-password"), "primary-secret");
     write_mode_600(
@@ -2461,8 +2736,8 @@ fn dispatch_run_contract(
     (outcome, trace.lock().unwrap().clone())
 }
 
-fn write_mode_600(path: &Path, contents: &str) {
-    std::fs::write(path, contents).unwrap();
+fn write_mode_600(path: &Path, contents: impl AsRef<str>) {
+    std::fs::write(path, contents.as_ref()).unwrap();
     set_mode_600(path);
 }
 
@@ -2471,6 +2746,14 @@ fn set_mode_600(path: &Path) {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+fn set_mode_700(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 }
 

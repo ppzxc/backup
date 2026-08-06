@@ -73,28 +73,7 @@ pub fn execute_snapshots_from_profiles<R: ResticRunner + ?Sized>(
 }
 
 fn redact_snapshot_diagnostic(value: &str, repository: &str, password: &str) -> String {
-    let mut redacted = value.to_owned();
-    for secret in [password, repository] {
-        if !secret.is_empty() {
-            redacted = redacted.replace(secret, "<redacted>");
-        }
-    }
-    redacted
-        .split_whitespace()
-        .map(|token| {
-            let lower = token.to_ascii_lowercase();
-            if lower.contains("password")
-                || lower.contains("secret")
-                || lower.contains("token")
-                || lower.contains("credential")
-            {
-                "<redacted>".to_string()
-            } else {
-                token.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    crate::commands::redact_diagnostic(value, &[password, repository])
 }
 
 pub fn execute_snapshots<R: ResticRunner>(config: &BackupConfig, runner: &R) -> Result<String> {

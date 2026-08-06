@@ -28,8 +28,7 @@ fn main() {
                     "info",
                     Some(log_file),
                 )) {
-                    eprintln!("logging initialization failed: {error}");
-                    std::process::exit(1);
+                    print_startup_error(format!("logging initialization failed: {error}"), 1);
                 }
             }
             let exit_code = error.exit_code();
@@ -90,8 +89,7 @@ fn main() {
             context.logging.level_filter.clone(),
             context.logging.log_file.clone(),
         )) {
-            eprintln!("logging initialization failed: {error}");
-            std::process::exit(1);
+            print_startup_error(format!("logging initialization failed: {error}"), 1);
         }
     }
 
@@ -123,6 +121,12 @@ fn main() {
     if !outcome.is_success() {
         std::process::exit(outcome.exit_status);
     }
+}
+
+fn print_startup_error(message: impl Into<String>, exit_code: i32) -> ! {
+    let error = clap::Error::raw(clap::error::ErrorKind::Io, message.into());
+    let _ = error.print();
+    std::process::exit(exit_code);
 }
 
 fn parser_language() -> anyhow::Result<Language> {

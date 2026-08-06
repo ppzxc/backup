@@ -28,6 +28,7 @@ fn selected_profiles_each_execute_their_own_copy_operation() {
                 ..Default::default()
             },
         ),
+        ("secondary".into(), ProfileSection::default()),
     ]);
     let config = ResticProfileConfig {
         version: "2".into(),
@@ -47,6 +48,53 @@ fn selected_profiles_each_execute_their_own_copy_operation() {
     .unwrap();
 
     assert_eq!(output, vec!["copied", "copied"]);
+}
+
+#[test]
+fn inherited_copy_declaration_is_executed_for_the_selected_profile() {
+    use backup::commands::run::execute_secondary_copies;
+    use backup::config::model::{CopyCommandSection, ProfileSection, ResticProfileConfig};
+    use std::collections::BTreeMap;
+
+    let config = ResticProfileConfig {
+        version: "2".into(),
+        application: None,
+        global: None,
+        groups: None,
+        profiles: BTreeMap::from([
+            (
+                "default".into(),
+                ProfileSection {
+                    copy: Some(CopyCommandSection {
+                        profile: Some("secondary".into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ),
+            (
+                "daily".into(),
+                ProfileSection {
+                    inherit: Some("default".into()),
+                    ..Default::default()
+                },
+            ),
+            ("secondary".into(), ProfileSection::default()),
+        ]),
+    };
+    let runner = MockResticProfileRunner::new(0, "copied");
+
+    let output = execute_secondary_copies(
+        &config,
+        Path::new("/tmp/profiles.yaml"),
+        &["daily".into()],
+        false,
+        &runner,
+    )
+    .unwrap();
+
+    assert_eq!(output, vec!["copied"]);
+    assert_eq!(runner.calls.lock().unwrap().len(), 1);
 }
 
 #[test]
@@ -452,6 +500,26 @@ fn test_pipeline_engine_flag_combinations() {
     assert!(!result.contains("[Pipeline] Executed Database"));
     assert!(!result.contains("Secondary storage sync"));
     assert!(result.contains("profile_run_ok"));
+}
+
+#[test]
+fn dry_run_propagates_native_backup_adapter_failure() {
+    use backup::commands::run::{PipelineEngine, PipelineOptions};
+
+    let runner = MockResticProfileRunner::new(1, "native dry-run unsupported");
+    let engine = PipelineEngine::new(&runner);
+    let options = PipelineOptions {
+        dry_run: true,
+        skip_database: true,
+        skip_secondary_sync: true,
+        skip_retention: true,
+    };
+
+    let error = engine
+        .execute(Path::new("/tmp/profiles.yaml"), "daily", &options)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("native dry-run unsupported"));
 }
 
 #[test]

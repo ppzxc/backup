@@ -5,17 +5,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tracing::field::{Field, Visit};
 use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::field::RecordFields;
+use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
-use tracing_subscriber::fmt::FormatFields;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::Layer;
+use tracing_subscriber::filter::filter_fn;
 
 pub const MASKED_VALUE: &str = "***MASKED***";
 

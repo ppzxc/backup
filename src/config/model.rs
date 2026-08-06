@@ -1056,14 +1056,7 @@ impl ResticProfileConfig {
     /// Resolves the copy target declared by a Backup Profile through its inheritance chain.
     /// A copy command must name an existing Backend Profile before it reaches an external runner.
     pub fn effective_copy_profile(&self, profile: &str) -> Result<Option<String>> {
-        let mut current = profile;
-        let mut remaining = self.profiles.len() + 1;
-        while remaining > 0 {
-            remaining -= 1;
-            let section = self
-                .profiles
-                .get(current)
-                .ok_or_else(|| anyhow::anyhow!("Unknown Backup Profile '{current}'"))?;
+        for section in self.inherited_profile_chain(profile)? {
             if let Some(copy) = &section.copy {
                 let target = copy.profile.as_deref().unwrap_or("secondary");
                 if !self.profiles.contains_key(target) {
@@ -1073,12 +1066,36 @@ impl ResticProfileConfig {
                 }
                 return Ok(Some(target.into()));
             }
+        }
+        Ok(None)
+    }
+
+    fn inherited_profile_chain(&self, profile: &str) -> Result<Vec<&ProfileSection>> {
+        let mut current = profile;
+        let mut remaining = self.profiles.len() + 1;
+        let mut chain = Vec::new();
+        while remaining > 0 {
+            remaining -= 1;
+            let section = self.profiles.get(current).ok_or_else(|| {
+                anyhow::anyhow!("Profile '{profile}' inherits unknown profile '{current}'")
+            })?;
+            chain.push(section);
             let Some(parent) = section.inherit.as_deref() else {
-                return Ok(None);
+                return Ok(chain);
             };
             current = parent;
         }
-        anyhow::bail!("Backup Profile '{profile}' has a cyclic inheritance chain");
+        anyhow::bail!("Profile '{profile}' has a cyclic inheritance chain")
+    }
+
+    /// Resolves the repository URI for a Backend Profile through its inheritance chain.
+    /// Diagnostics use this accessor so storage checks always follow the configured
+    /// repository instead of inventing an adapter target.
+    pub fn backend_repository(&self, profile: &str) -> Result<String> {
+        self.inherited_profile_chain(profile)?
+            .into_iter()
+            .find_map(|section| section.repository.clone())
+            .ok_or_else(|| anyhow::anyhow!("Profile '{profile}' has no repository"))
     }
 
     /// Returns Backend Adapter initialization targets in the contract-defined order.
@@ -1118,30 +1135,14 @@ impl ResticProfileConfig {
         config_dir: &Path,
         profile: &str,
     ) -> Result<(String, String)> {
-        let mut current = self
-            .profiles
-            .get(profile)
-            .ok_or_else(|| anyhow::anyhow!("Unknown profile '{profile}'"))?;
-        let mut repository = current.repository.clone();
-        let mut password_file = current.password_file.clone();
-        let mut remaining = self.profiles.len() + 1;
-        while (repository.is_none() || password_file.is_none()) && remaining > 0 {
-            remaining -= 1;
-            let Some(parent) = current.inherit.as_deref() else {
-                break;
-            };
-            current = self.profiles.get(parent).ok_or_else(|| {
-                anyhow::anyhow!("Profile '{profile}' inherits unknown profile '{parent}'")
-            })?;
-            repository = repository.or_else(|| current.repository.clone());
-            password_file = password_file.or_else(|| current.password_file.clone());
-        }
-        if remaining == 0 {
-            anyhow::bail!("Profile '{profile}' has a cyclic inheritance chain");
-        }
-        let repository =
-            repository.ok_or_else(|| anyhow::anyhow!("Profile '{profile}' has no repository"))?;
-        let password_file = password_file
+        let chain = self.inherited_profile_chain(profile)?;
+        let repository = chain
+            .iter()
+            .find_map(|section| section.repository.clone())
+            .ok_or_else(|| anyhow::anyhow!("Profile '{profile}' has no repository"))?;
+        let password_file = chain
+            .iter()
+            .find_map(|section| section.password_file.clone())
             .ok_or_else(|| anyhow::anyhow!("Profile '{profile}' has no password-file"))?;
         let password_path = Path::new(&password_file);
         let password_path = if password_path.is_absolute() {
@@ -1154,6 +1155,20 @@ impl ResticProfileConfig {
 
     pub fn secure_sidecar_value(config_dir: &Path, name: &str) -> Result<String> {
         read_secure_sidecar(&config_dir.join(name))
+    }
+
+    /// Returns sidecar paths referenced by profile environment declarations.
+    /// Environment-reference parsing belongs to the configuration model so cleanup code does
+    /// not need to duplicate the resticprofile syntax or sidecar naming convention.
+    pub fn environment_sidecar_paths(&self, config_dir: &Path) -> Vec<std::path::PathBuf> {
+        self.profiles
+            .values()
+            .filter_map(|profile| profile.env.as_ref())
+            .flat_map(|environment| environment.values())
+            .filter_map(|value| env_reference(value))
+            .filter_map(|variable| sidecar_file_name(&variable))
+            .map(|name| config_dir.join(name))
+            .collect()
     }
 }
 

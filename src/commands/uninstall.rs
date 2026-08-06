@@ -234,23 +234,9 @@ fn purge_configuration_scope(profiles_path: &Path) -> Result<()> {
                     }
                 }
             }
-            if let Some(environment) = &profile.env {
-                for value in environment.values() {
-                    if let Some(variable) = value.split(".Env.").nth(1) {
-                        let variable = variable
-                            .split(|character: char| {
-                                !character.is_ascii_alphanumeric() && character != '_'
-                            })
-                            .next()
-                            .unwrap_or_default();
-                        if let Some(name) = variable.strip_prefix("BACKUP_") {
-                            files
-                                .push(config_dir.join(name.to_ascii_lowercase().replace('_', "-")));
-                        }
-                    }
-                }
-            }
         }
+
+        files.extend(config.environment_sidecar_paths(config_dir));
 
         let reports = PathBuf::from(config.application_config().reports.output_dir);
         if reports.starts_with(config_dir) && reports != *config_dir {

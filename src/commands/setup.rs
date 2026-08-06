@@ -982,10 +982,10 @@ fn redact_existing_profile_error(
     profiles: &crate::config::model::ResticProfileConfig,
     config_dir: &Path,
 ) -> String {
-    let mut secrets = Vec::new();
+    let mut secrets = Vec::<SecretString>::new();
     for profile in profiles.profiles.keys() {
         if let Ok((_, password)) = profiles.backend_credentials(config_dir, profile) {
-            secrets.push(password);
+            secrets.push(SecretString::new(password));
         }
     }
     for filename in APPLICATION_SECRET_FILENAMES
@@ -993,11 +993,11 @@ fn redact_existing_profile_error(
         .chain(["database-connection-url"])
     {
         if let Ok(value) = std::fs::read_to_string(config_dir.join(filename)) {
-            secrets.push(value);
+            secrets.push(SecretString::new(value));
         }
     }
     for secret in secrets {
-        let trimmed = secret.trim();
+        let trimmed = secret.expose_secret().trim();
         if !trimmed.is_empty() {
             message = message.replace(trimmed, "******");
         }
