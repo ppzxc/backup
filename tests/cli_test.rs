@@ -1,4 +1,6 @@
 use assert_cmd::Command;
+use backup::cli::Cli;
+use clap::Parser;
 
 #[test]
 fn test_cli_version() {
@@ -20,6 +22,154 @@ fn test_cli_version_subcommand() {
         stdout.contains(env!("CARGO_PKG_VERSION")),
         "backup version 출력에 CARGO_PKG_VERSION이 포함되어야 합니다"
     );
+}
+
+#[test]
+fn builtin_and_subcommand_version_are_the_same_canonical_output() {
+    let builtin = Command::cargo_bin("backup")
+        .unwrap()
+        .arg("--version")
+        .output()
+        .unwrap();
+    let subcommand = Command::cargo_bin("backup")
+        .unwrap()
+        .arg("version")
+        .output()
+        .unwrap();
+
+    assert!(builtin.status.success());
+    assert!(subcommand.status.success());
+    assert_eq!(builtin.stdout, subcommand.stdout);
+    assert!(builtin.stderr.is_empty());
+    assert!(subcommand.stderr.is_empty());
+}
+
+#[test]
+fn version_ignores_an_invalid_profiles_override_but_honors_explicit_logging() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing_profiles = temp.path().join("missing/profiles.yaml");
+    let log_file = temp.path().join("version.log");
+
+    Command::cargo_bin("backup")
+        .unwrap()
+        .args([
+            "--profiles",
+            missing_profiles.to_str().unwrap(),
+            "--log-file",
+            log_file.to_str().unwrap(),
+            "version",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(env!("CARGO_PKG_VERSION")));
+
+    assert!(
+        log_file.exists(),
+        "an explicit log target is a deliberate side effect"
+    );
+
+    let builtin_log_file = temp.path().join("builtin-version.log");
+    Command::cargo_bin("backup")
+        .unwrap()
+        .args([
+            "--profiles",
+            missing_profiles.to_str().unwrap(),
+            "--log-file",
+            builtin_log_file.to_str().unwrap(),
+            "--version",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(env!("CARGO_PKG_VERSION")));
+
+    let invalid_log_target = temp.path().join("invalid-log-target");
+    std::fs::create_dir(&invalid_log_target).unwrap();
+    Command::cargo_bin("backup")
+        .unwrap()
+        .args([
+            "--profiles",
+            missing_profiles.to_str().unwrap(),
+            "--log-file",
+            invalid_log_target.to_str().unwrap(),
+            "--version",
+        ])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("logging initialization failed"));
+}
+
+#[test]
+fn built_in_help_is_parser_only_even_with_invalid_runtime_inputs() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing_profiles = temp.path().join("missing/profiles.yaml");
+    let log_file = temp.path().join("help.log");
+
+    Command::cargo_bin("backup")
+        .unwrap()
+        .args([
+            "--profiles",
+            missing_profiles.to_str().unwrap(),
+            "--log-file",
+            log_file.to_str().unwrap(),
+            "run",
+            "--help",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Execute backup pipeline"));
+
+    assert!(!log_file.exists());
+
+    for (index, command) in [
+        vec!["-h"],
+        vec!["setup", "-h"],
+        vec!["report", "environment", "-h"],
+        vec!["schedule", "status", "-h"],
+        vec!["restore", "-h"],
+        vec!["uninstall", "-h"],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let command_log = temp.path().join(format!("help-{index}.log"));
+        let mut args = vec![
+            "--profiles".to_string(),
+            missing_profiles.to_str().unwrap().to_string(),
+            "--log-file".to_string(),
+            command_log.to_str().unwrap().to_string(),
+        ];
+        args.extend(command.into_iter().map(String::from));
+        Command::cargo_bin("backup")
+            .unwrap()
+            .args(&args)
+            .assert()
+            .success();
+        assert!(!command_log.exists());
+    }
+}
+
+#[test]
+fn quiet_and_verbose_are_rejected_by_the_authoritative_parser() {
+    let error = match Cli::try_parse_from(["backup", "--quiet", "-v", "version"]) {
+        Ok(_) => panic!("quiet and verbose must be mutually exclusive"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
+
+#[test]
+fn explicit_log_file_failure_is_reported_before_command_dispatch() {
+    let temp = tempfile::tempdir().unwrap();
+    let log_directory = temp.path().join("log-directory");
+    std::fs::create_dir(&log_directory).unwrap();
+
+    Command::cargo_bin("backup")
+        .unwrap()
+        .args(["--log-file", log_directory.to_str().unwrap(), "version"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("logging initialization failed"));
 }
 
 /// LANG=ko_KR.UTF-8 환경에서 --help 출력이 한국어만 포함하는지 검증
@@ -136,6 +286,16 @@ fn invalid_setup_language_fails_before_help_or_dispatch() {
 }
 
 #[test]
+fn setup_language_values_are_case_sensitive_contract_values() {
+    Command::cargo_bin("backup")
+        .unwrap()
+        .args(["setup", "--lang", "EN", "--help"])
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("invalid language"));
+}
+
+#[test]
 fn test_subcommands_not_placeholder() {
     let subcommands = vec![
         vec!["setup", "--help"],
@@ -169,7 +329,7 @@ fn test_subcommands_not_placeholder() {
         .unwrap()
         .args(["--profiles", profiles.to_str().unwrap(), "status"])
         .assert()
-        .success();
+        .failure();
     let output = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(!output.contains("Command executed"));
 }
@@ -184,7 +344,5 @@ fn test_cli_logging_flags() {
         .args(["-v", "-q", "--log-file", log_path, "version"])
         .assert()
         .code(2)
-        .stderr(predicates::str::contains(
-            "--quiet cannot be combined with --verbose",
-        ));
+        .stderr(predicates::str::contains("cannot be used with"));
 }

@@ -15,40 +15,116 @@ pub fn execute_snapshots_from_profiles<R: ResticRunner + ?Sized>(
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect::<Vec<_>>();
-    let (primary_repository, primary_password) =
-        config.backend_credentials(config_dir, "primary")?;
-    let primary =
-        runner.list_snapshots_with_env(&primary_repository, &primary_password, &environment)?;
-    let mut output = format!("Primary snapshots:\n{primary}");
+    let (primary_repository, primary_password) = config
+        .backend_credentials(config_dir, "primary")
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "primary snapshots unavailable: {}",
+                redact_snapshot_diagnostic(&error.to_string(), "", "")
+            )
+        })?;
+    let primary = runner
+        .list_snapshots_with_env(&primary_repository, &primary_password, &environment)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "primary snapshots unavailable: {}",
+                redact_snapshot_diagnostic(
+                    &error.to_string(),
+                    &primary_repository,
+                    &primary_password
+                )
+            )
+        })?;
+    let mut output = format!(
+        "Primary snapshots:\n{}",
+        redact_snapshot_diagnostic(&primary, &primary_repository, &primary_password)
+    );
     if config.profiles.contains_key("secondary") {
-        let (secondary_repository, secondary_password) =
-            config.backend_credentials(config_dir, "secondary")?;
-        match runner.list_snapshots_with_env(
-            &secondary_repository,
-            &secondary_password,
-            &environment,
-        ) {
-            Ok(snapshots) => output.push_str(&format!("\nSecondary snapshots:\n{snapshots}")),
+        match config.backend_credentials(config_dir, "secondary") {
+            Ok((secondary_repository, secondary_password)) => match runner.list_snapshots_with_env(
+                &secondary_repository,
+                &secondary_password,
+                &environment,
+            ) {
+                Ok(snapshots) => output.push_str(&format!(
+                    "\nSecondary snapshots:\n{}",
+                    redact_snapshot_diagnostic(
+                        &snapshots,
+                        &secondary_repository,
+                        &secondary_password,
+                    )
+                )),
+                Err(error) => output.push_str(&format!(
+                    "\n[WARN] Secondary snapshots unavailable: {}",
+                    redact_snapshot_diagnostic(
+                        &error.to_string(),
+                        &secondary_repository,
+                        &secondary_password,
+                    )
+                )),
+            },
             Err(error) => output.push_str(&format!(
-                "\n[WARN] Secondary snapshots unavailable: {error}"
+                "\n[WARN] Secondary snapshots unavailable: {}",
+                redact_snapshot_diagnostic(&error.to_string(), "", "")
             )),
         }
     }
     Ok(output)
 }
 
+fn redact_snapshot_diagnostic(value: &str, repository: &str, password: &str) -> String {
+    crate::commands::redact_diagnostic(value, &[password, repository])
+}
+
 pub fn execute_snapshots<R: ResticRunner>(config: &BackupConfig, runner: &R) -> Result<String> {
     let repo = &config.storage.primary.repository;
     let pwd = config.storage.primary.password.expose_secret();
-    let primary = runner.list_snapshots(repo, pwd)?;
-    let mut output = format!("Primary snapshots:\n{primary}");
+    let primary = runner.list_snapshots(repo, pwd).map_err(|error| {
+        anyhow::anyhow!(
+            "primary snapshots unavailable: {}",
+            redact_snapshot_diagnostic(&error.to_string(), repo, pwd)
+        )
+    })?;
+    let mut output = format!(
+        "Primary snapshots:\n{}",
+        redact_snapshot_diagnostic(&primary, repo, pwd)
+    );
     if let Some(secondary) = config.storage.secondary.as_ref().filter(|s| s.enabled) {
         match runner.list_snapshots(&secondary.repository, secondary.password.expose_secret()) {
-            Ok(snapshots) => output.push_str(&format!("\nSecondary snapshots:\n{snapshots}")),
+            Ok(snapshots) => output.push_str(&format!(
+                "\nSecondary snapshots:\n{}",
+                redact_snapshot_diagnostic(
+                    &snapshots,
+                    &secondary.repository,
+                    secondary.password.expose_secret(),
+                )
+            )),
             Err(error) => output.push_str(&format!(
-                "\n[WARN] Secondary snapshots unavailable: {error}"
+                "\n[WARN] Secondary snapshots unavailable: {}",
+                redact_snapshot_diagnostic(
+                    &error.to_string(),
+                    &secondary.repository,
+                    secondary.password.expose_secret(),
+                )
             )),
         }
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_snapshot_diagnostic;
+
+    #[test]
+    fn snapshot_diagnostics_mask_credentials_and_repository() {
+        let redacted = redact_snapshot_diagnostic(
+            "repository=s3:https://user:password@example/backup token=abc",
+            "s3:https://user:password@example/backup",
+            "password",
+        );
+        assert!(!redacted.contains("password"));
+        assert!(!redacted.contains("s3:https://user:password@example/backup"));
+        assert!(redacted.contains("<redacted>"));
+    }
 }

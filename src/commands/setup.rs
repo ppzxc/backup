@@ -805,12 +805,14 @@ impl SetupEngine {
             None
         };
 
+        let language = lang_opt.unwrap_or(Language::En);
         if non_interactive {
             return Self::run_existing_profiles_setup(
                 profiles_path,
                 runner,
                 scheduler,
                 scheduler_settings,
+                language,
             );
         }
 
@@ -826,25 +828,15 @@ impl SetupEngine {
             .join(crate::config::model::DEFAULT_PROFILES_FILENAME);
         config.save_to_profiles_path(&staged_profiles)?;
         let staged = crate::config::model::ResticProfileConfig::load_from_path(&staged_profiles)?;
-        let lang = lang_opt.unwrap_or(Language::En);
-        let msg = crate::i18n::I18nMessages::get(lang);
+        let msg = crate::i18n::I18nMessages::get(language);
 
         crate::logger::interactive_notice(msg.initializing_backend_repo);
 
-        let init_result = (|| -> Result<()> {
-            for name in staged.profile_names() {
-                runner.init(&staged_profiles, &name)?;
-            }
-            if config
-                .storage
-                .secondary
-                .as_ref()
-                .is_some_and(|storage| storage.enabled)
-            {
-                runner.init(&staged_profiles, "secondary")?;
-            }
-            Ok(())
-        })();
+        let init_result = initialize_backend_targets(
+            &staged_profiles,
+            &staged.backend_initialization_targets()?,
+            runner,
+        );
 
         if let Err(error) = init_result {
             let mut err_msg = error.to_string();
@@ -872,16 +864,18 @@ impl SetupEngine {
                 let save_anyway = prompter
                     .prompt_confirm_save_on_init_failure(msg.backend_init_failed_save_prompt)?;
                 if !save_anyway {
-                    return Err(anyhow::anyhow!(
-                        "Setup cancelled due to repository initialization failure: {}",
-                        err_msg
-                    ));
+                    let prefix = match language {
+                        Language::Ko => "저장소 초기화 실패로 설정을 취소했습니다",
+                        Language::En => "Setup cancelled due to repository initialization failure",
+                    };
+                    return Err(anyhow::anyhow!("{prefix}: {err_msg}"));
                 }
             } else {
-                return Err(anyhow::anyhow!(
-                    "Non-interactive setup failed repository initialization: {}",
-                    err_msg
-                ));
+                let prefix = match language {
+                    Language::Ko => "비대화형 설정의 저장소 초기화에 실패했습니다",
+                    Language::En => "Non-interactive setup failed repository initialization",
+                };
+                return Err(anyhow::anyhow!("{prefix}: {err_msg}"));
             }
         }
         let previous = LiveConfigSnapshot::capture(profiles_path)?;
@@ -894,9 +888,8 @@ impl SetupEngine {
             previous.restore()?;
             return Err(error);
         }
-        if let Err(error) = scheduler.enable_with_settings(profiles_path, scheduler_settings) {
+        if let Err(error) = scheduler.enable_preserving_state(profiles_path, scheduler_settings) {
             previous.restore()?;
-            let _ = scheduler.enable_with_settings(profiles_path, scheduler_settings);
             return Err(error);
         }
 
@@ -911,34 +904,67 @@ impl SetupEngine {
         runner: &R,
         scheduler: &S,
         scheduler_settings: &crate::runner::scheduler::SchedulerSettings,
+        language: Language,
     ) -> Result<()> {
         if !profiles_path.is_file() {
-            anyhow::bail!(
-                "Non-interactive setup requires an existing unified profiles.yaml with real target, repository, and credentials"
-            );
+            let message = match language {
+                Language::Ko => {
+                    "비대화형 설정에는 실제 대상·저장소·자격 증명이 포함된 기존 profiles.yaml이 필요합니다"
+                }
+                Language::En => {
+                    "Non-interactive setup requires an existing unified profiles.yaml with real target, repository, and credentials"
+                }
+            };
+            anyhow::bail!(message);
         }
         let profiles = crate::config::model::ResticProfileConfig::load_from_path(profiles_path)?;
         let profile_names = profiles.profile_names();
         if profile_names.is_empty() {
-            anyhow::bail!("Non-interactive setup requires at least one Backup Profile");
+            let message = match language {
+                Language::Ko => "비대화형 설정에는 하나 이상의 Backup Profile이 필요합니다",
+                Language::En => "Non-interactive setup requires at least one Backup Profile",
+            };
+            anyhow::bail!(message);
         }
 
-        let init_result = profile_names
-            .iter()
-            .try_for_each(|profile| runner.init(profiles_path, profile).map(|_| ()));
+        let targets = profiles.backend_initialization_targets()?;
+        let init_result = initialize_backend_targets(profiles_path, &targets, runner);
         if let Err(error) = init_result {
-            let mut message = error.to_string();
-            let config_dir = profiles_path.parent().unwrap_or_else(|| Path::new("."));
-            for (_, secret) in profiles.sidecar_environment(config_dir)? {
-                if !secret.trim().is_empty() {
-                    message = message.replace(&secret, "******");
-                }
-            }
-            anyhow::bail!("Non-interactive setup failed repository initialization: {message}");
+            let message = redact_existing_profile_error(
+                error.to_string(),
+                &profiles,
+                profiles_path.parent().unwrap_or_else(|| Path::new(".")),
+            );
+            let prefix = match language {
+                Language::Ko => "비대화형 설정의 저장소 초기화에 실패했습니다",
+                Language::En => "Non-interactive setup failed repository initialization",
+            };
+            anyhow::bail!("{prefix}: {message}");
         }
 
-        scheduler.enable_with_settings(profiles_path, scheduler_settings)?;
+        scheduler.enable_preserving_state(profiles_path, scheduler_settings)?;
         Ok(())
+    }
+}
+
+fn initialize_backend_targets<R: crate::runner::resticprofile::ResticProfileRunner + ?Sized>(
+    profiles_path: &Path,
+    targets: &[String],
+    runner: &R,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    for profile in targets {
+        if let Err(error) = runner.init(profiles_path, profile) {
+            failures.push(format!("{profile}: {error}"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "backend initialization failed after attempting every target: {}",
+            failures.join("; ")
+        )
     }
 }
 
@@ -950,6 +976,34 @@ const APPLICATION_SECRET_FILENAMES: [&str; 6] = [
     "secondary-aws-access-key-id",
     "secondary-aws-secret-access-key",
 ];
+
+fn redact_existing_profile_error(
+    mut message: String,
+    profiles: &crate::config::model::ResticProfileConfig,
+    config_dir: &Path,
+) -> String {
+    let mut secrets = Vec::<SecretString>::new();
+    for profile in profiles.profiles.keys() {
+        if let Ok((_, password)) = profiles.backend_credentials(config_dir, profile) {
+            secrets.push(SecretString::new(password));
+        }
+    }
+    for filename in APPLICATION_SECRET_FILENAMES
+        .into_iter()
+        .chain(["database-connection-url"])
+    {
+        if let Ok(value) = std::fs::read_to_string(config_dir.join(filename)) {
+            secrets.push(SecretString::new(value));
+        }
+    }
+    for secret in secrets {
+        let trimmed = secret.expose_secret().trim();
+        if !trimmed.is_empty() {
+            message = message.replace(trimmed, "******");
+        }
+    }
+    message
+}
 
 struct LiveConfigSnapshot {
     files: Vec<(std::path::PathBuf, Option<Vec<u8>>)>,
@@ -963,6 +1017,7 @@ impl LiveConfigSnapshot {
             config_dir.join("database-connection-url"),
         ];
         paths.extend(APPLICATION_SECRET_FILENAMES.map(|filename| config_dir.join(filename)));
+        paths.extend(WIZARD_STATE_FILENAMES.map(|filename| config_dir.join(filename)));
         let files = paths
             .into_iter()
             .map(|path| {
@@ -988,6 +1043,14 @@ impl LiveConfigSnapshot {
         Ok(())
     }
 }
+
+const WIZARD_STATE_FILENAMES: [&str; 5] = [
+    "enc",
+    "id_ed25519",
+    "id_ed25519.pub",
+    "id_ed25519_secondary",
+    "id_ed25519_secondary.pub",
+];
 
 pub fn run_setup_with_prompter_and_runners<
     P: SetupPrompter,

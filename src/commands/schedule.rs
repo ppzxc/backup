@@ -27,7 +27,7 @@ pub fn execute_schedule_enable_with_settings<R: BackupScheduler + ?Sized>(
     settings: &SchedulerSettings,
 ) -> Result<String> {
     crate::config::model::ResticProfileConfig::load_from_path(config_path)?;
-    runner.enable_with_settings(config_path, settings)
+    runner.enable_preserving_state(config_path, settings)
 }
 
 pub fn execute_schedule_disable<R: BackupScheduler + ?Sized>(

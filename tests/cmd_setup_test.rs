@@ -384,6 +384,61 @@ fn test_run_setup_dependencies_with_mock_runner() {
 }
 
 #[test]
+fn setup_dependencies_attempts_all_missing_binaries_and_aggregates_install_failures() {
+    use backup::commands::setup::run_setup_dependencies_with_runner_at_dir;
+    use backup::runner::executor::CommandOutput;
+
+    let directory = tempdir().unwrap();
+    let runner = MockExecutor::new();
+    for response in [
+        (1, "", "missing"),
+        (0, "/tmp/restic\n", ""),
+        (1, "", "missing"),
+        (0, "/tmp/rclone\n", ""),
+        (1, "", "missing"),
+    ] {
+        runner.push_output(
+            "which",
+            CommandOutput {
+                status_code: response.0,
+                stdout: response.1.into(),
+                stderr: response.2.into(),
+            },
+        );
+    }
+    for _ in 0..2 {
+        runner.push_output(
+            "sh",
+            CommandOutput {
+                status_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+    }
+    runner.push_output(
+        "sh",
+        CommandOutput {
+            status_code: 1,
+            stdout: String::new(),
+            stderr: "download failed".into(),
+        },
+    );
+    let error = run_setup_dependencies_with_runner_at_dir(
+        &runner,
+        &directory.path().join("bin"),
+        Language::En,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("resticprofile"));
+    assert_eq!(runner.call_count("sh"), 3);
+    assert_eq!(runner.call_count("which"), 5);
+    assert_eq!(runner.call_count("restic"), 1);
+    assert_eq!(runner.call_count("rclone"), 1);
+}
+
+#[test]
 fn test_generate_secure_password_length_and_complexity() {
     use backup::commands::setup::generate_secure_password;
     let pwd = generate_secure_password();

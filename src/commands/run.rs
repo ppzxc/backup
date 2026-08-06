@@ -1,8 +1,8 @@
 use crate::config::model::BackupConfig;
 use crate::runner::restic::ResticRunner;
 use crate::runner::resticprofile::ResticProfileRunner;
-use anyhow::Result;
-use secrecy::ExposeSecret;
+use anyhow::{Context, Result};
+use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 use std::fmt;
 use std::path::Path;
@@ -53,11 +53,29 @@ impl ExecutionReport {
         secondary_result: Option<String>,
         retention_result: Option<String>,
     ) -> Self {
+        Self::success_with_dry_run(
+            profile,
+            primary_result,
+            secondary_result,
+            retention_result,
+            false,
+        )
+    }
+
+    pub fn success_with_dry_run(
+        profile: &str,
+        primary_result: String,
+        secondary_result: Option<String>,
+        retention_result: Option<String>,
+        dry_run: bool,
+    ) -> Self {
         Self {
             timestamp_unix_nanos: now_nanos(),
             profile: profile.into(),
             succeeded: true,
-            snapshot_id: snapshot_id_from(&primary_result),
+            snapshot_id: (!dry_run)
+                .then(|| snapshot_id_from(&primary_result))
+                .flatten(),
             primary_result: Some(primary_result),
             secondary_result,
             retention_result,
@@ -117,7 +135,26 @@ pub fn write_execution_report_from_profiles(
         .sidecar_environment(config_dir)?
         .into_iter()
         .map(|(_, value)| value)
+        .map(SecretString::new)
         .collect::<Vec<_>>();
+    secrets.extend(
+        config
+            .profiles
+            .values()
+            .filter_map(|profile| profile.password.clone().map(SecretString::new)),
+    );
+    for profile_name in config.profiles.keys() {
+        if backend_password_file_exists(config, config_dir, profile_name) {
+            let (_, password) = config
+                .backend_credentials(config_dir, profile_name)
+                .with_context(|| {
+                    format!(
+                        "cannot resolve credentials for execution report profile '{profile_name}'"
+                    )
+                })?;
+            secrets.push(SecretString::new(password));
+        }
+    }
     if config
         .application
         .as_ref()
@@ -128,29 +165,44 @@ pub fn write_execution_report_from_profiles(
             config_dir,
             "database-connection-url",
         )?;
-        secrets.push(database_url);
+        secrets.push(SecretString::new(database_url));
     }
-    for secret in secrets
-        .into_iter()
-        .filter(|secret| !secret.trim().is_empty())
-    {
-        for field in [
-            &mut report.primary_result,
-            &mut report.secondary_result,
-            &mut report.retention_result,
-            &mut report.error,
-        ] {
-            if let Some(value) = field {
-                *value = value.replace(&secret, "******");
-            }
-        }
-    }
+    redact_execution_report_fields(&mut report, secrets);
     let path = output_dir.join(format!("execution-{}.json", report.timestamp_unix_nanos));
     crate::config::model::save_secure_file(
         &path,
         &String::from_utf8(serde_json::to_vec_pretty(&report)?)?,
     )?;
     Ok(path)
+}
+
+fn backend_password_file_exists(
+    config: &crate::config::model::ResticProfileConfig,
+    config_dir: &Path,
+    profile: &str,
+) -> bool {
+    let mut current = profile;
+    let mut remaining = config.profiles.len() + 1;
+    while remaining > 0 {
+        remaining -= 1;
+        let Some(section) = config.profiles.get(current) else {
+            return false;
+        };
+        if let Some(password_file) = &section.password_file {
+            let path = Path::new(password_file);
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                config_dir.join(path)
+            };
+            return path.is_file();
+        }
+        let Some(parent) = section.inherit.as_deref() else {
+            return false;
+        };
+        current = parent;
+    }
+    false
 }
 
 fn now_nanos() -> u128 {
@@ -161,29 +213,49 @@ fn now_nanos() -> u128 {
 }
 
 fn redact_execution_report(config: &BackupConfig, report: &mut ExecutionReport) {
-    let mut secrets = vec![config.storage.primary.password.expose_secret()];
+    let mut secrets = vec![SecretString::new(
+        config.storage.primary.password.expose_secret().to_owned(),
+    )];
     if let Some(secondary) = &config.storage.secondary {
-        secrets.push(secondary.password.expose_secret());
+        secrets.push(SecretString::new(
+            secondary.password.expose_secret().to_owned(),
+        ));
         if let Some(s3) = &secondary.s3 {
-            secrets.push(s3.access_key_id.expose_secret());
-            secrets.push(s3.secret_access_key.expose_secret());
+            secrets.push(SecretString::new(
+                s3.access_key_id.expose_secret().to_owned(),
+            ));
+            secrets.push(SecretString::new(
+                s3.secret_access_key.expose_secret().to_owned(),
+            ));
         }
     }
     if let Some(s3) = &config.storage.primary.s3 {
-        secrets.push(s3.access_key_id.expose_secret());
-        secrets.push(s3.secret_access_key.expose_secret());
+        secrets.push(SecretString::new(
+            s3.access_key_id.expose_secret().to_owned(),
+        ));
+        secrets.push(SecretString::new(
+            s3.secret_access_key.expose_secret().to_owned(),
+        ));
     }
     if let crate::config::model::BackupType::DbStream {
         connection_url: Some(url),
         ..
     } = &config.backup.backup_type
     {
-        secrets.push(url);
+        secrets.push(SecretString::new(url.to_owned()));
     }
-    for secret in secrets
-        .into_iter()
-        .filter(|secret| !secret.trim().is_empty())
-    {
+    redact_execution_report_fields(report, secrets);
+}
+
+fn redact_execution_report_fields(
+    report: &mut ExecutionReport,
+    secrets: impl IntoIterator<Item = SecretString>,
+) {
+    for secret in secrets {
+        let secret = secret.expose_secret();
+        if secret.trim().is_empty() {
+            continue;
+        }
         for field in [
             &mut report.primary_result,
             &mut report.secondary_result,
@@ -217,12 +289,6 @@ impl<'a, R: ResticProfileRunner + ?Sized> PipelineEngine<'a, R> {
         let mut output = String::new();
         match self.runner.backup(config_path, profile, opts.dry_run) {
             Ok(profile_res) => output.push_str(&profile_res),
-            Err(err) if opts.dry_run => {
-                output.push_str(&format!(
-                    "[Pipeline] [Dry-Run] resticprofile backup simulated ({})\n",
-                    err
-                ));
-            }
             Err(err) => return Err(err),
         }
 
@@ -281,8 +347,8 @@ pub fn execute_secondary_copy<R: ResticProfileRunner + ?Sized>(
     runner.copy(config_path, profile, dry_run)
 }
 
-/// Executes the copy operation declared by every selected Backup Profile.
-/// Profiles without `copy` are intentionally skipped: replication is profile-owned.
+/// Executes the copy operation declared by every selected Backup Profile, including a copy
+/// declaration inherited through its Backup Profile chain.
 pub fn execute_secondary_copies<R: ResticProfileRunner + ?Sized>(
     config: &crate::config::model::ResticProfileConfig,
     config_path: &Path,
@@ -290,17 +356,13 @@ pub fn execute_secondary_copies<R: ResticProfileRunner + ?Sized>(
     dry_run: bool,
     runner: &R,
 ) -> Result<Vec<String>> {
-    profiles
-        .iter()
-        .filter(|name| {
-            config
-                .profiles
-                .get(*name)
-                .and_then(|profile| profile.copy.as_ref())
-                .is_some()
-        })
-        .map(|name| execute_secondary_copy(config_path, name, dry_run, runner))
-        .collect()
+    let mut results = Vec::new();
+    for name in profiles {
+        if config.effective_copy_profile(name)?.is_some() {
+            results.push(execute_secondary_copy(config_path, name, dry_run, runner)?);
+        }
+    }
+    Ok(results)
 }
 
 pub fn execute_retention<R: ResticProfileRunner + ?Sized>(

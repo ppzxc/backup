@@ -779,9 +779,10 @@ impl ReportCommand {
                         failures.push(format!("restore drill: {message}"));
                         drill_error = Some(message);
                     }
+                    let report_file = file.as_deref().map(|path| batch_report_path(path, r_type));
                     let opts = ReportExportOptionsForConfig {
                         report_type: r_type,
-                        file: file.as_deref(),
+                        file: report_file.as_deref(),
                         format,
                         output_dir,
                         meta,
@@ -813,6 +814,18 @@ impl ReportCommand {
             }
         }
     }
+}
+
+fn batch_report_path(path: &Path, report_type: ReportType) -> PathBuf {
+    let suffix = match report_type {
+        ReportType::All => "all",
+        ReportType::Environment => "environment",
+        ReportType::TimeSync => "time-sync",
+        ReportType::RestoreDrill => "restore-drill",
+    };
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    parent.join(format!("{stem}-{suffix}"))
 }
 
 fn execute_restore_drill_with_runner<R: ResticRunner + ?Sized>(
@@ -1040,7 +1053,10 @@ fn escape_html(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReportFormat, escape_html, render_failure_metadata};
+    use super::{
+        ReportFormat, ReportType, batch_report_path, escape_html, render_failure_metadata,
+    };
+    use std::path::Path;
 
     #[test]
     fn failure_metadata_escapes_html_diagnostics() {
@@ -1067,6 +1083,16 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         assert_eq!(value["report_status"], "Fail");
         assert_eq!(value["failure_diagnostic"], "failed");
+    }
+
+    #[test]
+    fn batch_report_paths_are_distinct_per_action() {
+        let base = Path::new("/tmp/audit.json");
+        assert_ne!(
+            batch_report_path(base, ReportType::Environment),
+            batch_report_path(base, ReportType::TimeSync)
+        );
+        assert!(batch_report_path(base, ReportType::RestoreDrill).ends_with("audit-restore-drill"));
     }
 }
 

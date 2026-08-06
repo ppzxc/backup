@@ -1,6 +1,7 @@
 use crate::runner::executor::{CommandOutput, CommandRunner};
-use anyhow::{Result, bail};
+use anyhow::{Error, Result, bail};
 use std::io::Write;
+use std::io::{self, ErrorKind};
 use std::path::Path;
 use tempfile::NamedTempFile;
 
@@ -67,6 +68,16 @@ pub trait BackupScheduler {
         self.enable_with_mode(profiles_path, settings.mode)
     }
 
+    /// Registers a schedule while giving a concrete scheduler a chance to restore its
+    /// previously active state if replacement fails.
+    fn enable_preserving_state(
+        &self,
+        profiles_path: &Path,
+        settings: &SchedulerSettings,
+    ) -> Result<String> {
+        self.enable_with_settings(profiles_path, settings)
+    }
+
     fn disable_with_settings(&self, settings: &SchedulerSettings) -> Result<String> {
         self.disable_with_mode(settings.mode)
     }
@@ -93,8 +104,21 @@ impl<'a, E: CommandRunner> SystemScheduler<'a, E> {
         match settings.mode {
             SchedulerMode::Systemd => Ok(true),
             SchedulerMode::Cron => Ok(false),
-            SchedulerMode::Auto => Ok(!settings.force_cron
-                && self.executor.run("systemctl", &["--version"])?.status_code == 0),
+            SchedulerMode::Auto => {
+                if settings.force_cron {
+                    return Ok(false);
+                }
+                match self.executor.run("systemctl", &["--version"]) {
+                    Ok(output) if output.status_code == 0 => Ok(true),
+                    Ok(output) if systemd_is_unavailable(&output) => Ok(false),
+                    Ok(output) => bail!(
+                        "systemd capability probe failed: {}",
+                        error_message(&output)
+                    ),
+                    Err(error) if command_is_unavailable(&error) => Ok(false),
+                    Err(error) => Err(error),
+                }
+            }
         }
     }
 
@@ -106,12 +130,27 @@ impl<'a, E: CommandRunner> SystemScheduler<'a, E> {
         Ok(output.stdout)
     }
 
+    fn checked_or_missing(&self, program: &str, args: &[&str]) -> Result<()> {
+        let output = self.executor.run(program, args)?;
+        if output.status_code == 0 {
+            return Ok(());
+        }
+        if missing_systemd_unit(&output) {
+            return Ok(());
+        }
+        bail!("{program} failed: {}", error_message(&output));
+    }
+
     fn cron_contents(&self) -> Result<String> {
         let output = self.executor.run("crontab", &["-l"])?;
         if output.status_code == 0 {
             Ok(output.stdout)
-        } else {
+        } else if output.status_code == 1
+            && output.stderr.to_ascii_lowercase().contains("no crontab")
+        {
             Ok(String::new())
+        } else {
+            bail!("crontab failed: {}", error_message(&output));
         }
     }
 
@@ -122,6 +161,17 @@ impl<'a, E: CommandRunner> SystemScheduler<'a, E> {
         let path = file.path().to_string_lossy().into_owned();
         self.checked("crontab", &[&path])?;
         Ok(())
+    }
+
+    fn systemd_timer_active(&self) -> Result<bool> {
+        let output = self
+            .executor
+            .run("systemctl", &["is-active", "backup-pipeline.timer"])?;
+        match output.status_code {
+            0 => Ok(true),
+            3 => Ok(false),
+            _ => bail!("systemctl failed: {}", error_message(&output)),
+        }
     }
 }
 
@@ -186,6 +236,32 @@ impl<'a, E: CommandRunner> BackupScheduler for SystemScheduler<'a, E> {
         Ok("Scheduled daily backup run with cron".into())
     }
 
+    fn enable_preserving_state(
+        &self,
+        profiles_path: &Path,
+        settings: &SchedulerSettings,
+    ) -> Result<String> {
+        if !self.systemd_available(settings)? {
+            return self.enable_with_settings(profiles_path, settings);
+        }
+
+        let was_active = self.systemd_timer_active()?;
+        match self.enable_with_settings(profiles_path, settings) {
+            Ok(output) => Ok(output),
+            Err(error) if was_active => {
+                if let Err(restore_error) =
+                    self.checked("systemctl", &["start", "backup-pipeline.timer"])
+                {
+                    bail!(
+                        "{error}; failed to restore the previous scheduled backup: {restore_error}"
+                    );
+                }
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn disable(&self) -> Result<String> {
         self.disable_with_settings(&SchedulerSettings::auto())
     }
@@ -196,21 +272,10 @@ impl<'a, E: CommandRunner> BackupScheduler for SystemScheduler<'a, E> {
 
     fn disable_with_settings(&self, settings: &SchedulerSettings) -> Result<String> {
         if self.systemd_available(settings)? {
-            let stop = self
-                .executor
-                .run("systemctl", &["stop", "backup-pipeline.timer"])?;
-            if stop.status_code != 0 && !error_message(&stop).contains("not loaded") {
-                bail!("systemctl failed: {}", error_message(&stop));
-            }
-            let _ = self
-                .executor
-                .run("systemctl", &["reset-failed", "backup-pipeline.timer"])?;
-            let _ = self
-                .executor
-                .run("systemctl", &["stop", "backup-pipeline.service"]);
-            let _ = self
-                .executor
-                .run("systemctl", &["reset-failed", "backup-pipeline.service"]);
+            self.checked_or_missing("systemctl", &["stop", "backup-pipeline.timer"])?;
+            self.checked_or_missing("systemctl", &["reset-failed", "backup-pipeline.timer"])?;
+            self.checked_or_missing("systemctl", &["stop", "backup-pipeline.service"])?;
+            self.checked_or_missing("systemctl", &["reset-failed", "backup-pipeline.service"])?;
             return Ok("Disabled scheduled backup run with systemd".into());
         }
         let existing = self.cron_contents()?;
@@ -219,6 +284,9 @@ impl<'a, E: CommandRunner> BackupScheduler for SystemScheduler<'a, E> {
             .filter(|line| !line.contains(CRON_MARKER))
             .collect::<Vec<_>>()
             .join("\n");
+        if !existing.contains(CRON_MARKER) {
+            return Ok("No scheduled backup run found with cron".into());
+        }
         self.install_cron(format!("{}\n", filtered.trim()))?;
         Ok("Disabled scheduled backup run with cron".into())
     }
@@ -239,10 +307,15 @@ impl<'a, E: CommandRunner> BackupScheduler for SystemScheduler<'a, E> {
             if output.status_code == 0 {
                 return Ok(output.stdout);
             }
-            if output.stdout.trim().is_empty() {
-                bail!("systemctl failed: {}", error_message(&output));
+            if matches!(output.status_code, 1 | 3 | 4) {
+                if systemd_state_text(output.stdout.trim()) {
+                    return Ok(output.stdout.trim().into());
+                }
+                if systemd_state_text(output.stderr.trim()) {
+                    return Ok(output.stderr.trim().into());
+                }
             }
-            return Ok(output.stdout.trim().into());
+            bail!("systemctl failed: {}", error_message(&output));
         }
         let cron = self.cron_contents()?;
         Ok(if cron.contains(CRON_MARKER) {
@@ -275,6 +348,45 @@ fn error_message(output: &CommandOutput) -> String {
     } else {
         output.stderr.trim().into()
     }
+}
+
+fn command_is_unavailable(error: &Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<io::Error>()
+            .is_some_and(|error| error.kind() == ErrorKind::NotFound)
+    })
+}
+
+fn systemd_is_unavailable(output: &CommandOutput) -> bool {
+    let message = format!("{}\n{}", output.stdout, output.stderr).to_ascii_lowercase();
+    message.contains("no systemd")
+        || message.contains("systemd unavailable")
+        || message.contains("systemd is not running")
+        || message.contains("not been booted with systemd")
+        || message.contains("command not found")
+}
+
+fn missing_systemd_unit(output: &CommandOutput) -> bool {
+    let message = output.stderr.to_ascii_lowercase();
+    message.contains("unit ")
+        && (message.contains("not loaded")
+            || message.contains("not found")
+            || message.contains("does not exist"))
+}
+
+fn systemd_state_text(value: &str) -> bool {
+    matches!(
+        value,
+        "active"
+            | "inactive"
+            | "failed"
+            | "activating"
+            | "deactivating"
+            | "reloading"
+            | "maintenance"
+            | "unknown"
+    )
 }
 
 fn shell_quote(value: &str) -> String {

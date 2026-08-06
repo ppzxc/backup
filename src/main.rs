@@ -6,8 +6,11 @@ use backup::runner::restic::ResticTool;
 use backup::runner::resticprofile::ResticProfileTool;
 use backup::runner::scheduler::SystemScheduler;
 use clap::FromArgMatches;
+use std::ffi::OsString;
+use std::path::PathBuf;
 
 fn main() {
+    let raw_args = std::env::args_os().collect::<Vec<_>>();
     let language = match parser_language() {
         Ok(language) => language,
         Err(error) => {
@@ -17,7 +20,31 @@ fn main() {
     };
     let localized_schema = backup::i18n::CliHelp::get(language)
         .apply_to_command(backup::cli::authoritative_cli_schema());
-    let matches = localized_schema.get_matches();
+    let matches = match localized_schema.try_get_matches_from(raw_args.clone()) {
+        Ok(matches) => matches,
+        Err(error) if error.kind() == clap::error::ErrorKind::DisplayVersion => {
+            if let Some(log_file) = explicit_log_file(&raw_args) {
+                if let Err(error) = backup::logger::init_logging(backup::logger::LogConfig::new(
+                    "info",
+                    Some(log_file),
+                )) {
+                    print_startup_error(format!("logging initialization failed: {error}"), 1);
+                }
+            }
+            let exit_code = error.exit_code();
+            let _ = error.print();
+            std::process::exit(exit_code);
+        }
+        Err(error) if error.kind() == clap::error::ErrorKind::DisplayHelp => {
+            let exit_code = error.exit_code();
+            let _ = error.print();
+            std::process::exit(exit_code);
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
     let cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(error) => {
@@ -62,8 +89,7 @@ fn main() {
             context.logging.level_filter.clone(),
             context.logging.log_file.clone(),
         )) {
-            eprintln!("logging initialization failed: {error}");
-            std::process::exit(1);
+            print_startup_error(format!("logging initialization failed: {error}"), 1);
         }
     }
 
@@ -97,6 +123,12 @@ fn main() {
     }
 }
 
+fn print_startup_error(message: impl Into<String>, exit_code: i32) -> ! {
+    let error = clap::Error::raw(clap::error::ErrorKind::Io, message.into());
+    let _ = error.print();
+    std::process::exit(exit_code);
+}
+
 fn parser_language() -> anyhow::Result<Language> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let Some(setup_index) = args.iter().position(|arg| arg == "setup") else {
@@ -118,4 +150,20 @@ fn parser_language() -> anyhow::Result<Language> {
         }
     }
     Ok(Language::detect())
+}
+
+fn explicit_log_file(args: &[OsString]) -> Option<PathBuf> {
+    let mut path = None;
+    let mut arguments = args.iter().skip(1);
+    while let Some(argument) = arguments.next() {
+        if argument == "--log-file" {
+            path = arguments.next().cloned().map(PathBuf::from);
+        } else if let Some(value) = argument
+            .to_str()
+            .and_then(|value| value.strip_prefix("--log-file="))
+        {
+            path = Some(PathBuf::from(value));
+        }
+    }
+    path
 }

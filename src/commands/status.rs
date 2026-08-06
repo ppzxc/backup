@@ -1,6 +1,7 @@
 use anyhow::Result;
 use secrecy::ExposeSecret;
 use serde::Deserialize;
+use std::fmt;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -16,6 +17,20 @@ pub struct ResticSnapshotInfo {
     #[serde(default)]
     pub hostname: String,
 }
+
+#[derive(Debug)]
+pub struct StatusCommandFailure {
+    pub message: String,
+    pub output: String,
+}
+
+impl fmt::Display for StatusCommandFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for StatusCommandFailure {}
 
 pub fn execute_status(config: &BackupConfig) -> Result<String> {
     let executor = SystemExecutor;
@@ -37,14 +52,29 @@ pub fn execute_status_from_profiles_config<
     }
 
     let restic_config = crate::config::model::ResticProfileConfig::load_from_path(config_path)?;
-    let resolved_profiles =
-        crate::config::profile_resolver::ProfileResolver::resolve_all_or_filtered(
+    let (resolved_profiles, mut warnings) = match profile_filter {
+        Some(profile) => (
+            crate::config::profile_resolver::ProfileResolver::resolve_for_status(
+                &restic_config,
+                Some(profile),
+            )?,
+            Vec::new(),
+        ),
+        None => crate::config::profile_resolver::ProfileResolver::resolve_all_active_with_failures(
             &restic_config,
-            profile_filter,
-        );
+        ),
+    };
 
     if resolved_profiles.is_empty() {
-        return Ok("No active backup profiles found in configuration.".to_string());
+        let output = "[WARN] No active backup profiles found in configuration.".to_string();
+        if warnings.is_empty() {
+            return Ok(output);
+        }
+        return Err(StatusCommandFailure {
+            message: warnings.join("; "),
+            output,
+        }
+        .into());
     }
 
     let mut full_output = Vec::new();
@@ -52,7 +82,10 @@ pub fn execute_status_from_profiles_config<
     for profile in &resolved_profiles {
         let mut output_str = format!(
             "Profile: {}\nBackend: {}\nRepository: {}\nTargets: {:?}",
-            profile.name, profile.backend, profile.repository, profile.targets
+            profile.name,
+            profile.backend,
+            redact_status_text(&profile.repository),
+            profile.targets
         );
 
         match runner.list_snapshots(config_path, &profile.name) {
@@ -61,19 +94,37 @@ pub fn execute_status_from_profiles_config<
                 if trimmed.is_empty() {
                     output_str.push_str("\nSnapshots: None");
                 } else {
-                    output_str.push_str(&format!("\nSnapshots:\n{}", trimmed));
+                    output_str.push_str(&format!("\nSnapshots:\n{}", redact_status_text(trimmed)));
                 }
             }
             Err(err) => {
-                tracing::warn!(profile = %profile.name, error = %err, "Failed to fetch snapshots for profile");
-                output_str.push_str(&format!("\n[WARN] Failed to fetch snapshots: {}", err));
+                let diagnostic = redact_status_text(&err.to_string());
+                tracing::warn!(profile = %profile.name, error = %diagnostic, "Failed to fetch snapshots for profile");
+                warnings.push(format!(
+                    "{}: failed to fetch snapshots: {diagnostic}",
+                    profile.name
+                ));
+                output_str.push_str(&format!("\n[WARN] Failed to fetch snapshots: {diagnostic}"));
             }
         }
 
         full_output.push(output_str);
     }
 
-    Ok(full_output.join("\n\n"))
+    let output = full_output.join("\n\n");
+    if warnings.is_empty() {
+        Ok(output)
+    } else {
+        Err(StatusCommandFailure {
+            message: warnings.join("; "),
+            output,
+        }
+        .into())
+    }
+}
+
+fn redact_status_text(value: &str) -> String {
+    crate::commands::redact_diagnostic(value, &[])
 }
 
 pub fn execute_status_with_runner<E: CommandRunner>(
@@ -87,7 +138,7 @@ pub fn execute_status_with_runner<E: CommandRunner>(
         "Profile: {}\nBackend: {}\nRepository: {}\nTargets: {:?}",
         target_profile,
         config.storage.primary.backend,
-        config.storage.primary.repository,
+        redact_status_text(&config.storage.primary.repository),
         config.backup.targets
     );
 
@@ -108,8 +159,9 @@ pub fn execute_status_with_runner<E: CommandRunner>(
             }
         }
         Err(err) => {
-            tracing::warn!(error = %err, "Failed to fetch snapshots");
-            output_str.push_str(&format!("\n[WARN] Failed to fetch snapshots: {}", err));
+            let diagnostic = redact_status_text(&err.to_string());
+            tracing::warn!(error = %diagnostic, "Failed to fetch snapshots");
+            output_str.push_str(&format!("\n[WARN] Failed to fetch snapshots: {diagnostic}"));
         }
     }
 
@@ -157,4 +209,18 @@ fn create_temp_password_file(password: &str) -> Result<NamedTempFile> {
     file.write_all(password.as_bytes())?;
     file.flush()?;
     Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_status_text;
+
+    #[test]
+    fn status_text_masks_url_credentials_and_secret_words() {
+        let redacted =
+            redact_status_text("s3://user:password@example/backup status-password token=abc");
+        assert!(!redacted.contains("password"));
+        assert!(!redacted.contains("user:"));
+        assert!(redacted.contains("<redacted>"));
+    }
 }

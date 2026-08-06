@@ -28,7 +28,7 @@ pub struct Cli {
     pub verbose: u8,
 
     /// Quiet mode (only warn/error logs)
-    #[arg(long, short = 'q', global = true)]
+    #[arg(long, short = 'q', global = true, conflicts_with = "verbose")]
     pub quiet: bool,
 
     /// Log file path
@@ -296,7 +296,7 @@ impl CliRuntimeContext {
 }
 
 pub fn parse_language(value: &str) -> Result<Language> {
-    match value.to_ascii_lowercase().as_str() {
+    match value {
         "ko" => Ok(Language::Ko),
         "en" => Ok(Language::En),
         _ => anyhow::bail!("invalid language '{value}'; expected ko or en"),
@@ -694,6 +694,16 @@ pub fn dispatch(
                     run_failure.artifacts.clone(),
                     run_failure.external_state_changes.clone(),
                 )
+            } else if let Some(status_failure) =
+                error.downcast_ref::<crate::commands::status::StatusCommandFailure>()
+            {
+                let mut outcome = CommandOutcome::failure(
+                    &command_name,
+                    "status query",
+                    status_failure.message.clone(),
+                );
+                outcome.stdout = status_failure.output.clone();
+                outcome
             } else {
                 CommandOutcome::failure(&command_name, "execution", error.to_string())
             }
@@ -756,10 +766,15 @@ fn dispatch_inner(
                         vec!["backend repositories initialized".into()],
                     ))
                 } else {
-                    anyhow::bail!(
-                        "backend initialization failed after attempting every target: {}",
-                        failures.join("; ")
-                    )
+                    let prefix = match context.language {
+                        Language::Ko => {
+                            "모든 대상에 대한 시도 후 백엔드 저장소 초기화에 실패했습니다"
+                        }
+                        Language::En => {
+                            "backend initialization failed after attempting every target"
+                        }
+                    };
+                    anyhow::bail!("{prefix}: {}", failures.join("; "))
                 }
             }
             None => {
@@ -792,7 +807,25 @@ fn dispatch_inner(
         Command::Copy { profile, dry_run } => {
             let config = load_profiles(context)?;
             let target_profile = profile.as_deref().unwrap_or("default");
-            validate_profile(&config, target_profile, "copy")?;
+            crate::config::profile_resolver::ProfileResolver::resolve_exact(
+                &config,
+                target_profile,
+                "copy",
+            )?;
+            let copy_target = config
+                .effective_copy_profile(target_profile)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Backup Profile '{target_profile}' does not declare a copy target Backend Profile"
+                    )
+                })?;
+            let config_dir = context
+                .profiles_path
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            config.backend_credentials(config_dir, target_profile)?;
+            config.backend_credentials(config_dir, &copy_target)?;
             let output = crate::commands::copy::execute_copy(
                 adapters.resticprofile,
                 &context.profiles_path,
@@ -803,11 +836,11 @@ fn dispatch_inner(
                 output,
                 "",
                 Vec::new(),
-                vec![if dry_run {
-                    "copy plan rendered".into()
+                if dry_run {
+                    Vec::new()
                 } else {
-                    "snapshots copied".into()
-                }],
+                    vec!["snapshots copied".into()]
+                },
             ))
         }
         Command::Run {
@@ -847,18 +880,19 @@ fn dispatch_inner(
             ))
         }
         Command::Doctor => {
-            let (output, passed) = crate::commands::doctor::run_doctor_contract_with_runner(
-                adapters.rclone,
-                adapters.command,
-                Some(&context.profiles_path),
-                &context.host_name,
-            )?;
-            let mut outcome = CommandOutcome::success(output, "", Vec::new());
+            let (output, passed, diagnostics) =
+                crate::commands::doctor::run_doctor_contract_with_runner_and_diagnostics(
+                    adapters.rclone,
+                    adapters.command,
+                    Some(&context.profiles_path),
+                    &context.host_name,
+                )?;
+            let mut outcome = CommandOutcome::success(output, diagnostics, Vec::new());
             if !passed {
                 outcome.exit_status = 1;
                 outcome
                     .stderr
-                    .push_str("doctor reported one or more failed diagnostics");
+                    .push_str("\ndoctor reported one or more failed diagnostics");
             }
             Ok(outcome)
         }
@@ -968,7 +1002,9 @@ fn dispatch_inner(
         Command::Status { profile } => {
             let config = load_profiles(context)?;
             if let Some(profile) = profile.as_deref() {
-                validate_profile(&config, profile, "status")?;
+                crate::config::profile_resolver::ProfileResolver::resolve_exact(
+                    &config, profile, "status",
+                )?;
             }
             let output = crate::commands::status::execute_status_from_profiles_config(
                 &context.profiles_path,
@@ -1099,11 +1135,12 @@ fn dispatch_run(
 
     match result {
         Ok((primary, secondary, retention)) => {
-            let report = crate::commands::run::ExecutionReport::success(
+            let report = crate::commands::run::ExecutionReport::success_with_dry_run(
                 &report_profile,
                 primary.clone(),
                 secondary.clone(),
                 retention.clone(),
+                options.dry_run,
             );
             let report_path = crate::commands::run::write_execution_report_from_profiles(
                 &config,
@@ -1125,11 +1162,11 @@ fn dispatch_run(
                 output,
                 "",
                 vec![report_path],
-                vec![if options.dry_run {
-                    "pipeline plan rendered".into()
+                if options.dry_run {
+                    Vec::new()
                 } else {
-                    "backup pipeline executed".into()
-                }],
+                    vec!["backup pipeline executed".into()]
+                },
             ))
         }
         Err(error) => {
@@ -1198,22 +1235,12 @@ fn load_profiles(context: &CliRuntimeContext) -> Result<ResticProfileConfig> {
     })
 }
 
-fn validate_profile(config: &ResticProfileConfig, profile: &str, command: &str) -> Result<()> {
-    if profile.trim().is_empty() || profile != profile.trim() {
-        anyhow::bail!("{command} profile must be an exact, non-empty configured profile name");
-    }
-    if !config.profile_names().iter().any(|name| name == profile) {
-        anyhow::bail!("{command} profile '{profile}' is not configured");
-    }
-    Ok(())
-}
-
 fn resolve_profiles(config: &ResticProfileConfig, profile: Option<&str>) -> Result<Vec<String>> {
-    if let Some(profile) = profile {
-        validate_profile(config, profile, "run")?;
-        return Ok(vec![profile.into()]);
-    }
-    let profiles = config.profile_names();
+    let profiles =
+        crate::config::profile_resolver::ProfileResolver::resolve_for_run(config, profile)?
+            .into_iter()
+            .map(|profile| profile.name)
+            .collect::<Vec<_>>();
     if profiles.is_empty() {
         anyhow::bail!("No Backup Profiles are configured for backup run");
     }
@@ -1221,25 +1248,7 @@ fn resolve_profiles(config: &ResticProfileConfig, profile: Option<&str>) -> Resu
 }
 
 fn backend_initialization_targets(config: &ResticProfileConfig) -> Result<Vec<String>> {
-    let mut targets = Vec::new();
-    if config.profiles.contains_key("primary") {
-        targets.push("primary".into());
-    }
-    let mut ordinary = config
-        .profiles
-        .keys()
-        .filter(|name| name.as_str() != "primary" && name.as_str() != "secondary")
-        .cloned()
-        .collect::<Vec<_>>();
-    ordinary.sort();
-    targets.extend(ordinary);
-    if config.profiles.contains_key("secondary") {
-        targets.push("secondary".into());
-    }
-    if targets.is_empty() {
-        anyhow::bail!("No Backup Profiles are configured for backend initialization");
-    }
-    Ok(targets)
+    config.backend_initialization_targets()
 }
 
 fn report_paths_from_output(output: &str) -> Vec<PathBuf> {

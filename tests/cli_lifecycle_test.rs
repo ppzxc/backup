@@ -87,14 +87,34 @@ fn database_dry_run_accepts_unified_database_configuration() {
         unified_profiles_yaml(
             "  database:\n    profile: database\n    type: postgres\n    connection-url: ${BACKUP_DATABASE_CONNECTION_URL}",
             "database",
-        ),
+        )
+        .replace("password: test-password", "password-file: primary-password"),
     )
     .unwrap();
+    fs::write(temp.path().join("primary-password"), "test-password").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            temp.path().join("primary-password"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
     fs::write(
         temp.path().join("database-connection-url"),
         "postgres://postgres:secret@db:5432/app",
     )
     .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            temp.path().join("database-connection-url"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
 
     Command::cargo_bin("backup")
         .unwrap()

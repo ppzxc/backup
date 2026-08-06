@@ -263,6 +263,47 @@ fn test_resticprofile_tool_with_mock_executor() {
 }
 
 #[test]
+fn resticprofile_init_treats_an_existing_repository_as_idempotent() {
+    let mock = MockExecutor::new();
+    mock.push_output(
+        "resticprofile",
+        CommandOutput {
+            status_code: 1,
+            stdout: String::new(),
+            stderr: "Fatal: create key in repository failed: repository master key and config already initialized".into(),
+        },
+    );
+    let tool = ResticProfileTool::new(&mock);
+
+    let output = tool.init(Path::new("/nonexistent/profiles.yaml"), "primary");
+
+    assert!(
+        output.is_ok(),
+        "an existing repository is already initialized"
+    );
+}
+
+#[test]
+fn resticprofile_init_does_not_mask_unrelated_already_exists_errors() {
+    let mock = MockExecutor::new();
+    mock.push_output(
+        "resticprofile",
+        CommandOutput {
+            status_code: 1,
+            stdout: String::new(),
+            stderr: "permission denied: path already exists but cannot be opened".into(),
+        },
+    );
+    let tool = ResticProfileTool::new(&mock);
+
+    let error = tool
+        .init(Path::new("/nonexistent/profiles.yaml"), "primary")
+        .unwrap_err();
+
+    assert!(error.to_string().contains("permission denied"));
+}
+
+#[test]
 fn resticprofile_profile_commands_share_validated_sidecar_environment() {
     use std::os::unix::fs::PermissionsExt;
 

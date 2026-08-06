@@ -2,7 +2,9 @@ use crate::runner::executor::{CommandRunner, SystemExecutor};
 use crate::runner::rclone::RcloneRunner;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::Path;
+use tempfile::NamedTempFile;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DoctorStatus {
@@ -138,18 +140,70 @@ impl SystemHealthDiagnoser {
         });
 
         // 2. Storage & Connectivity Item
-        let rclone_pass = rclone.check_connectivity("default").is_ok()
-            || rclone.check_connectivity("syno_backup").is_ok();
-        let (rclone_status, rclone_result) = if rclone_pass {
-            (
-                DoctorStatus::Pass,
-                "Rclone connectivity active (Remote OK)".into(),
-            )
-        } else {
-            (
-                DoctorStatus::Fail,
-                "Rclone connectivity failed (Remote unreachable)".into(),
-            )
+        // Probe only the rclone remotes declared by the configured Backend Profiles.  Every
+        // configured remote is checked independently so one failure cannot hide another.
+        let (rclone_status, rclone_result) = match configured_storage_targets(target_config) {
+            Err(error) => (
+                DoctorStatus::Unavailable,
+                format!("Storage configuration unavailable: {error}"),
+            ),
+            Ok(targets) if targets.is_empty() => (
+                DoctorStatus::Unavailable,
+                "No Backend Profile storage is configured".into(),
+            ),
+            Ok(targets) => {
+                let config =
+                    crate::config::model::ResticProfileConfig::load_from_path(target_config);
+                let config_dir = target_config.parent().unwrap_or_else(|| Path::new("."));
+                let results = targets
+                    .iter()
+                    .map(|target| {
+                        let result = if let Some(remote) = &target.rclone_remote {
+                            rclone.check_connectivity(remote)
+                        } else {
+                            match &config {
+                                Ok(config) => check_restic_connectivity(
+                                    config,
+                                    config_dir,
+                                    &target.profile,
+                                    runner,
+                                ),
+                                Err(error) => Err(anyhow::anyhow!(error.to_string())),
+                            }
+                        };
+                        (target, result)
+                    })
+                    .collect::<Vec<_>>();
+                let reachable = results.iter().filter(|(_, result)| result.is_ok()).count();
+                if reachable == 0 {
+                    (
+                        DoctorStatus::Fail,
+                        format!(
+                            "Storage connectivity failed ({}/{})",
+                            reachable,
+                            results.len()
+                        ),
+                    )
+                } else if reachable == results.len() {
+                    (
+                        DoctorStatus::Pass,
+                        format!(
+                            "Storage connectivity active ({}/{})",
+                            reachable,
+                            results.len()
+                        ),
+                    )
+                } else {
+                    (
+                        DoctorStatus::Fail,
+                        format!(
+                            "Storage connectivity partially active ({}/{} targets reachable)",
+                            reachable,
+                            results.len()
+                        ),
+                    )
+                }
+            }
         };
 
         items.push(DoctorItem {
@@ -166,6 +220,14 @@ impl SystemHealthDiagnoser {
             criterion: "시각 동기화 (ISMS-P 2.10.1)".into(),
             status: ntp_status,
             detail: ntp_detail,
+        });
+
+        let (scheduler_status, scheduler_detail) = check_scheduler_with_runner(runner);
+        items.push(DoctorItem {
+            category: DoctorCategory::System,
+            criterion: "타이머 스케줄러 헬스체크".into(),
+            status: scheduler_status,
+            detail: scheduler_detail,
         });
 
         // 4. Restore Drill RTO Item: non-destructively restore the latest snapshot.
@@ -249,6 +311,68 @@ impl SystemHealthDiagnoser {
     }
 }
 
+struct ConfiguredStorageTarget {
+    profile: String,
+    rclone_remote: Option<String>,
+}
+
+fn configured_storage_targets(config_path: &Path) -> Result<Vec<ConfiguredStorageTarget>> {
+    let config = crate::config::model::ResticProfileConfig::load_from_path(config_path)?;
+    let mut targets = Vec::new();
+    for profile in ["primary", "secondary"] {
+        if !config.profiles.contains_key(profile) {
+            continue;
+        }
+        let repository = config.backend_repository(profile)?;
+        targets.push(ConfiguredStorageTarget {
+            profile: profile.into(),
+            rclone_remote: rclone_remote_name(&repository),
+        });
+    }
+    Ok(targets)
+}
+
+fn check_restic_connectivity<C: CommandRunner + ?Sized>(
+    config: &crate::config::model::ResticProfileConfig,
+    config_dir: &Path,
+    profile: &str,
+    runner: &C,
+) -> Result<String> {
+    let (repository, password) = config.backend_credentials(config_dir, profile)?;
+    let mut password_file = NamedTempFile::new()?;
+    password_file.write_all(password.as_bytes())?;
+    password_file.flush()?;
+    let password_path = password_file.path().to_string_lossy();
+    let owned_environment = config.sidecar_environment(config_dir)?;
+    let environment = owned_environment
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let output = runner.run_with_env(
+        "restic",
+        &[
+            "-r",
+            &repository,
+            "--password-file",
+            &password_path,
+            "snapshots",
+            "--latest",
+            "1",
+        ],
+        &environment,
+    )?;
+    if output.status_code != 0 {
+        anyhow::bail!("restic storage probe exited with {}", output.status_code);
+    }
+    Ok(output.stdout)
+}
+
+fn rclone_remote_name(repository: &str) -> Option<String> {
+    let remainder = repository.strip_prefix("rclone:")?;
+    let (remote, _) = remainder.split_once(':')?;
+    (!remote.is_empty()).then(|| remote.to_owned())
+}
+
 pub fn check_ntp_sync() -> (DoctorStatus, String) {
     check_ntp_sync_with_runner(&SystemExecutor)
 }
@@ -310,6 +434,20 @@ pub fn run_doctor_contract_with_runner<R: RcloneRunner + ?Sized, C: CommandRunne
     config_path: Option<&Path>,
     host_name: &str,
 ) -> Result<(String, bool)> {
+    let (report, passed, _) =
+        run_doctor_contract_with_runner_and_diagnostics(rclone, runner, config_path, host_name)?;
+    Ok((report, passed))
+}
+
+pub fn run_doctor_contract_with_runner_and_diagnostics<
+    R: RcloneRunner + ?Sized,
+    C: CommandRunner + ?Sized,
+>(
+    rclone: &R,
+    runner: &C,
+    config_path: Option<&Path>,
+    host_name: &str,
+) -> Result<(String, bool, String)> {
     tracing::info!("Executing system health diagnostics checks");
     let snapshot = SystemHealthDiagnoser::diagnose_with_runner_and_host(
         rclone,
@@ -321,7 +459,33 @@ pub fn run_doctor_contract_with_runner<R: RcloneRunner + ?Sized, C: CommandRunne
         .items
         .iter()
         .all(|item| !matches!(item.status, DoctorStatus::Fail | DoctorStatus::Unavailable));
-    Ok((render_doctor_report(&snapshot), passed))
+    let diagnostics = snapshot
+        .items
+        .iter()
+        .map(|item| format!("{}: {}", item.criterion, item.detail))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok((render_doctor_report(&snapshot), passed, diagnostics))
+}
+
+fn check_scheduler_with_runner<C: CommandRunner + ?Sized>(runner: &C) -> (DoctorStatus, String) {
+    match runner.run("systemctl", &["is-active", "backup-pipeline.timer"]) {
+        Ok(output) if output.status_code == 0 => (
+            DoctorStatus::Pass,
+            "backup-pipeline.timer active".to_string(),
+        ),
+        Ok(output) => (
+            DoctorStatus::Fail,
+            format!(
+                "backup-pipeline.timer inactive (exit {})",
+                output.status_code
+            ),
+        ),
+        Err(error) => (
+            DoctorStatus::Unavailable,
+            format!("scheduler health check unavailable: {error}"),
+        ),
+    }
 }
 
 fn render_doctor_report(snapshot: &SystemHealthSnapshot) -> String {
@@ -330,10 +494,13 @@ fn render_doctor_report(snapshot: &SystemHealthSnapshot) -> String {
 
     for item in &snapshot.items {
         let name = match item.category {
-            DoctorCategory::Storage => "Rclone connectivity",
+            DoctorCategory::Storage => "Storage connectivity",
             DoctorCategory::System if item.criterion == "Restic binary" => "Restic binary",
             DoctorCategory::System if item.criterion.contains("시각 동기화") => {
                 "NTP Time Sync"
+            }
+            DoctorCategory::System if item.criterion.contains("타이머 스케줄러") => {
+                "Scheduler health"
             }
             _ => &item.criterion,
         };
