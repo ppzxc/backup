@@ -10,19 +10,47 @@ fn passing_evidence() -> RestoreDrillEvidence {
         "2026-08-07T10:00:00+09:00",
         "2026-08-07T10:00:04+09:00",
         policy.clone(),
-        vec![RestoreDrillStorageResult::measured(
-            "daily-files",
-            "primary",
-            "snapshot-full-001",
-            "2026-08-07T09:59:00Z",
-            "2026-08-07T10:00:01+09:00",
-            "2026-08-07T10:00:04+09:00",
-            3_421,
-            2,
-            4096,
-            "regular file count and total bytes",
-            &policy,
-        )],
+        vec![
+            RestoreDrillStorageResult::measured(
+                "daily-files",
+                "primary",
+                "snapshot-full-001",
+                "2026-08-07T09:59:00Z",
+                "2026-08-07T10:00:01+09:00",
+                "2026-08-07T10:00:04+09:00",
+                3_421,
+                2,
+                4096,
+                "regular file count and total bytes",
+                &policy,
+            ),
+            RestoreDrillStorageResult::measured(
+                "daily-files",
+                "secondary",
+                "snapshot-secondary-001",
+                "2026-08-07T09:58:00Z",
+                "2026-08-07T10:00:01+09:00",
+                "2026-08-07T10:00:03+09:00",
+                2_100,
+                2,
+                4096,
+                "regular file count and total bytes",
+                &policy,
+            ),
+            RestoreDrillStorageResult::measured(
+                "weekly-files",
+                "primary",
+                "snapshot-weekly-001",
+                "2026-08-07T09:57:00Z",
+                "2026-08-07T10:00:01+09:00",
+                "2026-08-07T10:00:02+09:00",
+                1_500,
+                1,
+                2048,
+                "regular file count and total bytes",
+                &policy,
+            ),
+        ],
     )
     .with_metadata("backup-host", "운영팀", "보안팀", None)
 }
@@ -46,9 +74,12 @@ fn html_and_json_render_the_same_injected_restore_drill_evidence() {
     assert_eq!(value["storage_results"][0]["file_count"], 2);
     assert_eq!(value["storage_results"][0]["total_bytes"], 4096);
     assert_eq!(value["storage_results"][0]["status"], "pass");
+    assert_eq!(value["storage_results"].as_array().unwrap().len(), 3);
 
     assert!(html.contains("drill-2026-08-07-001"));
     assert!(html.contains("snapshot-full-001"));
+    assert!(html.contains("snapshot-secondary-001"));
+    assert!(html.contains("weekly-files"));
     assert!(html.contains("3421 ms"));
     assert!(html.contains("regular file count and total bytes"));
     assert!(html.contains("overall-status-pass"));
@@ -159,6 +190,57 @@ fn status_aggregation_keeps_not_applicable_secondary_from_failing_primary() {
     assert_eq!(
         not_applicable.overall_status,
         RestoreDrillStatus::NotApplicable
+    );
+}
+
+#[test]
+fn status_aggregation_prioritizes_fail_then_not_performed_then_pass() {
+    let policy = RestoreDrillPolicy::default();
+    let pass = RestoreDrillStorageResult::measured(
+        "passing-profile",
+        "primary",
+        "snapshot-pass",
+        "2026-08-07T11:59:00Z",
+        "2026-08-07T12:00:00Z",
+        "2026-08-07T12:00:01Z",
+        100,
+        1,
+        1,
+        "regular file count and total bytes",
+        &policy,
+    );
+    let not_performed = RestoreDrillStorageResult::not_performed(
+        "unavailable-profile",
+        "primary",
+        "snapshot tag missing",
+    );
+    let fail = RestoreDrillStorageResult::failed(
+        "failed-profile",
+        "secondary",
+        "2026-08-07T12:00:00Z",
+        "2026-08-07T12:00:01Z",
+        "restore failed",
+    );
+
+    let with_failure = RestoreDrillEvidence::new(
+        "drill-priority-fail",
+        "2026-08-07T12:00:00Z",
+        "2026-08-07T12:00:01Z",
+        policy.clone(),
+        vec![pass.clone(), not_performed.clone(), fail],
+    );
+    assert_eq!(with_failure.overall_status, RestoreDrillStatus::Fail);
+
+    let without_failure = RestoreDrillEvidence::new(
+        "drill-priority-not-performed",
+        "2026-08-07T12:00:00Z",
+        "2026-08-07T12:00:01Z",
+        policy,
+        vec![pass, not_performed],
+    );
+    assert_eq!(
+        without_failure.overall_status,
+        RestoreDrillStatus::NotPerformed
     );
 }
 

@@ -297,3 +297,268 @@ fn restore_drill_missing_tag_is_not_performed_and_never_restores_latest() {
     assert_eq!(runner.calls(), ["list-snapshots"]);
     assert!(evidence.storage_results[0].snapshot_id.is_none());
 }
+
+struct MultiStorageRunner {
+    calls: Mutex<Vec<String>>,
+    fail_snapshot: Option<String>,
+}
+
+impl MultiStorageRunner {
+    fn new() -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            fail_snapshot: None,
+        }
+    }
+
+    fn failing_restore(snapshot: &str) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            fail_snapshot: Some(snapshot.into()),
+        }
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn unsupported(&self, operation: &str) -> Result<String> {
+        anyhow::bail!("unexpected restore drill operation: {operation}")
+    }
+}
+
+impl ResticRunner for MultiStorageRunner {
+    fn init_repo(&self, _: &str, _: &str) -> Result<String> {
+        self.unsupported("init")
+    }
+
+    fn backup_paths(&self, _: &str, _: &str, _: &[String], _: &[String]) -> Result<String> {
+        self.unsupported("backup")
+    }
+
+    fn list_snapshots(&self, repository: &str, password: &str) -> Result<String> {
+        self.assert_storage_credentials(repository, password);
+        self.list_snapshot_infos(repository, password)
+            .map(|_| String::new())
+    }
+
+    fn list_snapshot_infos(&self, repository: &str, password: &str) -> Result<Vec<SnapshotInfo>> {
+        self.assert_storage_credentials(repository, password);
+        self.list_snapshot_infos_for(repository)
+    }
+
+    fn list_snapshot_infos_with_env(
+        &self,
+        repository: &str,
+        password: &str,
+        environment: &[(&str, &str)],
+    ) -> Result<Vec<SnapshotInfo>> {
+        self.assert_storage_credentials(repository, password);
+        assert!(environment.is_empty(), "unexpected storage environment");
+        self.list_snapshot_infos_for(repository)
+    }
+
+    fn restore(&self, _: &str, _: &str, _: &str, _: &str) -> Result<String> {
+        self.unsupported("restore without environment")
+    }
+
+    fn restore_with_env_and_timeout(
+        &self,
+        repository: &str,
+        password: &str,
+        snapshot: &str,
+        target: &str,
+        environment: &[(&str, &str)],
+        timeout: std::time::Duration,
+    ) -> Result<String> {
+        self.assert_storage_credentials(repository, password);
+        assert!(environment.is_empty(), "unexpected storage environment");
+        assert_eq!(timeout, std::time::Duration::from_secs(14_400));
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("restore:{repository}:{snapshot}"));
+        if self.fail_snapshot.as_deref() == Some(snapshot) {
+            anyhow::bail!("restore failed for {snapshot}");
+        }
+        fs::write(Path::new(target).join("restored.txt"), "restored")?;
+        Ok("restored".into())
+    }
+
+    fn backup_command(&self, _: &str, _: &str, _: &str, _: &str, _: &[String]) -> Result<String> {
+        self.unsupported("backup_command")
+    }
+
+    fn backup_command_with_env(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &[String],
+        _: &[(&str, &str)],
+    ) -> Result<String> {
+        self.unsupported("backup_command_with_env")
+    }
+}
+
+impl MultiStorageRunner {
+    fn list_snapshot_infos_for(&self, repository: &str) -> Result<Vec<SnapshotInfo>> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("list:{repository}"));
+        let snapshots = [
+            ("alpha", "alpha-snapshot"),
+            ("solo", "solo-snapshot"),
+            ("zeta", "zeta-snapshot"),
+        ];
+        Ok(snapshots
+            .into_iter()
+            .map(|(profile, id)| SnapshotInfo {
+                id: format!("{repository}-{id}"),
+                timestamp: "2026-08-07T09:00:00Z".into(),
+                tags: vec![format!("backup-profile:{profile}")],
+            })
+            .collect())
+    }
+
+    fn assert_storage_credentials(&self, repository: &str, password: &str) {
+        let expected = match repository {
+            "/primary" => "primary-secret",
+            "/secondary" => "secondary-secret",
+            other => panic!("unexpected repository {other}"),
+        };
+        assert_eq!(password, expected);
+    }
+}
+
+#[test]
+fn restore_drill_verifies_sorted_profiles_on_primary_then_secondary_independently() {
+    let temp = tempdir().unwrap();
+    let profiles_path = temp.path().join("profiles.yaml");
+    fs::write(
+        &profiles_path,
+        "version: '2'\nprofiles:\n  secondary:\n    repository: /secondary\n    password-file: secondary-password\n  zeta:\n    inherit: primary\n    backup:\n      source: [/zeta]\n    copy:\n      profile: secondary\n  primary:\n    repository: /primary\n    password-file: primary-password\n  alpha:\n    inherit: primary\n    backup:\n      source: [/alpha]\n    copy:\n      profile: secondary\n  solo:\n    inherit: primary\n    backup:\n      source: [/solo]\n  default: {}\n",
+    )
+    .unwrap();
+    for (name, value) in [
+        ("primary-password", "primary-secret"),
+        ("secondary-password", "secondary-secret"),
+    ] {
+        let path = temp.path().join(name);
+        fs::write(&path, value).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+    let profiles = ResticProfileConfig::load_from_path(&profiles_path).unwrap();
+    let mut config = ReportConfig::from_profiles(&profiles, &profiles_path).unwrap();
+    config.restore_drill_work_dir = temp.path().join("restore-drill");
+    let runner = MultiStorageRunner::new();
+    let clock = FixedClock::new(
+        (0..12).map(|value| timestamp(&format!("2026-08-07T10:00:{value:02}Z"), value * 100)),
+    );
+
+    let evidence = execute_restore_drill_with_runner_and_clock(&config, &runner, &clock).unwrap();
+
+    assert_eq!(
+        runner.calls(),
+        [
+            "list:/primary",
+            "restore:/primary:/primary-alpha-snapshot",
+            "list:/secondary",
+            "restore:/secondary:/secondary-alpha-snapshot",
+            "list:/primary",
+            "restore:/primary:/primary-solo-snapshot",
+            "list:/primary",
+            "restore:/primary:/primary-zeta-snapshot",
+            "list:/secondary",
+            "restore:/secondary:/secondary-zeta-snapshot",
+        ]
+    );
+    assert_eq!(evidence.overall_status, RestoreDrillStatus::Pass);
+    assert_eq!(
+        evidence
+            .storage_results
+            .iter()
+            .map(|result| (result.profile.as_str(), result.backend.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("alpha", "primary"),
+            ("alpha", "secondary"),
+            ("solo", "primary"),
+            ("solo", "secondary"),
+            ("zeta", "primary"),
+            ("zeta", "secondary")
+        ]
+    );
+    for index in [0, 1, 2, 4, 5] {
+        assert!(evidence.storage_results[index].snapshot_id.is_some());
+    }
+    assert_eq!(
+        evidence.storage_results[3].status,
+        RestoreDrillStatus::NotApplicable
+    );
+
+    let failing_runner = MultiStorageRunner::failing_restore("/secondary-alpha-snapshot");
+    let failure_clock = FixedClock::new(
+        (0..12).map(|value| timestamp(&format!("2026-08-07T10:01:{value:02}Z"), value * 100)),
+    );
+    let failure =
+        execute_restore_drill_with_runner_and_clock(&config, &failing_runner, &failure_clock)
+            .unwrap();
+    assert_eq!(failure.overall_status, RestoreDrillStatus::Fail);
+    assert_eq!(failing_runner.calls().len(), 10);
+    assert_eq!(failure.storage_results[1].status, RestoreDrillStatus::Fail);
+    assert_eq!(failure.storage_results[2].status, RestoreDrillStatus::Pass);
+    assert_eq!(
+        failure.storage_results[3].status,
+        RestoreDrillStatus::NotApplicable
+    );
+    assert_eq!(failure.storage_results[4].status, RestoreDrillStatus::Pass);
+    assert_eq!(failure.storage_results[5].status, RestoreDrillStatus::Pass);
+}
+
+#[test]
+fn restore_drill_keeps_primary_evidence_when_secondary_configuration_is_inactive() {
+    let temp = tempdir().unwrap();
+    let profiles_path = temp.path().join("profiles.yaml");
+    fs::write(
+        &profiles_path,
+        "version: '2'\nprofiles:\n  primary:\n    repository: /primary\n    password-file: primary-password\n  secondary: {}\n  alpha:\n    inherit: primary\n    backup:\n      source: [/alpha]\n    copy:\n      profile: secondary\n",
+    )
+    .unwrap();
+    let password = temp.path().join("primary-password");
+    fs::write(&password, "primary-secret").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&password, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let profiles = ResticProfileConfig::load_from_path(&profiles_path).unwrap();
+    let mut config = ReportConfig::from_profiles(&profiles, &profiles_path).unwrap();
+    config.restore_drill_work_dir = temp.path().join("restore-drill");
+    let runner = MultiStorageRunner::new();
+    let clock = FixedClock::new(
+        (0..6).map(|value| timestamp(&format!("2026-08-07T10:02:{value:02}Z"), value * 100)),
+    );
+
+    let evidence = execute_restore_drill_with_runner_and_clock(&config, &runner, &clock).unwrap();
+
+    assert_eq!(
+        runner.calls(),
+        ["list:/primary", "restore:/primary:/primary-alpha-snapshot"]
+    );
+    assert_eq!(evidence.storage_results[0].status, RestoreDrillStatus::Pass);
+    assert_eq!(evidence.storage_results[1].status, RestoreDrillStatus::Fail);
+    assert!(
+        evidence.storage_results[1]
+            .diagnostic
+            .as_deref()
+            .is_some_and(|diagnostic| diagnostic.contains("secondary"))
+    );
+}

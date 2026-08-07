@@ -10,6 +10,7 @@ pub use restore_drill::{
 
 use crate::commands::restore::measure_restore_output;
 use crate::config::model::{AuditConfig, ResticProfileConfig, RetentionPolicy};
+use crate::config::profile_resolver::ProfileResolver;
 use crate::runner::executor::{CommandRunner, SystemExecutor};
 use crate::runner::restic::{ResticRunner, ResticTool};
 use crate::runner::snapshot::{
@@ -39,6 +40,22 @@ pub enum ReportType {
 }
 
 #[derive(Debug, Clone)]
+pub struct RestoreDrillStorageConfig {
+    pub backend: String,
+    pub repository: String,
+    pub password: SecretString,
+    pub environment: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RestoreDrillProfileConfig {
+    pub profile: String,
+    pub primary: Option<RestoreDrillStorageConfig>,
+    pub secondary: Option<RestoreDrillStorageConfig>,
+    pub secondary_diagnostic: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ReportConfig {
     pub output_dir: PathBuf,
     pub audit: AuditConfig,
@@ -52,6 +69,7 @@ pub struct ReportConfig {
     pub database_stream: bool,
     pub restore_drill_policy: RestoreDrillPolicy,
     pub restore_drill_work_dir: PathBuf,
+    pub restore_drill_profiles: Vec<RestoreDrillProfileConfig>,
 }
 
 impl ReportConfig {
@@ -78,11 +96,54 @@ impl ReportConfig {
             .ok_or_else(|| anyhow::anyhow!("profiles.yaml has no runnable Backup Profile"))?;
         let settings = profiles.effective_backup_settings(&profile_name)?;
         let config_dir = profiles_path.parent().unwrap_or_else(|| Path::new("."));
-        let (primary_repository, password) = if profiles.profiles.contains_key("primary") {
-            profiles.backend_credentials(config_dir, "primary")?
-        } else {
-            (String::new(), String::new())
-        };
+        let primary_environment = profiles.backend_sidecar_environment(config_dir, "primary")?;
+        let primary_storage = restore_drill_storage_from_profiles(
+            profiles,
+            config_dir,
+            "primary",
+            primary_environment.clone(),
+        )?;
+        let (secondary_storage, secondary_diagnostic) =
+            if profiles.profiles.contains_key("secondary") {
+                match profiles
+                    .backend_sidecar_environment(config_dir, "secondary")
+                    .and_then(|environment| {
+                        restore_drill_storage_from_profiles(
+                            profiles,
+                            config_dir,
+                            "secondary",
+                            environment,
+                        )
+                    }) {
+                    Ok(storage) => (storage, None),
+                    Err(error) => (None, Some(error.to_string())),
+                }
+            } else {
+                (None, None)
+            };
+        let restore_drill_profiles = ProfileResolver::resolve_for_run(profiles, None)?
+            .into_iter()
+            .map(|profile| {
+                let secondary_active =
+                    profiles.effective_copy_profile(&profile.name)?.as_deref() == Some("secondary");
+                let secondary = if secondary_storage.is_some() && secondary_active {
+                    secondary_storage.clone()
+                } else {
+                    None
+                };
+                let secondary_diagnostic = if secondary_active {
+                    secondary_diagnostic.clone()
+                } else {
+                    None
+                };
+                Ok(RestoreDrillProfileConfig {
+                    profile: profile.name,
+                    primary: primary_storage.clone(),
+                    secondary,
+                    secondary_diagnostic,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let restore_drill_policy = RestoreDrillPolicy::new(
             application.audit.resolved_restore_drill_rto_minutes(),
             application.audit.resolved_restore_drill_timeout_minutes(),
@@ -95,15 +156,39 @@ impl ReportConfig {
             targets: settings.source,
             excludes: settings.exclude,
             retention: settings.retention,
-            primary_repository,
-            primary_password: SecretString::new(password),
-            primary_environment: profiles.sidecar_environment(config_dir)?,
+            primary_repository: primary_storage
+                .as_ref()
+                .map(|storage| storage.repository.clone())
+                .unwrap_or_default(),
+            primary_password: primary_storage
+                .as_ref()
+                .map(|storage| storage.password.clone())
+                .unwrap_or_else(|| SecretString::new(String::new())),
+            primary_environment,
             database_stream: application.database.is_some(),
             restore_drill_policy,
             restore_drill_work_dir: PathBuf::from(
                 application.audit.resolved_restore_drill_work_dir(),
             ),
+            restore_drill_profiles,
         })
+    }
+
+    fn resolved_restore_drill_profiles(&self) -> Vec<RestoreDrillProfileConfig> {
+        if !self.restore_drill_profiles.is_empty() {
+            return self.restore_drill_profiles.clone();
+        }
+        vec![RestoreDrillProfileConfig {
+            profile: self.profile.clone(),
+            primary: Some(RestoreDrillStorageConfig {
+                backend: "primary".into(),
+                repository: self.primary_repository.clone(),
+                password: self.primary_password.clone(),
+                environment: self.primary_environment.clone(),
+            }),
+            secondary: None,
+            secondary_diagnostic: None,
+        }]
     }
 }
 
@@ -122,8 +207,27 @@ impl Default for ReportConfig {
             database_stream: false,
             restore_drill_policy: RestoreDrillPolicy::default(),
             restore_drill_work_dir: PathBuf::from("/var/lib/backup/restore-drill"),
+            restore_drill_profiles: Vec::new(),
         }
     }
+}
+
+fn restore_drill_storage_from_profiles(
+    profiles: &ResticProfileConfig,
+    config_dir: &Path,
+    backend: &str,
+    environment: Vec<(String, String)>,
+) -> Result<Option<RestoreDrillStorageConfig>> {
+    if !profiles.profiles.contains_key(backend) {
+        return Ok(None);
+    }
+    let (repository, password) = profiles.backend_credentials(config_dir, backend)?;
+    Ok(Some(RestoreDrillStorageConfig {
+        backend: backend.into(),
+        repository,
+        password: SecretString::new(password),
+        environment,
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -922,67 +1026,61 @@ pub fn execute_restore_drill_with_runner_and_clock<
         overall_start.wall_clock.replace([' ', ':', '+'], ""),
         overall_start.monotonic_milliseconds
     );
-    let profile = config.profile.clone();
-    let mut sensitive_values = vec![
-        config.primary_repository.clone(),
-        config.primary_password.expose_secret().to_owned(),
-        config.restore_drill_work_dir.to_string_lossy().into_owned(),
-    ];
-    sensitive_values.extend(
-        config
-            .primary_environment
-            .iter()
-            .map(|(_, value)| value.clone()),
-    );
+    let profiles = config.resolved_restore_drill_profiles();
+    let mut sensitive_values = vec![config.restore_drill_work_dir.to_string_lossy().into_owned()];
+    let mut storage_results = Vec::with_capacity(profiles.len() * 2);
 
-    let result =
-        if config.primary_repository.is_empty()
-            || config.primary_password.expose_secret().is_empty()
-        {
-            let operation_start = clock.now();
-            let operation_finish = clock.now();
-            Ok(RestoreDrillStorageResult::not_performed(
-                profile.clone(),
+    for profile in profiles {
+        if let Some(storage) = profile.primary.as_ref() {
+            sensitive_values.extend(storage_sensitive_values(storage));
+        }
+        if let Some(storage) = profile.secondary.as_ref() {
+            sensitive_values.extend(storage_sensitive_values(storage));
+        }
+
+        let primary = match profile.primary {
+            Some(storage) if storage_is_configured(&storage) => {
+                collect_restore_storage_result(config, runner, clock, &profile.profile, &storage)?
+            }
+            Some(_) | None => not_performed_restore_storage_result(
+                clock,
+                &profile.profile,
                 "primary",
                 "restore drill requires a configured primary Backend Profile",
-            )
-            .with_timing(
-                operation_start.wall_clock,
-                operation_finish.wall_clock,
-                operation_finish
-                    .monotonic_milliseconds
-                    .saturating_sub(operation_start.monotonic_milliseconds),
-            ))
-        } else {
-            match prepare_restore_drill_work_dir(&config.restore_drill_work_dir) {
-                Ok(()) => collect_primary_restore_result(config, runner, clock),
-                Err(error) => {
-                    let diagnostic = error.to_string();
-                    let operation_start = clock.now();
-                    let operation_finish = clock.now();
-                    Ok(RestoreDrillStorageResult::not_performed(
-                        profile.clone(),
-                        "primary",
-                        diagnostic,
-                    )
-                    .with_timing(
-                        operation_start.wall_clock,
-                        operation_finish.wall_clock,
-                        operation_finish
-                            .monotonic_milliseconds
-                            .saturating_sub(operation_start.monotonic_milliseconds),
-                    ))
-                }
+            ),
+        };
+        storage_results.push(primary);
+
+        let secondary = match (profile.secondary, profile.secondary_diagnostic) {
+            (Some(storage), None) if storage_is_configured(&storage) => {
+                collect_restore_storage_result(config, runner, clock, &profile.profile, &storage)?
             }
-        }?;
+            (_, Some(diagnostic)) => failed_restore_storage_result(
+                clock,
+                profile.profile.clone(),
+                "secondary",
+                diagnostic,
+            ),
+            (Some(_), None) | (None, None) => RestoreDrillStorageResult::not_applicable(
+                profile.profile.clone(),
+                "secondary",
+                "secondary Backend Profile is not configured or active",
+            ),
+        };
+        storage_results.push(secondary);
+    }
+
     let overall_finish = clock.now();
-    let diagnostics = result.diagnostic.clone().into_iter().collect::<Vec<_>>();
+    let diagnostics = storage_results
+        .iter()
+        .filter_map(|result| result.diagnostic.clone())
+        .collect::<Vec<_>>();
     Ok(RestoreDrillEvidence::new(
         execution_id,
         overall_start.wall_clock,
         overall_finish.wall_clock,
         config.restore_drill_policy.clone(),
-        vec![result],
+        storage_results,
     )
     .with_metadata(
         "localhost",
@@ -994,23 +1092,94 @@ pub fn execute_restore_drill_with_runner_and_clock<
     .with_sensitive_values(sensitive_values))
 }
 
-fn collect_primary_restore_result<R: ResticRunner + ?Sized, C: RestoreDrillClock + ?Sized>(
+fn storage_is_configured(storage: &RestoreDrillStorageConfig) -> bool {
+    !storage.repository.is_empty() && !storage.password.expose_secret().is_empty()
+}
+
+fn storage_sensitive_values(storage: &RestoreDrillStorageConfig) -> Vec<String> {
+    let mut values = vec![
+        storage.repository.clone(),
+        storage.password.expose_secret().to_owned(),
+    ];
+    values.extend(storage.environment.iter().map(|(_, value)| value.clone()));
+    values
+}
+
+fn not_performed_restore_storage_result<C: RestoreDrillClock + ?Sized>(
+    clock: &C,
+    profile: &str,
+    backend: &str,
+    diagnostic: &str,
+) -> RestoreDrillStorageResult {
+    let operation_start = clock.now();
+    let operation_finish = clock.now();
+    RestoreDrillStorageResult::not_performed(profile, backend, diagnostic).with_timing(
+        operation_start.wall_clock,
+        operation_finish.wall_clock,
+        operation_finish
+            .monotonic_milliseconds
+            .saturating_sub(operation_start.monotonic_milliseconds),
+    )
+}
+
+fn failed_restore_storage_result<C: RestoreDrillClock + ?Sized>(
+    clock: &C,
+    profile: String,
+    backend: &str,
+    diagnostic: String,
+) -> RestoreDrillStorageResult {
+    let operation_start = clock.now();
+    let operation_finish = clock.now();
+    RestoreDrillStorageResult::failed(
+        profile,
+        backend,
+        operation_start.wall_clock.clone(),
+        operation_finish.wall_clock.clone(),
+        diagnostic,
+    )
+    .with_timing(
+        operation_start.wall_clock,
+        operation_finish.wall_clock,
+        operation_finish
+            .monotonic_milliseconds
+            .saturating_sub(operation_start.monotonic_milliseconds),
+    )
+}
+
+fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock + ?Sized>(
     config: &ReportConfig,
     runner: &R,
     clock: &C,
+    profile: &str,
+    storage: &RestoreDrillStorageConfig,
 ) -> Result<RestoreDrillStorageResult> {
     let operation_start = clock.now();
-    let environment = config
-        .primary_environment
+    let environment = storage
+        .environment
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect::<Vec<_>>();
+    if let Err(error) = prepare_restore_drill_work_dir(&config.restore_drill_work_dir) {
+        let operation_finish = clock.now();
+        return Ok(RestoreDrillStorageResult::not_performed(
+            profile,
+            &storage.backend,
+            error.to_string(),
+        )
+        .with_timing(
+            operation_start.wall_clock,
+            operation_finish.wall_clock,
+            operation_finish
+                .monotonic_milliseconds
+                .saturating_sub(operation_start.monotonic_milliseconds),
+        ));
+    }
     let selection = select_latest_tagged_snapshot_with_env(
         runner,
-        &config.primary_repository,
-        &config.primary_password,
+        &storage.repository,
+        &storage.password,
         &environment,
-        &config.profile,
+        profile,
     );
     if selection.status != SnapshotSelectionStatus::Selected {
         let operation_finish = clock.now();
@@ -1021,17 +1190,13 @@ fn collect_primary_restore_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
         let result = match reason {
             Some(SnapshotSelectionReason::QueryFailed)
             | Some(SnapshotSelectionReason::MalformedJson) => RestoreDrillStorageResult::failed(
-                config.profile.clone(),
-                "primary",
+                profile,
+                &storage.backend,
                 operation_start.wall_clock.clone(),
                 operation_finish.wall_clock.clone(),
                 diagnostic,
             ),
-            _ => RestoreDrillStorageResult::not_performed(
-                config.profile.clone(),
-                "primary",
-                diagnostic,
-            ),
+            _ => RestoreDrillStorageResult::not_performed(profile, &storage.backend, diagnostic),
         };
         return Ok(result.with_timing(
             operation_start.wall_clock,
@@ -1049,16 +1214,17 @@ fn collect_primary_restore_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
         .snapshot_time
         .clone()
         .expect("selected snapshot has a timestamp");
+    let target_prefix = format!("{}-", storage.backend);
     let target = match tempfile::Builder::new()
-        .prefix("primary-")
+        .prefix(&target_prefix)
         .tempdir_in(&config.restore_drill_work_dir)
     {
         Ok(target) => target,
         Err(error) => {
             let operation_finish = clock.now();
             return Ok(RestoreDrillStorageResult::not_performed(
-                config.profile.clone(),
-                "primary",
+                profile,
+                &storage.backend,
                 format!("restore drill work directory could not be prepared: {error}"),
             )
             .with_timing(
@@ -1071,8 +1237,8 @@ fn collect_primary_restore_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
         }
     };
     let restore = runner.restore_with_env_and_timeout(
-        &config.primary_repository,
-        config.primary_password.expose_secret(),
+        &storage.repository,
+        storage.password.expose_secret(),
         &snapshot_id,
         target.path().to_string_lossy().as_ref(),
         &environment,
@@ -1084,8 +1250,8 @@ fn collect_primary_restore_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
         .saturating_sub(operation_start.monotonic_milliseconds);
     if let Err(error) = restore {
         return Ok(RestoreDrillStorageResult::failed_after_snapshot(
-            config.profile.clone(),
-            "primary",
+            profile,
+            &storage.backend,
             snapshot_id,
             snapshot_time,
             operation_start.wall_clock,
@@ -1099,8 +1265,8 @@ fn collect_primary_restore_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
         Ok(metrics) => metrics,
         Err(error) => {
             return Ok(RestoreDrillStorageResult::failed_after_snapshot(
-                config.profile.clone(),
-                "primary",
+                profile,
+                &storage.backend,
                 snapshot_id,
                 snapshot_time,
                 operation_start.wall_clock,
@@ -1111,8 +1277,8 @@ fn collect_primary_restore_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
         }
     };
     let mut result = RestoreDrillStorageResult::measured(
-        config.profile.clone(),
-        "primary",
+        profile,
+        &storage.backend,
         snapshot_id,
         snapshot_time,
         operation_start.wall_clock,
@@ -1420,8 +1586,10 @@ fn escape_html(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ReportFormat, ReportType, batch_report_path, escape_html, render_failure_metadata,
+        ReportConfig, ReportFormat, ReportType, RestoreDrillStorageConfig, batch_report_path,
+        escape_html, render_failure_metadata, storage_is_configured, storage_sensitive_values,
     };
+    use secrecy::{ExposeSecret, SecretString};
     use std::path::Path;
 
     #[test]
@@ -1459,6 +1627,49 @@ mod tests {
             batch_report_path(base, ReportType::TimeSync)
         );
         assert!(batch_report_path(base, ReportType::RestoreDrill).ends_with("audit-restore-drill"));
+    }
+
+    #[test]
+    fn restore_drill_compatibility_fallback_resolves_one_manual_primary_target() {
+        let mut config = ReportConfig::default();
+        config.profile = "manual-files".into();
+        config.primary_repository = "/primary-repository".into();
+        config.primary_password = SecretString::new("primary-secret".into());
+        config.primary_environment = vec![("AWS_ACCESS_KEY_ID".into(), "access".into())];
+
+        let profiles = config.resolved_restore_drill_profiles();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].profile, "manual-files");
+        assert_eq!(profiles[0].primary.as_ref().unwrap().backend, "primary");
+        assert!(profiles[0].secondary.is_none());
+    }
+
+    #[test]
+    fn restore_drill_storage_helpers_distinguish_configured_values_and_secrets() {
+        let storage = RestoreDrillStorageConfig {
+            backend: "secondary".into(),
+            repository: "/secondary-repository".into(),
+            password: SecretString::new("secondary-secret".into()),
+            environment: vec![("AWS_SECRET_ACCESS_KEY".into(), "secondary-access".into())],
+        };
+
+        assert!(storage_is_configured(&storage));
+        let sensitive = storage_sensitive_values(&storage);
+        assert_eq!(
+            sensitive,
+            [
+                "/secondary-repository",
+                "secondary-secret",
+                "secondary-access"
+            ]
+        );
+        assert_eq!(storage.password.expose_secret(), "secondary-secret");
+
+        let incomplete = RestoreDrillStorageConfig {
+            password: SecretString::new(String::new()),
+            ..storage
+        };
+        assert!(!storage_is_configured(&incomplete));
     }
 }
 

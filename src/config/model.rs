@@ -1006,6 +1006,32 @@ impl ResticProfileConfig {
         Ok(environment)
     }
 
+    /// Resolves only the AWS environment required by one Backend Profile's direct restic calls.
+    /// Unlike `sidecar_environment`, this never combines Primary and Secondary credentials.
+    pub fn backend_sidecar_environment(
+        &self,
+        config_dir: &Path,
+        backend: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let Some((access_var, secret_var)) = self.s3_sidecar_references(backend) else {
+            return Ok(Vec::new());
+        };
+        let access_file = sidecar_file_name(&access_var)
+            .ok_or_else(|| anyhow::anyhow!("invalid access sidecar variable for '{backend}'"))?;
+        let secret_file = sidecar_file_name(&secret_var)
+            .ok_or_else(|| anyhow::anyhow!("invalid secret sidecar variable for '{backend}'"))?;
+        Ok(vec![
+            (
+                "AWS_ACCESS_KEY_ID".into(),
+                read_secure_sidecar(&config_dir.join(access_file))?,
+            ),
+            (
+                "AWS_SECRET_ACCESS_KEY".into(),
+                read_secure_sidecar(&config_dir.join(secret_file))?,
+            ),
+        ])
+    }
+
     /// Resolves the S3 credentials needed by a profile's copy target. The
     /// target profile may inherit its S3 environment from another profile;
     /// callers receive only child-process environment values, never config

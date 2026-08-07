@@ -1,10 +1,15 @@
+use backup::cli::{AdapterSelection, AdapterSet, Cli, CliRuntimeContext, SchedulerMode, dispatch};
 use backup::commands::report::{
     ReportAction, ReportCommand, ReportFormat, ReportType, execute_report_file_export,
     render_html_isms_report, render_html_isms_report_with_type,
 };
+use backup::i18n::Language;
+use clap::Parser;
 mod support;
 use std::fs;
-use support::{MockExecutor, MockResticRunner};
+use support::{
+    MockExecutor, MockRcloneRunner, MockResticProfileRunner, MockResticRunner, MockScheduler,
+};
 use tempfile::tempdir;
 
 #[test]
@@ -351,7 +356,7 @@ fn restore_drill_failure_is_recorded_in_the_written_report() {
     assert!(!error.to_string().contains("report-password"));
     assert!(!error.to_string().contains("/tmp/repo"));
     let report: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(output_file).unwrap()).unwrap();
+        serde_json::from_str(&fs::read_to_string(&output_file).unwrap()).unwrap();
     assert_eq!(report["report_status"], "Fail");
     assert!(
         report["failure_diagnostic"]
@@ -361,6 +366,49 @@ fn restore_drill_failure_is_recorded_in_the_written_report() {
     );
     assert!(!report.to_string().contains("report-password"));
     assert!(!report.to_string().contains("/tmp/repo"));
+
+    let dispatch_command_runner = MockExecutor::new();
+    let dispatch_restic_runner = MockResticRunner::new(1, "snapshot query failed");
+    let dispatch_rclone_runner = MockRcloneRunner::new(0, "");
+    let dispatch_profile_runner = MockResticProfileRunner::new(0, "");
+    let dispatch_scheduler = MockScheduler::new(0, "");
+    let adapters = AdapterSet {
+        command: &dispatch_command_runner,
+        rclone: &dispatch_rclone_runner,
+        restic: &dispatch_restic_runner,
+        resticprofile: &dispatch_profile_runner,
+        scheduler: &dispatch_scheduler,
+        selection: AdapterSelection::StrictTest,
+    };
+    let cli = Cli::try_parse_from([
+        "backup",
+        "--profiles",
+        profiles_path.to_string_lossy().as_ref(),
+        "report",
+        "restore-drill",
+        "--file",
+        output_file.to_string_lossy().as_ref(),
+        "--format",
+        "json",
+    ])
+    .unwrap();
+    let context = CliRuntimeContext::from_cli(
+        &cli,
+        Language::En,
+        None,
+        SchedulerMode::Auto,
+        AdapterSelection::StrictTest,
+    )
+    .unwrap();
+    let outcome = dispatch(&context, cli.command, &adapters);
+    assert_eq!(outcome.exit_status, 1);
+    assert!(outcome.stderr.contains("restore drill failed"));
+    assert!(
+        outcome
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.path == output_file)
+    );
 }
 
 #[test]
