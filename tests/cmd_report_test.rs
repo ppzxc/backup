@@ -317,7 +317,8 @@ fn restore_drill_failure_is_recorded_in_the_written_report() {
     fs::write(
         &profiles_path,
         format!(
-            "version: '2'\napplication:\n  reports:\n    outputDir: {}\n    enableDailyReports: true\n    enableAnnualDrDrillReport: true\nprofiles:\n  primary:\n    repository: /tmp/repo\n    password-file: {}\n  files:\n    backup:\n      source: ['/work/source']\n",
+            "version: '2'\napplication:\n  reports:\n    outputDir: {}\n    enableDailyReports: true\n    enableAnnualDrDrillReport: true\n  audit:\n    restore-drill-work-dir: {}/restore-drill\nprofiles:\n  primary:\n    repository: /tmp/repo\n    password-file: {}\n  files:\n    backup:\n      source: ['/work/source']\n",
+            temp.path().display(),
             temp.path().display(),
             password.display()
         ),
@@ -352,10 +353,14 @@ fn restore_drill_failure_is_recorded_in_the_written_report() {
     let report: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(output_file).unwrap()).unwrap();
     assert_eq!(report["report_status"], "Fail");
-    assert_eq!(
-        report["failure_diagnostic"],
-        "mock restic failed with exit code 1: restore failed for ****** at [repository masked]"
+    assert!(
+        report["failure_diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("snapshot")
     );
+    assert!(!report.to_string().contains("report-password"));
+    assert!(!report.to_string().contains("/tmp/repo"));
 }
 
 #[test]
@@ -365,6 +370,7 @@ fn report_without_action_separates_each_report_artifact() {
     let mut config = backup::commands::report::ReportConfig::default();
     config.primary_repository = "/tmp/report-repository".into();
     config.primary_password = secrecy::SecretString::new("report-password".into());
+    config.restore_drill_work_dir = dir.path().join("restore-drill");
     let meta = backup::commands::report::AuditReportMeta::new("host-1", "2026-08-04");
 
     struct RestoringRunner;
@@ -383,6 +389,17 @@ fn report_without_action_separates_each_report_artifact() {
         }
         fn list_snapshots(&self, _: &str, _: &str) -> anyhow::Result<String> {
             Ok(String::new())
+        }
+        fn list_snapshot_infos(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> anyhow::Result<Vec<backup::runner::snapshot::SnapshotInfo>> {
+            Ok(vec![backup::runner::snapshot::SnapshotInfo {
+                id: "report-snapshot-001".into(),
+                timestamp: "2026-08-04T09:00:00Z".into(),
+                tags: vec!["backup-profile:default".into()],
+            }])
         }
         fn restore(&self, _: &str, _: &str, _: &str, target: &str) -> anyhow::Result<String> {
             std::fs::write(

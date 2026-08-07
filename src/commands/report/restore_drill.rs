@@ -3,6 +3,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::time::Instant;
 
 const SCHEMA_VERSION: &str = "1";
 
@@ -32,6 +33,46 @@ impl RestoreDrillStatus {
             Self::Fail => "fail",
             Self::NotPerformed => "not-performed",
             Self::NotApplicable => "not-applicable",
+        }
+    }
+}
+
+/// One wall-clock label and monotonic reading captured at a Restore Drill boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreDrillTimestamp {
+    pub wall_clock: String,
+    pub monotonic_milliseconds: u64,
+}
+
+/// Clock seam used by Evidence collection. Renderers never read a clock.
+pub trait RestoreDrillClock {
+    fn now(&self) -> RestoreDrillTimestamp;
+}
+
+#[derive(Debug, Clone)]
+pub struct SystemRestoreDrillClock {
+    origin: Instant,
+}
+
+impl SystemRestoreDrillClock {
+    pub fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+        }
+    }
+}
+
+impl Default for SystemRestoreDrillClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RestoreDrillClock for SystemRestoreDrillClock {
+    fn now(&self) -> RestoreDrillTimestamp {
+        RestoreDrillTimestamp {
+            wall_clock: crate::commands::report::get_formatted_time().0,
+            monotonic_milliseconds: self.origin.elapsed().as_millis() as u64,
         }
     }
 }
@@ -67,6 +108,10 @@ impl RestoreDrillPolicy {
 
     pub fn is_within_rto(&self, elapsed_milliseconds: u64) -> bool {
         elapsed_milliseconds <= self.rto_milliseconds()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        Self::new(self.rto_minutes, self.timeout_minutes).map(|_| ())
     }
 }
 
@@ -175,6 +220,37 @@ impl RestoreDrillStorageResult {
             rto_satisfied: None,
             diagnostic: Some(diagnostic.into()),
         }
+    }
+
+    pub fn failed_after_snapshot(
+        profile: impl Into<String>,
+        backend: impl Into<String>,
+        snapshot_id: impl Into<String>,
+        snapshot_time: impl Into<String>,
+        started_at: impl Into<String>,
+        finished_at: impl Into<String>,
+        elapsed_milliseconds: u64,
+        diagnostic: impl Into<String>,
+    ) -> Self {
+        let mut result = Self::failed(profile, backend, started_at, finished_at, diagnostic);
+        result.snapshot_id = Some(snapshot_id.into());
+        result.snapshot_time = Some(snapshot_time.into());
+        result.elapsed_milliseconds = Some(elapsed_milliseconds);
+        result.elapsed_seconds = Some(elapsed_milliseconds / 1_000);
+        result
+    }
+
+    pub fn with_timing(
+        mut self,
+        started_at: impl Into<String>,
+        finished_at: impl Into<String>,
+        elapsed_milliseconds: u64,
+    ) -> Self {
+        self.started_at = started_at.into();
+        self.finished_at = finished_at.into();
+        self.elapsed_milliseconds = Some(elapsed_milliseconds);
+        self.elapsed_seconds = Some(elapsed_milliseconds / 1_000);
+        self
     }
 
     pub fn not_performed(
@@ -722,6 +798,16 @@ pub fn render_restore_drill_evidence_json(evidence: &RestoreDrillEvidence) -> Re
         json!(evidence.started_at.get(..10).unwrap_or_default()),
     );
     object.insert("report_status".into(), json!(status.report_label()));
+    if status != RestoreDrillStatus::Pass {
+        if let Some(diagnostic) = evidence
+            .diagnostics
+            .first()
+            .cloned()
+            .or_else(|| primary.and_then(|result| result.diagnostic.clone()))
+        {
+            object.insert("failure_diagnostic".into(), json!(diagnostic));
+        }
+    }
     object.insert(
         "target_snapshot_id".into(),
         json!(primary_snapshot_id.unwrap_or_default()),

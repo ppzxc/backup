@@ -262,6 +262,9 @@ fn test_setup_with_prompter_success() {
         audit: AuditConfig {
             system_manager: Some("홍길동".into()),
             security_officer: Some("김보안".into()),
+            restore_drill_rto_minutes: None,
+            restore_drill_timeout_minutes: None,
+            restore_drill_work_dir: None,
         },
     };
 
@@ -906,6 +909,9 @@ fn test_sftp_params_key_path_validation() {
         audit: AuditConfig {
             system_manager: Some("Admin".into()),
             security_officer: Some("CISO".into()),
+            restore_drill_rto_minutes: None,
+            restore_drill_timeout_minutes: None,
+            restore_drill_work_dir: None,
         },
     };
 

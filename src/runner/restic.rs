@@ -2,6 +2,7 @@ use crate::runner::executor::CommandRunner;
 use crate::runner::snapshot::{SnapshotInfo, parse_snapshot_json};
 use anyhow::Result;
 use std::io::Write;
+use std::time::Duration;
 use tempfile::NamedTempFile;
 
 pub trait ResticRunner {
@@ -44,6 +45,17 @@ pub trait ResticRunner {
         _env: &[(&str, &str)],
     ) -> Result<String> {
         self.restore(repo, password, snapshot, target)
+    }
+    fn restore_with_env_and_timeout(
+        &self,
+        repo: &str,
+        password: &str,
+        snapshot: &str,
+        target: &str,
+        env: &[(&str, &str)],
+        _timeout: Duration,
+    ) -> Result<String> {
+        self.restore_with_env(repo, password, snapshot, target, env)
     }
     fn backup_command(
         &self,
@@ -102,6 +114,38 @@ impl<'a, E: CommandRunner> ResticTool<'a, E> {
             );
         }
         Ok(output.stdout)
+    }
+
+    fn restore_output(
+        &self,
+        repo: &str,
+        password: &str,
+        snapshot: &str,
+        target: &str,
+        environment: &[(&str, &str)],
+        timeout: Option<Duration>,
+    ) -> Result<String> {
+        let pass_file = create_temp_password_file(password)?;
+        let pass_path = pass_file.path().to_string_lossy();
+        let args = [
+            "-r",
+            repo,
+            "--password-file",
+            &pass_path,
+            "restore",
+            snapshot,
+            "--target",
+            target,
+        ];
+        let output = match timeout {
+            Some(timeout) => {
+                self.executor
+                    .run_with_timeout("restic", &args, environment, timeout)?
+            }
+            None if environment.is_empty() => self.executor.run("restic", &args)?,
+            None => self.executor.run_with_env("restic", &args, environment)?,
+        };
+        Self::checked(output)
     }
 }
 
@@ -169,21 +213,7 @@ impl<'a, E: CommandRunner> ResticRunner for ResticTool<'a, E> {
             .map_err(anyhow::Error::new)
     }
     fn restore(&self, repo: &str, password: &str, snapshot: &str, target: &str) -> Result<String> {
-        let pass_file = create_temp_password_file(password)?;
-        let pass_path = pass_file.path().to_string_lossy();
-        Self::checked(self.executor.run(
-            "restic",
-            &[
-                "-r",
-                repo,
-                "--password-file",
-                &pass_path,
-                "restore",
-                snapshot,
-                "--target",
-                target,
-            ],
-        )?)
+        self.restore_output(repo, password, snapshot, target, &[], None)
     }
     fn restore_with_env(
         &self,
@@ -193,22 +223,18 @@ impl<'a, E: CommandRunner> ResticRunner for ResticTool<'a, E> {
         target: &str,
         env: &[(&str, &str)],
     ) -> Result<String> {
-        let pass_file = create_temp_password_file(password)?;
-        let pass_path = pass_file.path().to_string_lossy();
-        Self::checked(self.executor.run_with_env(
-            "restic",
-            &[
-                "-r",
-                repo,
-                "--password-file",
-                &pass_path,
-                "restore",
-                snapshot,
-                "--target",
-                target,
-            ],
-            env,
-        )?)
+        self.restore_output(repo, password, snapshot, target, env, None)
+    }
+    fn restore_with_env_and_timeout(
+        &self,
+        repo: &str,
+        password: &str,
+        snapshot: &str,
+        target: &str,
+        env: &[(&str, &str)],
+        timeout: Duration,
+    ) -> Result<String> {
+        self.restore_output(repo, password, snapshot, target, env, Some(timeout))
     }
     fn backup_command(
         &self,

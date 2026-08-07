@@ -3,19 +3,24 @@ pub mod json_schema;
 pub mod restore_drill;
 
 pub use restore_drill::{
-    RestoreDrillEvidence, RestoreDrillPolicy, RestoreDrillStatus, RestoreDrillStorageResult,
-    aggregate_status, render_restore_drill_evidence_html, render_restore_drill_evidence_json,
+    RestoreDrillClock, RestoreDrillEvidence, RestoreDrillPolicy, RestoreDrillStatus,
+    RestoreDrillStorageResult, RestoreDrillTimestamp, SystemRestoreDrillClock, aggregate_status,
+    render_restore_drill_evidence_html, render_restore_drill_evidence_json,
 };
 
+use crate::commands::restore::measure_restore_output;
 use crate::config::model::{AuditConfig, ResticProfileConfig, RetentionPolicy};
 use crate::runner::executor::{CommandRunner, SystemExecutor};
 use crate::runner::restic::{ResticRunner, ResticTool};
+use crate::runner::snapshot::{
+    SnapshotSelectionReason, SnapshotSelectionStatus, select_latest_tagged_snapshot_with_env,
+};
 use anyhow::Result;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -37,17 +42,22 @@ pub enum ReportType {
 pub struct ReportConfig {
     pub output_dir: PathBuf,
     pub audit: AuditConfig,
+    pub profile: String,
     pub targets: Vec<String>,
     pub excludes: Vec<String>,
     pub retention: RetentionPolicy,
     pub primary_repository: String,
     pub primary_password: SecretString,
+    pub primary_environment: Vec<(String, String)>,
     pub database_stream: bool,
+    pub restore_drill_policy: RestoreDrillPolicy,
+    pub restore_drill_work_dir: PathBuf,
 }
 
 impl ReportConfig {
     pub fn from_profiles(profiles: &ResticProfileConfig, profiles_path: &Path) -> Result<Self> {
         let application = profiles.application_config();
+        application.audit.validate_restore_drill_policy()?;
         let profile_name = application
             .database
             .as_ref()
@@ -73,16 +83,26 @@ impl ReportConfig {
         } else {
             (String::new(), String::new())
         };
+        let restore_drill_policy = RestoreDrillPolicy::new(
+            application.audit.resolved_restore_drill_rto_minutes(),
+            application.audit.resolved_restore_drill_timeout_minutes(),
+        )?;
 
         Ok(Self {
             output_dir: PathBuf::from(application.reports.output_dir),
-            audit: application.audit,
+            audit: application.audit.clone(),
+            profile: profile_name,
             targets: settings.source,
             excludes: settings.exclude,
             retention: settings.retention,
             primary_repository,
             primary_password: SecretString::new(password),
+            primary_environment: profiles.sidecar_environment(config_dir)?,
             database_stream: application.database.is_some(),
+            restore_drill_policy,
+            restore_drill_work_dir: PathBuf::from(
+                application.audit.resolved_restore_drill_work_dir(),
+            ),
         })
     }
 }
@@ -92,12 +112,16 @@ impl Default for ReportConfig {
         Self {
             output_dir: PathBuf::from("/data/backup/reports"),
             audit: AuditConfig::default(),
+            profile: "default".into(),
             targets: vec!["/data".into()],
             excludes: Vec::new(),
             retention: RetentionPolicy::standard_defaults(),
             primary_repository: String::new(),
             primary_password: SecretString::new(String::new()),
+            primary_environment: Vec::new(),
             database_stream: false,
+            restore_drill_policy: RestoreDrillPolicy::default(),
+            restore_drill_work_dir: PathBuf::from("/var/lib/backup/restore-drill"),
         }
     }
 }
@@ -412,9 +436,9 @@ impl AuditReport {
                 },
                 DiagnosticItem {
                     name: "복구 모의 훈련 및 RTO (ISMS-P 2.9.3)".to_string(),
-                    criterion: "< 300s".to_string(),
-                    result: "17.0s (Header Signature Valid)".to_string(),
-                    pass: true,
+                    criterion: "Restore Drill Evidence 필요".to_string(),
+                    result: "미수행".to_string(),
+                    pass: false,
                 },
             ],
             ReportType::Environment => vec![DiagnosticItem {
@@ -431,9 +455,9 @@ impl AuditReport {
             }],
             ReportType::RestoreDrill => vec![DiagnosticItem {
                 name: "복구 모의 훈련 및 RTO (ISMS-P 2.9.3)".to_string(),
-                criterion: "< 300s".to_string(),
-                result: "17.0s (Header Signature Valid)".to_string(),
-                pass: true,
+                criterion: "Restore Drill Evidence 필요".to_string(),
+                result: "미수행".to_string(),
+                pass: false,
             }],
         };
 
@@ -732,38 +756,52 @@ impl ReportCommand {
                 file: sub_file,
                 format: sub_format,
             }) => {
-                let drill_error = execute_restore_drill_with_runner(config, restic_runner)
-                    .err()
-                    .map(|error| redact_report_diagnostic(&error.to_string(), config));
                 let final_file = sub_file.or(file);
-                let opts = ReportExportOptionsForConfig {
-                    report_type: ReportType::RestoreDrill,
-                    file: final_file.as_deref(),
-                    format: sub_format.or(format),
+                let evidence = execute_restore_drill_with_runner(config, restic_runner)?
+                    .with_metadata(
+                        if meta.host_name.is_empty() {
+                            "localhost"
+                        } else {
+                            &meta.host_name
+                        },
+                        config.audit.system_manager_name("시스템 운영팀"),
+                        config.audit.security_officer_name("정보보안책임자"),
+                        None,
+                    );
+                let report = execute_restore_drill_evidence_export(
+                    &evidence,
+                    final_file.as_deref(),
+                    sub_format.or(format),
                     output_dir,
-                    meta,
-                    config,
-                    failure_diagnostic: drill_error.clone(),
-                };
-                let report = execute_report_export_with_report_config(opts, command_runner);
-                match (drill_error, report) {
-                    (None, report) => report,
-                    (Some(drill_error), Ok(report)) => {
-                        Err(ReportCommandFailure::from_saved_report(
-                            format!("restore drill failed: {drill_error}; failure report: {report}"),
-                            &report,
-                        )
-                        .into())
-                    }
-                    (Some(drill_error), Err(report_error)) => Err(
-                        ReportCommandFailure::from_saved_report(
-                            format!(
-                                "restore drill failed: {drill_error}; failure report also failed: {report_error}"
-                            ),
-                            "",
-                        )
-                        .into(),
-                    ),
+                );
+                match report {
+                    Ok(report) if evidence.overall_status == RestoreDrillStatus::Pass => Ok(report),
+                    Ok(report) => Err(ReportCommandFailure::from_saved_report(
+                        format!(
+                            "restore drill failed with status {:?}: {}; failure report: {report}",
+                            evidence.overall_status,
+                            evidence
+                                .diagnostics
+                                .first()
+                                .map(String::as_str)
+                                .unwrap_or("no diagnostic provided")
+                        ),
+                        &report,
+                    )
+                    .into()),
+                    Err(report_error) => Err(ReportCommandFailure::from_saved_report(
+                        format!(
+                            "restore drill failed with status {:?}: {}; failure report also failed: {report_error}",
+                            evidence.overall_status,
+                            evidence
+                                .diagnostics
+                                .first()
+                                .map(String::as_str)
+                                .unwrap_or("no diagnostic provided")
+                        ),
+                        "",
+                    )
+                    .into()),
                 }
             }
             None => {
@@ -777,25 +815,51 @@ impl ReportCommand {
                 let mut saved_all = Vec::new();
                 let mut failures = Vec::new();
                 for r_type in report_types {
-                    let mut drill_error = None;
-                    if r_type == ReportType::RestoreDrill
-                        && let Err(error) = execute_restore_drill_with_runner(config, restic_runner)
-                    {
-                        let message = redact_report_diagnostic(&error.to_string(), config);
-                        failures.push(format!("restore drill: {message}"));
-                        drill_error = Some(message);
-                    }
-                    let report_file = file.as_deref().map(|path| batch_report_path(path, r_type));
-                    let opts = ReportExportOptionsForConfig {
-                        report_type: r_type,
-                        file: report_file.as_deref(),
-                        format,
-                        output_dir,
-                        meta,
-                        config,
-                        failure_diagnostic: drill_error,
+                    let evidence = if r_type == ReportType::RestoreDrill {
+                        Some(
+                            execute_restore_drill_with_runner(config, restic_runner)?
+                                .with_metadata(
+                                    if meta.host_name.is_empty() {
+                                        "localhost"
+                                    } else {
+                                        &meta.host_name
+                                    },
+                                    config.audit.system_manager_name("시스템 운영팀"),
+                                    config.audit.security_officer_name("정보보안책임자"),
+                                    None,
+                                ),
+                        )
+                    } else {
+                        None
                     };
-                    match execute_report_export_with_report_config(opts, command_runner) {
+                    let report_file = file.as_deref().map(|path| batch_report_path(path, r_type));
+                    let report = if let Some(evidence) = evidence {
+                        let status = evidence.overall_status;
+                        let report = execute_restore_drill_evidence_export(
+                            &evidence,
+                            report_file.as_deref(),
+                            format,
+                            output_dir,
+                        );
+                        if status != RestoreDrillStatus::Pass {
+                            failures.push(format!("restore drill: status {status:?}"));
+                        }
+                        report
+                    } else {
+                        execute_report_export_with_report_config(
+                            ReportExportOptionsForConfig {
+                                report_type: r_type,
+                                file: report_file.as_deref(),
+                                format,
+                                output_dir,
+                                meta,
+                                config,
+                                failure_diagnostic: None,
+                            },
+                            command_runner,
+                        )
+                    };
+                    match report {
                         Ok(res_msg) => saved_all.push(res_msg),
                         Err(error) => failures.push(format!("{r_type:?} report: {error}")),
                     }
@@ -834,22 +898,318 @@ fn batch_report_path(path: &Path, report_type: ReportType) -> PathBuf {
     parent.join(format!("{stem}-{suffix}"))
 }
 
-fn execute_restore_drill_with_runner<R: ResticRunner + ?Sized>(
+pub fn execute_restore_drill_with_runner<R: ResticRunner + ?Sized>(
     config: &ReportConfig,
     runner: &R,
-) -> Result<()> {
-    if config.primary_repository.is_empty() || config.primary_password.expose_secret().is_empty() {
-        anyhow::bail!("restore drill requires a configured primary Backend Profile");
+) -> Result<RestoreDrillEvidence> {
+    let clock = SystemRestoreDrillClock::new();
+    execute_restore_drill_with_runner_and_clock(config, runner, &clock)
+}
+
+pub fn execute_restore_drill_with_runner_and_clock<
+    R: ResticRunner + ?Sized,
+    C: RestoreDrillClock + ?Sized,
+>(
+    config: &ReportConfig,
+    runner: &R,
+    clock: &C,
+) -> Result<RestoreDrillEvidence> {
+    config.restore_drill_policy.validate()?;
+
+    let overall_start = clock.now();
+    let execution_id = format!(
+        "restore-drill-{}-{}",
+        overall_start.wall_clock.replace([' ', ':', '+'], ""),
+        overall_start.monotonic_milliseconds
+    );
+    let profile = config.profile.clone();
+    let mut sensitive_values = vec![
+        config.primary_repository.clone(),
+        config.primary_password.expose_secret().to_owned(),
+        config.restore_drill_work_dir.to_string_lossy().into_owned(),
+    ];
+    sensitive_values.extend(
+        config
+            .primary_environment
+            .iter()
+            .map(|(_, value)| value.clone()),
+    );
+
+    let result =
+        if config.primary_repository.is_empty()
+            || config.primary_password.expose_secret().is_empty()
+        {
+            let operation_start = clock.now();
+            let operation_finish = clock.now();
+            Ok(RestoreDrillStorageResult::not_performed(
+                profile.clone(),
+                "primary",
+                "restore drill requires a configured primary Backend Profile",
+            )
+            .with_timing(
+                operation_start.wall_clock,
+                operation_finish.wall_clock,
+                operation_finish
+                    .monotonic_milliseconds
+                    .saturating_sub(operation_start.monotonic_milliseconds),
+            ))
+        } else {
+            match prepare_restore_drill_work_dir(&config.restore_drill_work_dir) {
+                Ok(()) => collect_primary_restore_result(config, runner, clock),
+                Err(error) => {
+                    let diagnostic = error.to_string();
+                    let operation_start = clock.now();
+                    let operation_finish = clock.now();
+                    Ok(RestoreDrillStorageResult::not_performed(
+                        profile.clone(),
+                        "primary",
+                        diagnostic,
+                    )
+                    .with_timing(
+                        operation_start.wall_clock,
+                        operation_finish.wall_clock,
+                        operation_finish
+                            .monotonic_milliseconds
+                            .saturating_sub(operation_start.monotonic_milliseconds),
+                    ))
+                }
+            }
+        }?;
+    let overall_finish = clock.now();
+    let diagnostics = result.diagnostic.clone().into_iter().collect::<Vec<_>>();
+    Ok(RestoreDrillEvidence::new(
+        execution_id,
+        overall_start.wall_clock,
+        overall_finish.wall_clock,
+        config.restore_drill_policy.clone(),
+        vec![result],
+    )
+    .with_metadata(
+        "localhost",
+        config.audit.system_manager_name("시스템 운영팀"),
+        config.audit.security_officer_name("정보보안책임자"),
+        None,
+    )
+    .with_diagnostics(diagnostics)
+    .with_sensitive_values(sensitive_values))
+}
+
+fn collect_primary_restore_result<R: ResticRunner + ?Sized, C: RestoreDrillClock + ?Sized>(
+    config: &ReportConfig,
+    runner: &R,
+    clock: &C,
+) -> Result<RestoreDrillStorageResult> {
+    let operation_start = clock.now();
+    let environment = config
+        .primary_environment
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let selection = select_latest_tagged_snapshot_with_env(
+        runner,
+        &config.primary_repository,
+        &config.primary_password,
+        &environment,
+        &config.profile,
+    );
+    if selection.status != SnapshotSelectionStatus::Selected {
+        let operation_finish = clock.now();
+        let diagnostic = selection
+            .diagnostic
+            .unwrap_or_else(|| "tagged snapshot selection was not performed".into());
+        let reason = selection.reason;
+        let result = match reason {
+            Some(SnapshotSelectionReason::QueryFailed)
+            | Some(SnapshotSelectionReason::MalformedJson) => RestoreDrillStorageResult::failed(
+                config.profile.clone(),
+                "primary",
+                operation_start.wall_clock.clone(),
+                operation_finish.wall_clock.clone(),
+                diagnostic,
+            ),
+            _ => RestoreDrillStorageResult::not_performed(
+                config.profile.clone(),
+                "primary",
+                diagnostic,
+            ),
+        };
+        return Ok(result.with_timing(
+            operation_start.wall_clock,
+            operation_finish.wall_clock,
+            operation_finish
+                .monotonic_milliseconds
+                .saturating_sub(operation_start.monotonic_milliseconds),
+        ));
     }
-    let target = tempfile::tempdir()?;
-    runner.restore(
+    let snapshot_id = selection
+        .snapshot_id
+        .clone()
+        .expect("selected snapshot has a concrete ID");
+    let snapshot_time = selection
+        .snapshot_time
+        .clone()
+        .expect("selected snapshot has a timestamp");
+    let target = match tempfile::Builder::new()
+        .prefix("primary-")
+        .tempdir_in(&config.restore_drill_work_dir)
+    {
+        Ok(target) => target,
+        Err(error) => {
+            let operation_finish = clock.now();
+            return Ok(RestoreDrillStorageResult::not_performed(
+                config.profile.clone(),
+                "primary",
+                format!("restore drill work directory could not be prepared: {error}"),
+            )
+            .with_timing(
+                operation_start.wall_clock,
+                operation_finish.wall_clock,
+                operation_finish
+                    .monotonic_milliseconds
+                    .saturating_sub(operation_start.monotonic_milliseconds),
+            ));
+        }
+    };
+    let restore = runner.restore_with_env_and_timeout(
         &config.primary_repository,
         config.primary_password.expose_secret(),
-        "latest",
+        &snapshot_id,
         target.path().to_string_lossy().as_ref(),
-    )?;
-    crate::commands::restore::validate_restored_output(target.path(), config.database_stream)?;
+        &environment,
+        Duration::from_millis(config.restore_drill_policy.timeout_milliseconds()),
+    );
+    let operation_finish = clock.now();
+    let elapsed_milliseconds = operation_finish
+        .monotonic_milliseconds
+        .saturating_sub(operation_start.monotonic_milliseconds);
+    if let Err(error) = restore {
+        return Ok(RestoreDrillStorageResult::failed_after_snapshot(
+            config.profile.clone(),
+            "primary",
+            snapshot_id,
+            snapshot_time,
+            operation_start.wall_clock,
+            operation_finish.wall_clock,
+            elapsed_milliseconds,
+            error.to_string(),
+        ));
+    }
+
+    let metrics = match measure_restore_output(target.path(), config.database_stream) {
+        Ok(metrics) => metrics,
+        Err(error) => {
+            return Ok(RestoreDrillStorageResult::failed_after_snapshot(
+                config.profile.clone(),
+                "primary",
+                snapshot_id,
+                snapshot_time,
+                operation_start.wall_clock,
+                operation_finish.wall_clock,
+                elapsed_milliseconds,
+                error.to_string(),
+            ));
+        }
+    };
+    let mut result = RestoreDrillStorageResult::measured(
+        config.profile.clone(),
+        "primary",
+        snapshot_id,
+        snapshot_time,
+        operation_start.wall_clock,
+        operation_finish.wall_clock,
+        elapsed_milliseconds,
+        metrics.file_count,
+        metrics.total_bytes,
+        metrics.validation_method,
+        &config.restore_drill_policy,
+    );
+    if let Some(error) = metrics.validation_error {
+        result.validation_status = RestoreDrillStatus::Fail;
+        result.status = RestoreDrillStatus::Fail;
+        result.diagnostic = Some(error);
+    }
+    Ok(result)
+}
+
+fn prepare_restore_drill_work_dir(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!("restore-drill-work-dir cannot be a symlink")
+        }
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            anyhow::bail!("restore-drill-work-dir must be a directory")
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(path)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+        if mode != 0o700 {
+            anyhow::bail!("restore-drill-work-dir permissions must be 700");
+        }
+    }
     Ok(())
+}
+
+/// Writes both requested representations of one already-collected Evidence value. This function
+/// has no adapter, clock, or configuration collection side effects; it only renders and atomically
+/// commits the supplied artifact(s).
+pub fn execute_restore_drill_evidence_export(
+    evidence: &RestoreDrillEvidence,
+    file: Option<&Path>,
+    format: Option<ReportFormat>,
+    output_dir: &Path,
+) -> Result<String> {
+    let formats = match format {
+        Some(format) => vec![format],
+        None => vec![ReportFormat::Html, ReportFormat::Json],
+    };
+    let date_prefix = evidence
+        .started_at
+        .chars()
+        .filter(char::is_ascii_digit)
+        .take(8)
+        .collect::<String>();
+    let date_prefix = if date_prefix.len() == 8 {
+        date_prefix
+    } else {
+        "restore-drill".into()
+    };
+    let mut saved_paths = Vec::new();
+    for format in formats {
+        let extension = match format {
+            ReportFormat::Html => "html",
+            ReportFormat::Json => "json",
+        };
+        let mut path = match file {
+            Some(file) if file.extension().is_some() => file.with_extension(extension),
+            Some(file) => file.with_extension(extension),
+            None => output_dir.join(format!("{date_prefix}_restore_drill_report.{extension}")),
+        };
+        if file.is_none() {
+            path = collision_safe_path(path);
+        }
+        let content = match format {
+            ReportFormat::Html => render_restore_drill_evidence_html(evidence),
+            ReportFormat::Json => render_restore_drill_evidence_json(evidence)?,
+        };
+        write_file_with_perms(&path, &content)?;
+        saved_paths.push(path);
+    }
+    Ok(format!(
+        "ISMS report saved to {}",
+        saved_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }
 
 pub fn render_html_isms_report(host_name: &str, timestamp: &str) -> String {

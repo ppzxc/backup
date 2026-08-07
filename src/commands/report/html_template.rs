@@ -606,7 +606,7 @@ fn render_restore_drill_html(data: &RealReportData) -> String {
     </tr>
     <tr>
       <td class="label">대상 스냅샷</td>
-      <td>latest</td>
+      <td>미수행 (실측 Evidence 없음)</td>
       <td class="label">승인자</td>
       <td>{}</td>
     </tr>
@@ -615,7 +615,7 @@ fn render_restore_drill_html(data: &RealReportData) -> String {
   <h2>1. 훈련 개요 및 시나리오</h2>
   <div style="font-size: 9.5pt; line-height: 1.6; margin-bottom: 20px;">
     <b>목적:</b> 재해 재난 및 랜섬웨어 상황 시 백업 데이터로부터 서비스 복구가 원활히 수행되며 목표 복구 시간(RTO)을 충족하는지 검증함.<br>
-    <b>수행:</b> 테스트 VM 환경 구성 ➡️ 레포지토리 연계 활성화 ➡️ 복원 경로로 일괄 복구 수행 ➡️ 회원 레코드 검증 및 무결성 수동 진단
+    <b>수행:</b> 실제 Restore Drill Evidence가 수집된 경우에만 concrete snapshot, Restore Output Validation 및 RTO를 판정함.
   </div>
 
   <h2>2. 상세 검증 결과</h2>
@@ -637,22 +637,22 @@ fn render_restore_drill_html(data: &RealReportData) -> String {
       </tr>
       <tr>
         <td>[1차] 복구 시간</td>
-        <td>RTO 기준 120분 이내 복구</td>
-        <td>실행 로그 참조</td>
-        <td><span class="badge badge-warning">수동 확인 필요</span></td>
+        <td>RTO 기준 {}분 이내 복구</td>
+        <td>실측 Evidence 없음</td>
+        <td><span class="badge badge-warning">미수행</span></td>
       </tr>
       <tr>
         <td>데이터 정합성 상태</td>
-        <td>회원 레코드 및 테이블 조회 성공</td>
-        <td>DB import를 수행하지 않는 비파괴 훈련</td>
-        <td><span class="badge badge-warning">수동 확인 필요</span></td>
+        <td>Restore Output Validation</td>
+        <td>실측 Evidence 없음</td>
+        <td><span class="badge badge-warning">미수행</span></td>
       </tr>
     </tbody>
   </table>
 
   <h2>3. 특이사항 및 종합 의견</h2>
   <div style="font-size: 9.5pt; line-height: 1.6; margin-bottom: 20px; background-color: #f8fafc; padding: 12px; border: 1px solid #cbd5e1; border-radius: 4px;">
-    암호화 키 분실 방지 대책이 정상 작동 중이며, 원격 저장소로부터 복구가 안정적인 속도로 완료됨을 확인함.
+    실제 Restore Drill Evidence가 제공되지 않아 복구 성공 또는 RTO 충족을 판정하지 않음.
   </div>
 
   <div class="signature-area">
@@ -674,6 +674,7 @@ fn render_restore_drill_html(data: &RealReportData) -> String {
         data.audit.system_manager_name("시스템 운영팀"),
         data.os_info,
         data.audit.security_officer_name("정보보안책임자"),
+        data.config.restore_drill_policy.rto_minutes,
         data.audit.system_manager_name("시스템 운영팀"),
         data.audit.security_officer_name("정보보안책임자"),
     )

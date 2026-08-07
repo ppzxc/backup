@@ -253,14 +253,14 @@ pub fn render_json_real(report_type: ReportType, data: &RealReportData) -> Resul
                     .security_officer
                     .clone()
                     .unwrap_or_else(|| "정보보안책임자".into()),
-                target_snapshot_id: "latest (resolved during restore drill)".into(),
-                target_snapshot_time: "recorded in restore command output".into(),
-                target_directory: "temporary verification directory".into(),
+                target_snapshot_id: String::new(),
+                target_snapshot_time: String::new(),
+                target_directory: String::new(),
                 recovery_results: RecoveryResultsJson {
-                    data_size_human: "measured restore output (see drill log)".into(),
+                    data_size_human: "not measured".into(),
                     elapsed_seconds: 0,
-                    elapsed_human: "실행 로그 참조".into(),
-                    target_rto_minutes: 120,
+                    elapsed_human: "not measured".into(),
+                    target_rto_minutes: data.config.restore_drill_policy.rto_minutes,
                     rto_satisfied: false,
                     data_integrity_verified: false,
                     database_verification: serde_json::json!({

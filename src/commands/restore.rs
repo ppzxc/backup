@@ -38,6 +38,22 @@ pub fn validate_restored_output(target: &Path, database_stream: bool) -> Result<
     validate_restored_output_against(target, database_stream, &[])
 }
 
+/// Measurements captured from one restore target. The Restore Drill uses these values as its
+/// evidence input instead of treating a successful restic exit status as proof of recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreOutputMetrics {
+    pub file_count: u64,
+    pub total_bytes: u64,
+    pub validation_method: String,
+    pub validation_error: Option<String>,
+}
+
+impl RestoreOutputMetrics {
+    pub fn validation_passed(&self) -> bool {
+        self.validation_error.is_none() && self.file_count > 0 && self.total_bytes > 0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RestoreFileState {
     path: std::path::PathBuf,
@@ -67,6 +83,74 @@ fn restore_file_states(target: &Path) -> Result<Vec<RestoreFileState>> {
     Ok(states)
 }
 
+/// Measures regular files and validates the optional Database Stream signature without importing
+/// data into an operating database. Semantic validation failures remain in the returned metrics so
+/// the Restore Drill can write a complete failure Evidence artifact.
+pub fn measure_restore_output(
+    target: &Path,
+    database_stream: bool,
+) -> Result<RestoreOutputMetrics> {
+    if !target
+        .symlink_metadata()
+        .map(|metadata| metadata.file_type().is_dir())
+        .unwrap_or(false)
+    {
+        bail!("Restore target was not created");
+    }
+    let states = restore_file_states(target)?;
+    let file_count = states.len() as u64;
+    let total_bytes = states.iter().map(|state| state.length).sum();
+    let validation_method = if database_stream {
+        "regular file count, total bytes, and SQL dump signature"
+    } else {
+        "regular file count and total bytes"
+    }
+    .to_string();
+    let mut validation_error = if file_count == 0 {
+        Some("Restore Output Validation produced no regular files".into())
+    } else if total_bytes == 0 {
+        Some("Restore Output Validation produced zero total bytes".into())
+    } else {
+        None
+    };
+
+    if database_stream && validation_error.is_none() {
+        let files = states
+            .iter()
+            .filter(|state| state.length > 0)
+            .map(|state| state.path.as_path())
+            .collect::<Vec<_>>();
+        let Some(dump) = files.iter().find(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("sql"))
+        }) else {
+            validation_error = Some("Database Stream restore did not produce a SQL dump".into());
+            return Ok(RestoreOutputMetrics {
+                file_count,
+                total_bytes,
+                validation_method,
+                validation_error,
+            });
+        };
+        let content = std::fs::read_to_string(dump)?;
+        let looks_like_sql = content.starts_with("--")
+            || content.contains("CREATE ")
+            || content.contains("SET ")
+            || content.contains("INSERT ");
+        if !looks_like_sql {
+            validation_error =
+                Some("Database Stream restore produced an invalid SQL dump format".into());
+        }
+    }
+
+    Ok(RestoreOutputMetrics {
+        file_count,
+        total_bytes,
+        validation_method,
+        validation_error,
+    })
+}
+
 fn validate_restored_output_against(
     target: &Path,
     database_stream: bool,
@@ -79,15 +163,11 @@ fn validate_restored_output_against(
     {
         bail!("Restore target was not created");
     }
-    let states = restore_file_states(target)?;
-    let files = states
-        .iter()
-        .filter(|state| state.length > 0)
-        .map(|state| state.path.clone())
-        .collect::<Vec<_>>();
-    if files.is_empty() {
+    let metrics = measure_restore_output(target, database_stream)?;
+    if metrics.file_count == 0 || metrics.total_bytes == 0 {
         bail!("Restore completed but produced no non-empty output");
     }
+    let states = restore_file_states(target)?;
     if !baseline.is_empty()
         && states.iter().all(|state| {
             baseline.iter().any(|previous| {
@@ -99,22 +179,8 @@ fn validate_restored_output_against(
     {
         bail!("Restore completed but produced no new output");
     }
-    if database_stream {
-        let dump = files
-            .iter()
-            .find(|path| {
-                path.extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("sql"))
-            })
-            .ok_or_else(|| anyhow::anyhow!("Database Stream restore did not produce a SQL dump"))?;
-        let content = std::fs::read_to_string(dump)?;
-        let looks_like_sql = content.starts_with("--")
-            || content.contains("CREATE ")
-            || content.contains("SET ")
-            || content.contains("INSERT ");
-        if !looks_like_sql {
-            bail!("Database Stream restore produced an invalid SQL dump format");
-        }
+    if let Some(error) = metrics.validation_error {
+        bail!("{error}");
     }
     Ok(())
 }

@@ -823,6 +823,13 @@ pub struct AuditConfig {
     pub system_manager: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security_officer: Option<String>,
+    /// Restore Drill policy metadata. `None` means the documented default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_drill_rto_minutes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_drill_timeout_minutes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_drill_work_dir: Option<String>,
 }
 
 impl AuditConfig {
@@ -832,6 +839,41 @@ impl AuditConfig {
 
     pub fn security_officer_name<'a>(&'a self, default: &'a str) -> &'a str {
         self.security_officer.as_deref().unwrap_or(default)
+    }
+
+    pub fn resolved_restore_drill_rto_minutes(&self) -> u64 {
+        self.restore_drill_rto_minutes.unwrap_or(120)
+    }
+
+    pub fn resolved_restore_drill_timeout_minutes(&self) -> u64 {
+        self.restore_drill_timeout_minutes.unwrap_or(240)
+    }
+
+    pub fn resolved_restore_drill_work_dir(&self) -> &str {
+        self.restore_drill_work_dir
+            .as_deref()
+            .unwrap_or("/var/lib/backup/restore-drill")
+    }
+
+    pub fn validate_restore_drill_policy(&self) -> Result<()> {
+        let rto = self.resolved_restore_drill_rto_minutes();
+        let timeout = self.resolved_restore_drill_timeout_minutes();
+        if rto == 0 {
+            anyhow::bail!("restore-drill-rto-minutes must be at least 1");
+        }
+        if timeout < rto {
+            anyhow::bail!(
+                "restore-drill-timeout-minutes must be greater than or equal to restore-drill-rto-minutes"
+            );
+        }
+        if self
+            .restore_drill_work_dir
+            .as_deref()
+            .is_some_and(|path| path.trim().is_empty() || path != path.trim())
+        {
+            anyhow::bail!("restore-drill-work-dir must be an exact, non-empty path");
+        }
+        Ok(())
     }
 }
 
@@ -879,6 +921,9 @@ impl ResticProfileConfig {
     pub fn validate(&self) -> Result<()> {
         if self.version != "2" {
             anyhow::bail!("profiles.yaml must declare the resticprofile v2 root version: '2'");
+        }
+        if let Some(application) = &self.application {
+            application.audit.validate_restore_drill_policy()?;
         }
         if let Some(database) = self
             .application

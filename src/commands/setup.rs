@@ -434,6 +434,9 @@ impl SetupPrompter for InquirePrompter {
         let audit = AuditConfig {
             system_manager: Some(sys_mgr),
             security_officer: Some(sec_off),
+            restore_drill_rto_minutes: None,
+            restore_drill_timeout_minutes: None,
+            restore_drill_work_dir: None,
         };
 
         Ok(SetupParams {
@@ -498,6 +501,9 @@ fn default_application_config(profile: &str, target: &str, repo: &str, pwd: &str
         audit: AuditConfig {
             system_manager: Some("시스템 운영팀".into()),
             security_officer: Some("정보보안책임자".into()),
+            restore_drill_rto_minutes: None,
+            restore_drill_timeout_minutes: None,
+            restore_drill_work_dir: None,
         },
     }
 }
