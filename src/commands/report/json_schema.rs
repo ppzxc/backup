@@ -2,6 +2,13 @@ use crate::commands::report::{AuditDiagnosticResults, RealReportData, ReportType
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+/// Serialize an injected Restore Drill Evidence value without collecting any runtime data.
+pub fn render_restore_drill_evidence(
+    evidence: &crate::commands::report::restore_drill::RestoreDrillEvidence,
+) -> Result<String> {
+    crate::commands::report::restore_drill::render_restore_drill_evidence_json(evidence)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupPolicyJson {
     pub backend: String,

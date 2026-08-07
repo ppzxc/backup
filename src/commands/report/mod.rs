@@ -1,5 +1,11 @@
 pub mod html_template;
 pub mod json_schema;
+pub mod restore_drill;
+
+pub use restore_drill::{
+    RestoreDrillEvidence, RestoreDrillPolicy, RestoreDrillStatus, RestoreDrillStorageResult,
+    aggregate_status, render_restore_drill_evidence_html, render_restore_drill_evidence_json,
+};
 
 use crate::config::model::{AuditConfig, ResticProfileConfig, RetentionPolicy};
 use crate::runner::executor::{CommandRunner, SystemExecutor};
