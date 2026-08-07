@@ -134,6 +134,19 @@ impl ResticRunner for MockResticRunner {
         ));
         self.result()
     }
+
+    fn backup_command_with_env_and_tag(
+        &self,
+        repo: &str,
+        password: &str,
+        filename: &str,
+        program: &str,
+        args: &[String],
+        _tag: &str,
+        env: &[(&str, &str)],
+    ) -> Result<String> {
+        self.backup_command_with_env(repo, password, filename, program, args, env)
+    }
 }
 
 pub struct MockRcloneRunner {

@@ -1,3 +1,5 @@
+use crate::commands::database::DatabaseDumpValidation;
+use crate::config::model::DatabaseType;
 use anyhow::Result;
 use secrecy::{ExposeSecret, SecretString};
 use serde::ser::Serializer;
@@ -140,8 +142,55 @@ pub struct RestoreDrillStorageResult {
     pub total_bytes: Option<u64>,
     pub validation_method: Option<String>,
     pub validation_status: RestoreDrillStatus,
+    pub database_verification: Option<DatabaseVerificationEvidence>,
     pub rto_satisfied: Option<bool>,
     pub diagnostic: Option<String>,
+}
+
+/// The intentionally limited validation scope for a restored Database Stream dump.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatabaseVerificationEvidence {
+    pub db_type: DatabaseType,
+    pub expected_signature: String,
+    pub signature_verified: bool,
+    pub signature_status: RestoreDrillStatus,
+    pub validation_scope: String,
+    pub db_integrity_verified: bool,
+    pub import_performed: bool,
+    pub record_validation_performed: bool,
+}
+
+impl DatabaseVerificationEvidence {
+    pub(crate) fn from_dump_validation(validation: &DatabaseDumpValidation) -> Self {
+        let signature_status = if validation.signature_verified {
+            RestoreDrillStatus::Pass
+        } else {
+            RestoreDrillStatus::Fail
+        };
+        Self {
+            db_type: validation.database_type,
+            expected_signature: validation.expected_signature.clone(),
+            signature_verified: validation.signature_verified,
+            signature_status,
+            validation_scope: "SQL dump signature only".into(),
+            db_integrity_verified: false,
+            import_performed: false,
+            record_validation_performed: false,
+        }
+    }
+
+    pub(crate) fn not_performed(database_type: DatabaseType) -> Self {
+        Self {
+            db_type: database_type,
+            expected_signature: DatabaseDumpValidation::expected_signature(database_type).into(),
+            signature_verified: false,
+            signature_status: RestoreDrillStatus::NotPerformed,
+            validation_scope: "SQL dump signature only".into(),
+            db_integrity_verified: false,
+            import_performed: false,
+            record_validation_performed: false,
+        }
+    }
 }
 
 impl RestoreDrillStorageResult {
@@ -185,6 +234,7 @@ impl RestoreDrillStorageResult {
             total_bytes: Some(total_bytes),
             validation_method: Some(validation_method.into()),
             validation_status,
+            database_verification: None,
             rto_satisfied: Some(rto_satisfied),
             diagnostic: if !rto_satisfied {
                 Some("Restore Drill RTO exceeded".into())
@@ -217,6 +267,7 @@ impl RestoreDrillStorageResult {
             total_bytes: None,
             validation_method: None,
             validation_status: RestoreDrillStatus::NotPerformed,
+            database_verification: None,
             rto_satisfied: None,
             diagnostic: Some(diagnostic.into()),
         }
@@ -253,6 +304,14 @@ impl RestoreDrillStorageResult {
         self
     }
 
+    pub fn with_database_verification(
+        mut self,
+        verification: DatabaseVerificationEvidence,
+    ) -> Self {
+        self.database_verification = Some(verification);
+        self
+    }
+
     pub fn not_performed(
         profile: impl Into<String>,
         backend: impl Into<String>,
@@ -272,6 +331,7 @@ impl RestoreDrillStorageResult {
             total_bytes: None,
             validation_method: None,
             validation_status: RestoreDrillStatus::NotPerformed,
+            database_verification: None,
             rto_satisfied: None,
             diagnostic: Some(diagnostic.into()),
         }
@@ -296,6 +356,7 @@ impl RestoreDrillStorageResult {
             total_bytes: None,
             validation_method: None,
             validation_status: RestoreDrillStatus::NotApplicable,
+            database_verification: None,
             rto_satisfied: None,
             diagnostic: Some(diagnostic.into()),
         }
@@ -646,6 +707,14 @@ fn status_badge(status: RestoreDrillStatus) -> String {
     )
 }
 
+fn performed_label(performed: bool) -> &'static str {
+    if performed {
+        "performed"
+    } else {
+        "not performed"
+    }
+}
+
 /// Pure HTML renderer for a previously collected Restore Drill Evidence value.
 pub fn render_restore_drill_evidence_html(evidence: &RestoreDrillEvidence) -> String {
     let evidence = evidence.redacted();
@@ -656,11 +725,25 @@ pub fn render_restore_drill_evidence_html(evidence: &RestoreDrillEvidence) -> St
             .as_deref()
             .map(escape_html)
             .unwrap_or_else(|| "—".into());
+        let database_verification = result
+            .database_verification
+            .as_ref()
+            .map(|verification| {
+                format!(
+                    "{}: {}<br>{}<br>Import: {}; records: {}",
+                    escape_html(&verification.expected_signature),
+                    status_badge(verification.signature_status),
+                    escape_html(&verification.validation_scope),
+                    performed_label(verification.import_performed),
+                    performed_label(verification.record_validation_performed),
+                )
+            })
+            .unwrap_or_else(|| "—".into());
         rows.push_str(&format!(
             r#"<tr>
   <td>{}</td><td>{}</td><td>{}</td><td>{}</td>
   <td>{}</td><td>{}</td><td>{}</td><td>{}</td>
-  <td>{}</td><td>{}</td><td>{}</td><td>{}</td>
+  <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>
 </tr>"#,
             escape_html(&result.profile),
             escape_html(&result.backend),
@@ -676,6 +759,7 @@ pub fn render_restore_drill_evidence_html(evidence: &RestoreDrillEvidence) -> St
                     .unwrap_or_else(|| "—".into())
             ),
             status_badge(result.validation_status),
+            database_verification,
             status_badge(result.status),
             result
                 .rto_satisfied
@@ -728,7 +812,7 @@ pub fn render_restore_drill_evidence_html(evidence: &RestoreDrillEvidence) -> St
 
   <h2>Storage and profile results</h2>
   <table>
-    <thead><tr><th>Profile</th><th>Backend</th><th>Snapshot ID</th><th>Snapshot time</th><th>Elapsed ms</th><th>Files</th><th>Bytes</th><th>Validation method</th><th>Validation</th><th>Result</th><th>RTO</th><th>Diagnostic</th></tr></thead>
+    <thead><tr><th>Profile</th><th>Backend</th><th>Snapshot ID</th><th>Snapshot time</th><th>Elapsed ms</th><th>Files</th><th>Bytes</th><th>Validation method</th><th>Validation</th><th>Database signature</th><th>Result</th><th>RTO</th><th>Diagnostic</th></tr></thead>
     <tbody>{}</tbody>
   </table>
 
@@ -761,6 +845,14 @@ fn primary_result(evidence: &RestoreDrillEvidence) -> Option<&RestoreDrillStorag
         .find(|result| result.backend == "primary")
 }
 
+fn compatibility_result(evidence: &RestoreDrillEvidence) -> Option<&RestoreDrillStorageResult> {
+    evidence
+        .storage_results
+        .iter()
+        .find(|result| result.database_verification.is_some())
+        .or_else(|| primary_result(evidence))
+}
+
 fn human_elapsed(milliseconds: Option<u64>) -> String {
     milliseconds
         .map(|value| format!("{value} ms"))
@@ -773,7 +865,11 @@ fn human_elapsed(milliseconds: Option<u64>) -> String {
 /// present for existing consumers while `storage_results` is the lossless multi-profile contract.
 pub fn render_restore_drill_evidence_json(evidence: &RestoreDrillEvidence) -> Result<String> {
     let evidence = evidence.redacted();
-    let primary = primary_result(&evidence);
+    let database_result = evidence
+        .storage_results
+        .iter()
+        .find(|result| result.database_verification.is_some());
+    let primary = compatibility_result(&evidence);
     let mut value = serde_json::to_value(&evidence)?;
     let object = value
         .as_object_mut()
@@ -786,10 +882,28 @@ pub fn render_restore_drill_evidence_json(evidence: &RestoreDrillEvidence) -> Re
         .and_then(|result| result.elapsed_seconds)
         .or_else(|| primary_elapsed_ms.map(|value| value / 1_000));
     let primary_rto_satisfied = primary.and_then(|result| result.rto_satisfied);
-    let primary_integrity = primary.map(|result| {
-        result.status == RestoreDrillStatus::Pass
-            && result.validation_status == RestoreDrillStatus::Pass
-    });
+    let primary_integrity =
+        primary.map(|result| result.validation_status == RestoreDrillStatus::Pass);
+    let mut database_verification = if let Some(result) = database_result {
+        serde_json::to_value(
+            result
+                .database_verification
+                .as_ref()
+                .expect("database result has database verification"),
+        )?
+    } else {
+        Value::Null
+    };
+    if let Some(object) = database_verification.as_object_mut() {
+        object.insert(
+            "db_snapshot_id".into(),
+            json!(database_result.and_then(|result| result.snapshot_id.clone())),
+        );
+        object.insert(
+            "db_snapshot_time".into(),
+            json!(database_result.and_then(|result| result.snapshot_time.clone())),
+        );
+    }
 
     object.insert("report_type".into(), json!("restore_drill"));
     object.insert("timestamp".into(), json!(evidence.started_at));
@@ -827,7 +941,7 @@ pub fn render_restore_drill_evidence_json(evidence: &RestoreDrillEvidence) -> Re
             "timeout_minutes": evidence.rto_policy.timeout_minutes,
             "rto_satisfied": primary_rto_satisfied.unwrap_or(false),
             "data_integrity_verified": primary_integrity.unwrap_or(false),
-            "database_verification": Value::Null,
+            "database_verification": database_verification,
         }),
     );
     object.insert("hostname".into(), json!(evidence.hostname));

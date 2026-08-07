@@ -3,13 +3,13 @@ pub mod json_schema;
 pub mod restore_drill;
 
 pub use restore_drill::{
-    RestoreDrillClock, RestoreDrillEvidence, RestoreDrillPolicy, RestoreDrillStatus,
-    RestoreDrillStorageResult, RestoreDrillTimestamp, SystemRestoreDrillClock, aggregate_status,
-    render_restore_drill_evidence_html, render_restore_drill_evidence_json,
+    DatabaseVerificationEvidence, RestoreDrillClock, RestoreDrillEvidence, RestoreDrillPolicy,
+    RestoreDrillStatus, RestoreDrillStorageResult, RestoreDrillTimestamp, SystemRestoreDrillClock,
+    aggregate_status, render_restore_drill_evidence_html, render_restore_drill_evidence_json,
 };
 
-use crate::commands::restore::measure_restore_output;
-use crate::config::model::{AuditConfig, ResticProfileConfig, RetentionPolicy};
+use crate::commands::restore::{measure_restore_output, measure_restore_output_for_database};
+use crate::config::model::{AuditConfig, DatabaseType, ResticProfileConfig, RetentionPolicy};
 use crate::config::profile_resolver::ProfileResolver;
 use crate::runner::executor::{CommandRunner, SystemExecutor};
 use crate::runner::restic::{ResticRunner, ResticTool};
@@ -50,6 +50,7 @@ pub struct RestoreDrillStorageConfig {
 #[derive(Debug, Clone)]
 pub struct RestoreDrillProfileConfig {
     pub profile: String,
+    pub database_type: Option<DatabaseType>,
     pub primary: Option<RestoreDrillStorageConfig>,
     pub secondary: Option<RestoreDrillStorageConfig>,
     pub secondary_diagnostic: Option<String>,
@@ -66,7 +67,7 @@ pub struct ReportConfig {
     pub primary_repository: String,
     pub primary_password: SecretString,
     pub primary_environment: Vec<(String, String)>,
-    pub database_stream: bool,
+    pub database_type: Option<DatabaseType>,
     pub restore_drill_policy: RestoreDrillPolicy,
     pub restore_drill_work_dir: PathBuf,
     pub restore_drill_profiles: Vec<RestoreDrillProfileConfig>,
@@ -76,6 +77,14 @@ impl ReportConfig {
     pub fn from_profiles(profiles: &ResticProfileConfig, profiles_path: &Path) -> Result<Self> {
         let application = profiles.application_config();
         application.audit.validate_restore_drill_policy()?;
+        let database_profile = application
+            .database
+            .as_ref()
+            .map(|database| database.profile.clone());
+        let database_type = application
+            .database
+            .as_ref()
+            .map(|database| database.db_type);
         let profile_name = application
             .database
             .as_ref()
@@ -136,8 +145,15 @@ impl ReportConfig {
                 } else {
                     None
                 };
+                let profile_database_type =
+                    if database_profile.as_deref() == Some(profile.name.as_str()) {
+                        database_type
+                    } else {
+                        None
+                    };
                 Ok(RestoreDrillProfileConfig {
                     profile: profile.name,
+                    database_type: profile_database_type,
                     primary: primary_storage.clone(),
                     secondary,
                     secondary_diagnostic,
@@ -165,7 +181,7 @@ impl ReportConfig {
                 .map(|storage| storage.password.clone())
                 .unwrap_or_else(|| SecretString::new(String::new())),
             primary_environment,
-            database_stream: application.database.is_some(),
+            database_type,
             restore_drill_policy,
             restore_drill_work_dir: PathBuf::from(
                 application.audit.resolved_restore_drill_work_dir(),
@@ -180,6 +196,7 @@ impl ReportConfig {
         }
         vec![RestoreDrillProfileConfig {
             profile: self.profile.clone(),
+            database_type: self.database_type,
             primary: Some(RestoreDrillStorageConfig {
                 backend: "primary".into(),
                 repository: self.primary_repository.clone(),
@@ -204,7 +221,7 @@ impl Default for ReportConfig {
             primary_repository: String::new(),
             primary_password: SecretString::new(String::new()),
             primary_environment: Vec::new(),
-            database_stream: false,
+            database_type: None,
             restore_drill_policy: RestoreDrillPolicy::default(),
             restore_drill_work_dir: PathBuf::from("/var/lib/backup/restore-drill"),
             restore_drill_profiles: Vec::new(),
@@ -1039,32 +1056,53 @@ pub fn execute_restore_drill_with_runner_and_clock<
         }
 
         let primary = match profile.primary {
-            Some(storage) if storage_is_configured(&storage) => {
-                collect_restore_storage_result(config, runner, clock, &profile.profile, &storage)?
-            }
-            Some(_) | None => not_performed_restore_storage_result(
+            Some(storage) if storage_is_configured(&storage) => collect_restore_storage_result(
+                config,
+                runner,
                 clock,
                 &profile.profile,
-                "primary",
-                "restore drill requires a configured primary Backend Profile",
+                &storage,
+                profile.database_type,
+            )?,
+            Some(_) | None => mark_database_validation_not_performed(
+                not_performed_restore_storage_result(
+                    clock,
+                    &profile.profile,
+                    "primary",
+                    "restore drill requires a configured primary Backend Profile",
+                ),
+                profile.database_type,
             ),
         };
         storage_results.push(primary);
 
         let secondary = match (profile.secondary, profile.secondary_diagnostic) {
             (Some(storage), None) if storage_is_configured(&storage) => {
-                collect_restore_storage_result(config, runner, clock, &profile.profile, &storage)?
+                collect_restore_storage_result(
+                    config,
+                    runner,
+                    clock,
+                    &profile.profile,
+                    &storage,
+                    profile.database_type,
+                )?
             }
-            (_, Some(diagnostic)) => failed_restore_storage_result(
-                clock,
-                profile.profile.clone(),
-                "secondary",
-                diagnostic,
+            (_, Some(diagnostic)) => mark_database_validation_not_performed(
+                failed_restore_storage_result(
+                    clock,
+                    profile.profile.clone(),
+                    "secondary",
+                    diagnostic,
+                ),
+                profile.database_type,
             ),
-            (Some(_), None) | (None, None) => RestoreDrillStorageResult::not_applicable(
-                profile.profile.clone(),
-                "secondary",
-                "secondary Backend Profile is not configured or active",
+            (Some(_), None) | (None, None) => mark_database_validation_not_performed(
+                RestoreDrillStorageResult::not_applicable(
+                    profile.profile.clone(),
+                    "secondary",
+                    "secondary Backend Profile is not configured or active",
+                ),
+                profile.database_type,
             ),
         };
         storage_results.push(secondary);
@@ -1152,6 +1190,7 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
     clock: &C,
     profile: &str,
     storage: &RestoreDrillStorageConfig,
+    database_type: Option<DatabaseType>,
 ) -> Result<RestoreDrillStorageResult> {
     let operation_start = clock.now();
     let environment = storage
@@ -1161,17 +1200,16 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
         .collect::<Vec<_>>();
     if let Err(error) = prepare_restore_drill_work_dir(&config.restore_drill_work_dir) {
         let operation_finish = clock.now();
-        return Ok(RestoreDrillStorageResult::not_performed(
-            profile,
-            &storage.backend,
-            error.to_string(),
-        )
-        .with_timing(
-            operation_start.wall_clock,
-            operation_finish.wall_clock,
-            operation_finish
-                .monotonic_milliseconds
-                .saturating_sub(operation_start.monotonic_milliseconds),
+        return Ok(mark_database_validation_not_performed(
+            RestoreDrillStorageResult::not_performed(profile, &storage.backend, error.to_string())
+                .with_timing(
+                    operation_start.wall_clock,
+                    operation_finish.wall_clock,
+                    operation_finish
+                        .monotonic_milliseconds
+                        .saturating_sub(operation_start.monotonic_milliseconds),
+                ),
+            database_type,
         ));
     }
     let selection = select_latest_tagged_snapshot_with_env(
@@ -1198,12 +1236,15 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
             ),
             _ => RestoreDrillStorageResult::not_performed(profile, &storage.backend, diagnostic),
         };
-        return Ok(result.with_timing(
-            operation_start.wall_clock,
-            operation_finish.wall_clock,
-            operation_finish
-                .monotonic_milliseconds
-                .saturating_sub(operation_start.monotonic_milliseconds),
+        return Ok(mark_database_validation_not_performed(
+            result.with_timing(
+                operation_start.wall_clock,
+                operation_finish.wall_clock,
+                operation_finish
+                    .monotonic_milliseconds
+                    .saturating_sub(operation_start.monotonic_milliseconds),
+            ),
+            database_type,
         ));
     }
     let snapshot_id = selection
@@ -1222,17 +1263,20 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
         Ok(target) => target,
         Err(error) => {
             let operation_finish = clock.now();
-            return Ok(RestoreDrillStorageResult::not_performed(
-                profile,
-                &storage.backend,
-                format!("restore drill work directory could not be prepared: {error}"),
-            )
-            .with_timing(
-                operation_start.wall_clock,
-                operation_finish.wall_clock,
-                operation_finish
-                    .monotonic_milliseconds
-                    .saturating_sub(operation_start.monotonic_milliseconds),
+            return Ok(mark_database_validation_not_performed(
+                RestoreDrillStorageResult::not_performed(
+                    profile,
+                    &storage.backend,
+                    format!("restore drill work directory could not be prepared: {error}"),
+                )
+                .with_timing(
+                    operation_start.wall_clock,
+                    operation_finish.wall_clock,
+                    operation_finish
+                        .monotonic_milliseconds
+                        .saturating_sub(operation_start.monotonic_milliseconds),
+                ),
+                database_type,
             ));
         }
     };
@@ -1249,22 +1293,8 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
         .monotonic_milliseconds
         .saturating_sub(operation_start.monotonic_milliseconds);
     if let Err(error) = restore {
-        return Ok(RestoreDrillStorageResult::failed_after_snapshot(
-            profile,
-            &storage.backend,
-            snapshot_id,
-            snapshot_time,
-            operation_start.wall_clock,
-            operation_finish.wall_clock,
-            elapsed_milliseconds,
-            error.to_string(),
-        ));
-    }
-
-    let metrics = match measure_restore_output(target.path(), config.database_stream) {
-        Ok(metrics) => metrics,
-        Err(error) => {
-            return Ok(RestoreDrillStorageResult::failed_after_snapshot(
+        return Ok(mark_database_validation_not_performed(
+            RestoreDrillStorageResult::failed_after_snapshot(
                 profile,
                 &storage.backend,
                 snapshot_id,
@@ -1273,6 +1303,31 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
                 operation_finish.wall_clock,
                 elapsed_milliseconds,
                 error.to_string(),
+            ),
+            database_type,
+        ));
+    }
+
+    let metrics = if let Some(database_type) = database_type {
+        measure_restore_output_for_database(target.path(), database_type)
+    } else {
+        measure_restore_output(target.path(), false)
+    };
+    let metrics = match metrics {
+        Ok(metrics) => metrics,
+        Err(error) => {
+            return Ok(mark_database_validation_not_performed(
+                RestoreDrillStorageResult::failed_after_snapshot(
+                    profile,
+                    &storage.backend,
+                    snapshot_id,
+                    snapshot_time,
+                    operation_start.wall_clock,
+                    operation_finish.wall_clock,
+                    elapsed_milliseconds,
+                    error.to_string(),
+                ),
+                database_type,
             ));
         }
     };
@@ -1289,12 +1344,28 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
         metrics.validation_method,
         &config.restore_drill_policy,
     );
+    if let Some(validation) = metrics.database_validation.as_ref() {
+        result = result.with_database_verification(
+            DatabaseVerificationEvidence::from_dump_validation(validation),
+        );
+    }
     if let Some(error) = metrics.validation_error {
         result.validation_status = RestoreDrillStatus::Fail;
         result.status = RestoreDrillStatus::Fail;
         result.diagnostic = Some(error);
     }
     Ok(result)
+}
+
+fn mark_database_validation_not_performed(
+    result: RestoreDrillStorageResult,
+    database_type: Option<DatabaseType>,
+) -> RestoreDrillStorageResult {
+    match database_type {
+        Some(database_type) => result
+            .with_database_verification(DatabaseVerificationEvidence::not_performed(database_type)),
+        None => result,
+    }
 }
 
 fn prepare_restore_drill_work_dir(path: &Path) -> Result<()> {

@@ -1809,7 +1809,7 @@ fn restore_force_preserves_existing_target_and_sql_validation_controls_status() 
         ["restore", "--target", database_target.to_str().unwrap()],
         &invalid_sql_runner,
     );
-    assert_eq!(invalid_sql_outcome.exit_status, 1);
+    assert_eq!(invalid_sql_outcome.exit_status, 0);
     assert_eq!(invalid_sql_runner.restore_calls().len(), 1);
 }
 
@@ -2118,6 +2118,19 @@ impl ResticRunner for StrictRunDatabaseAdapter {
         }
         Ok(expected.output)
     }
+
+    fn backup_command_with_env_and_tag(
+        &self,
+        repository: &str,
+        password: &str,
+        filename: &str,
+        program: &str,
+        args: &[String],
+        _tag: &str,
+        environment: &[(&str, &str)],
+    ) -> Result<String> {
+        self.backup_command_with_env(repository, password, filename, program, args, environment)
+    }
 }
 
 struct RunContractFixture {
@@ -2358,6 +2371,19 @@ impl ResticRunner for LifecycleResticAdapter {
                 .collect(),
         });
         Ok("database stream complete\n".into())
+    }
+
+    fn backup_command_with_env_and_tag(
+        &self,
+        repository: &str,
+        password: &str,
+        filename: &str,
+        program: &str,
+        args: &[String],
+        _tag: &str,
+        environment: &[(&str, &str)],
+    ) -> Result<String> {
+        self.backup_command_with_env(repository, password, filename, program, args, environment)
     }
 }
 

@@ -183,6 +183,36 @@ fn restic_database_stream_forwards_credentials_only_through_environment() {
 }
 
 #[test]
+fn restic_database_stream_applies_the_reserved_backup_profile_tag() {
+    let mock = MockExecutor::new();
+    mock.push_output(
+        "restic",
+        CommandOutput {
+            status_code: 0,
+            stdout: "streamed".into(),
+            stderr: String::new(),
+        },
+    );
+    let restic = ResticTool::new(&mock);
+
+    restic
+        .backup_command_with_env_and_tag(
+            "local:/repo",
+            "repository-password",
+            "app.sql",
+            "pg_dump",
+            &[],
+            "backup-profile:database",
+            &[],
+        )
+        .unwrap();
+
+    let args = &mock.get_calls()[0].1;
+    let tag_index = args.iter().position(|arg| arg == "--tag").unwrap();
+    assert_eq!(args[tag_index + 1], "backup-profile:database");
+}
+
+#[test]
 fn test_rclone_tool_with_mock_executor() {
     let mock = MockExecutor::new();
     mock.push_output(

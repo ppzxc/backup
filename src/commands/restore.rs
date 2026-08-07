@@ -1,4 +1,5 @@
-use crate::config::model::BackupConfig;
+use crate::commands::database::{DatabaseDumpValidation, validate_dump_signature};
+use crate::config::model::{BackupConfig, DatabaseType};
 use crate::runner::restic::ResticRunner;
 use anyhow::{Result, bail};
 use secrecy::ExposeSecret;
@@ -35,7 +36,26 @@ pub fn select_storage(config: &BackupConfig, storage: RestoreStorage) -> Result<
 }
 
 pub fn validate_restored_output(target: &Path, database_stream: bool) -> Result<()> {
-    validate_restored_output_against(target, database_stream, &[])
+    validate_restored_output_against(
+        target,
+        if database_stream {
+            DatabaseValidationExpectation::Any
+        } else {
+            DatabaseValidationExpectation::None
+        },
+        &[],
+    )
+}
+
+pub fn validate_restored_output_for_database(
+    target: &Path,
+    database_type: DatabaseType,
+) -> Result<()> {
+    validate_restored_output_against(
+        target,
+        DatabaseValidationExpectation::Typed(database_type),
+        &[],
+    )
 }
 
 /// Measurements captured from one restore target. The Restore Drill uses these values as its
@@ -46,6 +66,7 @@ pub struct RestoreOutputMetrics {
     pub total_bytes: u64,
     pub validation_method: String,
     pub validation_error: Option<String>,
+    pub database_validation: Option<DatabaseDumpValidation>,
 }
 
 impl RestoreOutputMetrics {
@@ -83,12 +104,43 @@ fn restore_file_states(target: &Path) -> Result<Vec<RestoreFileState>> {
     Ok(states)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatabaseValidationExpectation {
+    None,
+    Any,
+    Typed(DatabaseType),
+}
+
 /// Measures regular files and validates the optional Database Stream signature without importing
 /// data into an operating database. Semantic validation failures remain in the returned metrics so
 /// the Restore Drill can write a complete failure Evidence artifact.
 pub fn measure_restore_output(
     target: &Path,
     database_stream: bool,
+) -> Result<RestoreOutputMetrics> {
+    measure_restore_output_with_expectation(
+        target,
+        if database_stream {
+            DatabaseValidationExpectation::Any
+        } else {
+            DatabaseValidationExpectation::None
+        },
+    )
+}
+
+pub fn measure_restore_output_for_database(
+    target: &Path,
+    database_type: DatabaseType,
+) -> Result<RestoreOutputMetrics> {
+    measure_restore_output_with_expectation(
+        target,
+        DatabaseValidationExpectation::Typed(database_type),
+    )
+}
+
+fn measure_restore_output_with_expectation(
+    target: &Path,
+    database_expectation: DatabaseValidationExpectation,
 ) -> Result<RestoreOutputMetrics> {
     if !target
         .symlink_metadata()
@@ -100,12 +152,24 @@ pub fn measure_restore_output(
     let states = restore_file_states(target)?;
     let file_count = states.len() as u64;
     let total_bytes = states.iter().map(|state| state.length).sum();
-    let validation_method = if database_stream {
-        "regular file count, total bytes, and SQL dump signature"
-    } else {
-        "regular file count and total bytes"
-    }
-    .to_string();
+    let validation_method = match database_expectation {
+        DatabaseValidationExpectation::None => "regular file count and total bytes".to_string(),
+        DatabaseValidationExpectation::Any => {
+            "regular file count, total bytes, and supported SQL dump signature".to_string()
+        }
+        DatabaseValidationExpectation::Typed(database_type) => format!(
+            "regular file count, total bytes, and {}",
+            DatabaseDumpValidation::expected_signature(database_type)
+        ),
+    };
+    let mut database_validation = match database_expectation {
+        DatabaseValidationExpectation::Typed(database_type) => Some(DatabaseDumpValidation {
+            database_type,
+            expected_signature: DatabaseDumpValidation::expected_signature(database_type).into(),
+            signature_verified: false,
+        }),
+        DatabaseValidationExpectation::None | DatabaseValidationExpectation::Any => None,
+    };
     let mut validation_error = if file_count == 0 {
         Some("Restore Output Validation produced no regular files".into())
     } else if total_bytes == 0 {
@@ -114,32 +178,63 @@ pub fn measure_restore_output(
         None
     };
 
-    if database_stream && validation_error.is_none() {
-        let files = states
+    if !matches!(database_expectation, DatabaseValidationExpectation::None)
+        && validation_error.is_none()
+    {
+        let dumps = states
             .iter()
-            .filter(|state| state.length > 0)
-            .map(|state| state.path.as_path())
+            .filter(|state| {
+                state
+                    .path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("sql"))
+            })
             .collect::<Vec<_>>();
-        let Some(dump) = files.iter().find(|path| {
-            path.extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("sql"))
-        }) else {
+        if dumps.is_empty() {
             validation_error = Some("Database Stream restore did not produce a SQL dump".into());
-            return Ok(RestoreOutputMetrics {
-                file_count,
-                total_bytes,
-                validation_method,
-                validation_error,
-            });
-        };
-        let content = std::fs::read_to_string(dump)?;
-        let looks_like_sql = content.starts_with("--")
-            || content.contains("CREATE ")
-            || content.contains("SET ")
-            || content.contains("INSERT ");
-        if !looks_like_sql {
+        } else if dumps.len() > 1 {
             validation_error =
-                Some("Database Stream restore produced an invalid SQL dump format".into());
+                Some("Database Stream restore produced multiple SQL dump files".into());
+        } else if dumps[0].length == 0 {
+            validation_error = Some("Database Stream restore produced an empty SQL dump".into());
+        } else {
+            let dump_content = std::fs::read_to_string(&dumps[0].path).ok();
+            let signature_matches =
+                dump_content
+                    .as_deref()
+                    .is_some_and(|content| match database_expectation {
+                        DatabaseValidationExpectation::Any => {
+                            validate_dump_signature(content, DatabaseType::Mysql).signature_verified
+                                || validate_dump_signature(content, DatabaseType::Postgres)
+                                    .signature_verified
+                        }
+                        DatabaseValidationExpectation::Typed(expected) => {
+                            validate_dump_signature(content, expected).signature_verified
+                        }
+                        DatabaseValidationExpectation::None => false,
+                    });
+            let any_signature_matches = dump_content.as_deref().is_some_and(|content| {
+                validate_dump_signature(content, DatabaseType::Mysql).signature_verified
+                    || validate_dump_signature(content, DatabaseType::Postgres).signature_verified
+            });
+            if let Some(validation) = database_validation.as_mut() {
+                validation.signature_verified = signature_matches;
+            }
+            if !signature_matches {
+                validation_error = Some(match database_expectation {
+                    DatabaseValidationExpectation::Any => {
+                        "Database Stream restore produced an invalid SQL dump signature".into()
+                    }
+                    DatabaseValidationExpectation::Typed(_) => {
+                        if any_signature_matches {
+                            "Database Stream dump signature does not match the configured database type".into()
+                        } else {
+                            "Database Stream restore produced an invalid SQL dump signature".into()
+                        }
+                    }
+                    DatabaseValidationExpectation::None => unreachable!(),
+                });
+            }
         }
     }
 
@@ -148,12 +243,13 @@ pub fn measure_restore_output(
         total_bytes,
         validation_method,
         validation_error,
+        database_validation,
     })
 }
 
 fn validate_restored_output_against(
     target: &Path,
-    database_stream: bool,
+    database_expectation: DatabaseValidationExpectation,
     baseline: &[RestoreFileState],
 ) -> Result<()> {
     if !target
@@ -163,7 +259,7 @@ fn validate_restored_output_against(
     {
         bail!("Restore target was not created");
     }
-    let metrics = measure_restore_output(target, database_stream)?;
+    let metrics = measure_restore_output_with_expectation(target, database_expectation)?;
     if metrics.file_count == 0 || metrics.total_bytes == 0 {
         bail!("Restore completed but produced no non-empty output");
     }
@@ -268,14 +364,9 @@ pub fn execute_restore_from_storage<R: ResticRunner>(
     };
     let (repository, password) = select_storage(config, storage)?;
     let result = runner.restore(repository, password, snapshot_id, target_path)?;
-    validate_restored_output_against(
-        target,
-        matches!(
-            config.backup.backup_type,
-            crate::config::model::BackupType::DbStream { .. }
-        ),
-        &baseline,
-    )?;
+    // This compatibility API has no exact Backup Profile selector. Typed Database Stream
+    // validation is intentionally reserved for the profile-scoped Restore Drill path.
+    validate_restored_output_against(target, DatabaseValidationExpectation::None, &baseline)?;
     Ok(result)
 }
 
@@ -313,11 +404,9 @@ pub fn execute_restore_from_profiles<R: ResticRunner + ?Sized>(
         target_path,
         &environment,
     )?;
-    let database_stream = config
-        .application
-        .as_ref()
-        .and_then(|application| application.database.as_ref())
-        .is_some();
-    validate_restored_output_against(target, database_stream, &baseline)?;
+    // The generic restore command has no exact Backup Profile selector. It must not infer a
+    // Database Stream expectation from application metadata and apply it to every snapshot;
+    // typed Database Stream validation belongs to the profile-scoped Restore Drill.
+    validate_restored_output_against(target, DatabaseValidationExpectation::None, &baseline)?;
     Ok(result)
 }

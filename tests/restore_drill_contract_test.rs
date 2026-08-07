@@ -3,10 +3,10 @@ use backup::commands::report::restore_drill::{
     RestoreDrillClock, RestoreDrillStatus, RestoreDrillTimestamp,
 };
 use backup::commands::report::{
-    ReportConfig, execute_restore_drill_evidence_export,
-    execute_restore_drill_with_runner_and_clock,
+    ReportConfig, RestoreDrillProfileConfig, RestoreDrillStorageConfig,
+    execute_restore_drill_evidence_export, execute_restore_drill_with_runner_and_clock,
 };
-use backup::config::model::ResticProfileConfig;
+use backup::config::model::{DatabaseType, ResticProfileConfig};
 use backup::runner::restic::ResticRunner;
 use backup::runner::snapshot::SnapshotInfo;
 use secrecy::SecretString;
@@ -143,6 +143,116 @@ fn config(root: &Path) -> ReportConfig {
     config
 }
 
+struct DatabaseProfileRunner {
+    calls: Mutex<Vec<String>>,
+    snapshots: Vec<SnapshotInfo>,
+    restore_filename: Option<String>,
+    restore_content: String,
+}
+
+impl DatabaseProfileRunner {
+    fn new(snapshots: Vec<SnapshotInfo>) -> Self {
+        Self::with_restore_output(
+            snapshots,
+            Some("database.sql"),
+            "-- PostgreSQL database dump\nCREATE TABLE items (id integer);",
+        )
+    }
+
+    fn with_restore_output(
+        snapshots: Vec<SnapshotInfo>,
+        restore_filename: Option<&str>,
+        restore_content: &str,
+    ) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            snapshots,
+            restore_filename: restore_filename.map(str::to_owned),
+            restore_content: restore_content.into(),
+        }
+    }
+
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn unsupported(&self, operation: &str) -> Result<String> {
+        anyhow::bail!("unexpected database restore drill operation: {operation}")
+    }
+}
+
+impl ResticRunner for DatabaseProfileRunner {
+    fn init_repo(&self, _: &str, _: &str) -> Result<String> {
+        self.unsupported("init")
+    }
+
+    fn backup_paths(&self, _: &str, _: &str, _: &[String], _: &[String]) -> Result<String> {
+        self.unsupported("backup")
+    }
+
+    fn list_snapshots(&self, _: &str, _: &str) -> Result<String> {
+        self.unsupported("list_snapshots")
+    }
+
+    fn list_snapshot_infos(&self, repository: &str, password: &str) -> Result<Vec<SnapshotInfo>> {
+        self.list_snapshot_infos_with_env(repository, password, &[])
+    }
+
+    fn list_snapshot_infos_with_env(
+        &self,
+        repository: &str,
+        password: &str,
+        environment: &[(&str, &str)],
+    ) -> Result<Vec<SnapshotInfo>> {
+        assert_eq!(repository, "/primary");
+        assert_eq!(password, "primary-secret");
+        assert!(environment.is_empty());
+        self.calls.lock().unwrap().push("list".into());
+        Ok(self.snapshots.clone())
+    }
+
+    fn restore(&self, _: &str, _: &str, _: &str, _: &str) -> Result<String> {
+        self.unsupported("restore without environment")
+    }
+
+    fn restore_with_env_and_timeout(
+        &self,
+        repository: &str,
+        password: &str,
+        snapshot: &str,
+        target: &str,
+        environment: &[(&str, &str)],
+        timeout: std::time::Duration,
+    ) -> Result<String> {
+        assert_eq!(repository, "/primary");
+        assert_eq!(password, "primary-secret");
+        assert_eq!(snapshot, "database-snapshot-001");
+        assert!(environment.is_empty());
+        assert_eq!(timeout, std::time::Duration::from_secs(14_400));
+        self.calls.lock().unwrap().push("restore".into());
+        if let Some(filename) = &self.restore_filename {
+            fs::write(Path::new(target).join(filename), &self.restore_content)?;
+        }
+        Ok("restored".into())
+    }
+
+    fn backup_command(&self, _: &str, _: &str, _: &str, _: &str, _: &[String]) -> Result<String> {
+        self.unsupported("backup_command")
+    }
+
+    fn backup_command_with_env(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &[String],
+        _: &[(&str, &str)],
+    ) -> Result<String> {
+        self.unsupported("backup_command_with_env")
+    }
+}
+
 #[test]
 fn restore_drill_policy_is_loaded_from_audit_metadata_with_documented_defaults() {
     let temp = tempdir().unwrap();
@@ -203,6 +313,212 @@ fn restore_drill_policy_is_loaded_from_audit_metadata_with_documented_defaults()
         )
         .unwrap();
         assert!(ResticProfileConfig::load_from_path(&invalid).is_err());
+    }
+}
+
+#[test]
+fn restore_drill_restores_database_profile_by_reserved_tag_and_validates_signature() {
+    let temp = tempdir().unwrap();
+    let password = temp.path().join("primary-password");
+    fs::write(&password, "primary-secret").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&password, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let profiles_path = temp.path().join("profiles.yaml");
+    fs::write(
+        &profiles_path,
+        format!(
+            "version: '2'\napplication:\n  database:\n    profile: database\n    type: postgres\n    connection-url: ${{BACKUP_DATABASE_CONNECTION_URL}}\nprofiles:\n  primary:\n    repository: /primary\n    password-file: {}\n  database:\n    inherit: primary\n",
+            password.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("database-connection-url"),
+        "postgres://backup-user:db-secret@db:5432/app",
+    )
+    .unwrap();
+    let profiles = ResticProfileConfig::load_from_path(&profiles_path).unwrap();
+    let mut config = ReportConfig::from_profiles(&profiles, &profiles_path).unwrap();
+    config.restore_drill_work_dir = temp.path().join("restore-drill");
+
+    assert_eq!(config.database_type, Some(DatabaseType::Postgres));
+    assert_eq!(config.restore_drill_profiles.len(), 1);
+    assert_eq!(
+        config.restore_drill_profiles[0].database_type,
+        Some(DatabaseType::Postgres)
+    );
+
+    let runner = DatabaseProfileRunner::with_restore_output(
+        vec![SnapshotInfo {
+            id: "database-snapshot-001".into(),
+            timestamp: "2026-08-07T09:00:00Z".into(),
+            tags: vec!["backup-profile:database".into()],
+        }],
+        Some("database.sql"),
+        "-- PostgreSQL database dump\nCREATE TABLE items (id integer);\n-- db-secret",
+    );
+    let clock = FixedClock::new([
+        timestamp("2026-08-07T10:00:00+09:00", 10_000),
+        timestamp("2026-08-07T10:00:01+09:00", 11_000),
+        timestamp("2026-08-07T10:00:04+09:00", 14_421),
+        timestamp("2026-08-07T10:00:05+09:00", 15_000),
+    ]);
+
+    let evidence = execute_restore_drill_with_runner_and_clock(&config, &runner, &clock).unwrap();
+
+    assert_eq!(runner.calls(), ["list", "restore"]);
+    assert_eq!(evidence.overall_status, RestoreDrillStatus::Pass);
+    let result = &evidence.storage_results[0];
+    assert_eq!(result.profile, "database");
+    assert_eq!(result.snapshot_id.as_deref(), Some("database-snapshot-001"));
+    let verification = result.database_verification.as_ref().unwrap();
+    assert_eq!(verification.db_type, DatabaseType::Postgres);
+    assert!(verification.signature_verified);
+    assert!(!verification.import_performed);
+    assert!(!verification.record_validation_performed);
+
+    let json = backup::commands::report::render_restore_drill_evidence_json(&evidence).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["target_snapshot_id"], "database-snapshot-001");
+    assert_eq!(
+        value["recovery_results"]["database_verification"]["signature_verified"],
+        true
+    );
+    assert!(!json.contains("BACKUP_DATABASE_CONNECTION_URL"));
+    assert!(!json.contains("primary-secret"));
+    assert!(!json.contains("postgres://backup-user:db-secret@db:5432/app"));
+    assert!(!json.contains("db-secret"));
+    let html = backup::commands::report::render_restore_drill_evidence_html(&evidence);
+    assert!(!html.contains("postgres://backup-user:db-secret@db:5432/app"));
+    assert!(!html.contains("db-secret"));
+}
+
+#[test]
+fn restore_drill_marks_database_validation_not_performed_when_backend_is_unconfigured() {
+    let temp = tempdir().unwrap();
+    let mut report_config = config(temp.path());
+    report_config.profile = "database".into();
+    report_config.database_type = Some(DatabaseType::Mysql);
+    report_config.restore_drill_profiles = vec![RestoreDrillProfileConfig {
+        profile: "database".into(),
+        database_type: Some(DatabaseType::Mysql),
+        primary: Some(RestoreDrillStorageConfig {
+            backend: "primary".into(),
+            repository: String::new(),
+            password: SecretString::new(String::new()),
+            environment: Vec::new(),
+        }),
+        secondary: None,
+        secondary_diagnostic: None,
+    }];
+    let runner = DatabaseProfileRunner::new(Vec::new());
+    let clock = FixedClock::new([
+        timestamp("2026-08-07T10:00:00+09:00", 10_000),
+        timestamp("2026-08-07T10:00:01+09:00", 11_000),
+        timestamp("2026-08-07T10:00:02+09:00", 12_000),
+        timestamp("2026-08-07T10:00:03+09:00", 13_000),
+    ]);
+
+    let evidence =
+        execute_restore_drill_with_runner_and_clock(&report_config, &runner, &clock).unwrap();
+    assert_eq!(runner.calls(), Vec::<String>::new());
+    let primary = &evidence.storage_results[0];
+    let verification = primary.database_verification.as_ref().unwrap();
+    assert_eq!(primary.status, RestoreDrillStatus::NotPerformed);
+    assert_eq!(verification.db_type, DatabaseType::Mysql);
+    assert_eq!(
+        verification.signature_status,
+        RestoreDrillStatus::NotPerformed
+    );
+    let json = backup::commands::report::render_restore_drill_evidence_json(&evidence).unwrap();
+    assert_ne!(
+        serde_json::from_str::<serde_json::Value>(&json).unwrap()["recovery_results"]["database_verification"],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn restore_drill_reports_each_database_signature_failure_for_both_supported_types() {
+    let failure_cases = [
+        ("missing dump", None, ""),
+        ("empty dump", Some("database.sql"), ""),
+        ("wrong extension", Some("database.txt"), "valid dump"),
+        (
+            "invalid content",
+            Some("database.sql"),
+            "not a database dump",
+        ),
+    ];
+
+    for database_type in [DatabaseType::Mysql, DatabaseType::Postgres] {
+        let mismatched_dump = match database_type {
+            DatabaseType::Mysql => "-- PostgreSQL database dump\nCREATE TABLE items (id int);",
+            DatabaseType::Postgres => "-- MySQL dump 10.11\nCREATE TABLE items (id int);",
+        };
+        let cases = failure_cases.into_iter().chain(std::iter::once((
+            "database type mismatch",
+            Some("database.sql"),
+            mismatched_dump,
+        )));
+
+        for (name, filename, content) in cases {
+            let temp = tempdir().unwrap();
+            let mut report_config = config(temp.path());
+            report_config.profile = "database".into();
+            report_config.database_type = Some(database_type);
+            report_config.restore_drill_profiles = vec![RestoreDrillProfileConfig {
+                profile: "database".into(),
+                database_type: Some(database_type),
+                primary: Some(RestoreDrillStorageConfig {
+                    backend: "primary".into(),
+                    repository: "/primary".into(),
+                    password: SecretString::new("primary-secret".into()),
+                    environment: Vec::new(),
+                }),
+                secondary: None,
+                secondary_diagnostic: None,
+            }];
+            let runner = DatabaseProfileRunner::with_restore_output(
+                vec![SnapshotInfo {
+                    id: "database-snapshot-001".into(),
+                    timestamp: "2026-08-07T09:00:00Z".into(),
+                    tags: vec!["backup-profile:database".into()],
+                }],
+                filename,
+                content,
+            );
+            let clock = FixedClock::new([
+                timestamp("2026-08-07T10:00:00+09:00", 10_000),
+                timestamp("2026-08-07T10:00:01+09:00", 11_000),
+                timestamp("2026-08-07T10:00:04+09:00", 14_000),
+                timestamp("2026-08-07T10:00:05+09:00", 15_000),
+            ]);
+
+            let evidence =
+                execute_restore_drill_with_runner_and_clock(&report_config, &runner, &clock)
+                    .unwrap();
+            let result = &evidence.storage_results[0];
+            let verification = result.database_verification.as_ref().unwrap();
+            assert_eq!(
+                evidence.overall_status,
+                RestoreDrillStatus::Fail,
+                "case={name}, type={database_type}"
+            );
+            assert_eq!(result.status, RestoreDrillStatus::Fail, "case={name}");
+            assert_eq!(result.validation_status, RestoreDrillStatus::Fail);
+            assert_eq!(verification.db_type, database_type);
+            assert!(!verification.signature_verified, "case={name}");
+            assert_eq!(
+                verification.signature_status,
+                RestoreDrillStatus::Fail,
+                "case={name}"
+            );
+            assert!(!verification.import_performed);
+            assert!(!verification.record_validation_performed);
+        }
     }
 }
 

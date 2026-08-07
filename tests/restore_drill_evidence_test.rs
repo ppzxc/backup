@@ -1,7 +1,9 @@
 use backup::commands::report::restore_drill::{
-    RestoreDrillEvidence, RestoreDrillPolicy, RestoreDrillStatus, RestoreDrillStorageResult,
-    render_restore_drill_evidence_html, render_restore_drill_evidence_json,
+    DatabaseVerificationEvidence, RestoreDrillEvidence, RestoreDrillPolicy, RestoreDrillStatus,
+    RestoreDrillStorageResult, render_restore_drill_evidence_html,
+    render_restore_drill_evidence_json,
 };
+use backup::config::model::DatabaseType;
 
 fn passing_evidence() -> RestoreDrillEvidence {
     let policy = RestoreDrillPolicy::new(120, 240).unwrap();
@@ -92,6 +94,58 @@ fn html_and_json_render_the_same_injected_restore_drill_evidence() {
     assert_eq!(value["recovery_results"]["rto_satisfied"], true);
     assert_eq!(value["recovery_results"]["data_integrity_verified"], true);
     assert_eq!(value["schema_version"], "1");
+}
+
+#[test]
+fn database_evidence_reports_signature_scope_without_claiming_import_or_record_validation() {
+    let policy = RestoreDrillPolicy::default();
+    let result = RestoreDrillStorageResult::measured(
+        "database",
+        "primary",
+        "database-snapshot-001",
+        "2026-08-07T09:59:00Z",
+        "2026-08-07T10:00:01+09:00",
+        "2026-08-07T10:00:04+09:00",
+        3_421,
+        1,
+        4096,
+        "regular file count, total bytes, and PostgreSQL pg_dump SQL signature",
+        &policy,
+    )
+    .with_database_verification(DatabaseVerificationEvidence {
+        db_type: DatabaseType::Postgres,
+        expected_signature: "PostgreSQL pg_dump SQL signature".into(),
+        signature_verified: true,
+        signature_status: RestoreDrillStatus::Pass,
+        validation_scope: "SQL dump signature only".into(),
+        db_integrity_verified: false,
+        import_performed: false,
+        record_validation_performed: false,
+    });
+    let evidence = RestoreDrillEvidence::new(
+        "drill-database-001",
+        "2026-08-07T10:00:00+09:00",
+        "2026-08-07T10:00:04+09:00",
+        policy,
+        vec![result],
+    );
+
+    let json = render_restore_drill_evidence_json(&evidence).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let database = &value["recovery_results"]["database_verification"];
+    assert_eq!(database["db_type"], "postgres");
+    assert_eq!(database["db_snapshot_id"], "database-snapshot-001");
+    assert_eq!(database["signature_verified"], true);
+    assert_eq!(database["validation_scope"], "SQL dump signature only");
+    assert_eq!(database["db_integrity_verified"], false);
+    assert_eq!(database["import_performed"], false);
+    assert_eq!(database["record_validation_performed"], false);
+    assert_eq!(value["recovery_results"]["data_integrity_verified"], true);
+
+    let html = render_restore_drill_evidence_html(&evidence);
+    assert!(html.contains("PostgreSQL pg_dump SQL signature"));
+    assert!(html.contains("SQL dump signature only"));
+    assert!(html.contains("not performed"));
 }
 
 #[test]

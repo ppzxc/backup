@@ -264,10 +264,16 @@ pub fn render_json_real(report_type: ReportType, data: &RealReportData) -> Resul
                     rto_satisfied: false,
                     data_integrity_verified: false,
                     database_verification: serde_json::json!({
-                        "db_type": null,
+                        "db_type": data.config.database_type.map(|database_type| database_type.to_string()),
                         "db_snapshot_id": null,
                         "db_snapshot_time": null,
-                        "db_integrity_verified": null
+                        "expected_signature": data.config.database_type.map(crate::commands::database::DatabaseDumpValidation::expected_signature),
+                        "signature_verified": null,
+                        "signature_status": "not_performed",
+                        "validation_scope": "SQL dump signature only",
+                        "db_integrity_verified": false,
+                        "import_performed": false,
+                        "record_validation_performed": false
                     }),
                 },
             };

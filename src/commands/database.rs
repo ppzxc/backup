@@ -1,8 +1,54 @@
-use crate::config::model::{BackupConfig, BackupType, DatabaseType};
+use crate::config::model::{BackupConfig, BackupType, DatabaseType, backup_profile_snapshot_tag};
 use crate::runner::restic::ResticRunner;
 use anyhow::{Result, bail};
 use secrecy::ExposeSecret;
 use std::path::Path;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatabaseDumpValidation {
+    pub database_type: DatabaseType,
+    pub expected_signature: String,
+    pub signature_verified: bool,
+}
+
+impl DatabaseDumpValidation {
+    pub fn expected_signature(database_type: DatabaseType) -> &'static str {
+        match database_type {
+            DatabaseType::Mysql => "MySQL/MariaDB mysqldump SQL signature",
+            DatabaseType::Postgres => "PostgreSQL pg_dump SQL signature",
+        }
+    }
+}
+
+/// Performs the pure, structural Database Backup Adapter check for a plain SQL dump.
+///
+/// This deliberately does not import the dump or execute any schema/table/record query.
+pub fn validate_dump_signature(
+    content: &str,
+    database_type: DatabaseType,
+) -> DatabaseDumpValidation {
+    let normalized = content.to_ascii_lowercase();
+    let detected_type = if normalized
+        .lines()
+        .map(str::trim_start)
+        .any(|line| line.starts_with("-- mysql dump") || line.starts_with("-- mariadb dump"))
+    {
+        Some(DatabaseType::Mysql)
+    } else if normalized
+        .lines()
+        .map(str::trim_start)
+        .any(|line| line.starts_with("-- postgresql database dump"))
+    {
+        Some(DatabaseType::Postgres)
+    } else {
+        None
+    };
+    DatabaseDumpValidation {
+        database_type,
+        expected_signature: DatabaseDumpValidation::expected_signature(database_type).into(),
+        signature_verified: detected_type == Some(database_type),
+    }
+}
 
 pub fn execute_database_backup_from_profiles<R: ResticRunner + ?Sized>(
     config: &crate::config::model::ResticProfileConfig,
@@ -39,12 +85,13 @@ pub fn execute_database_backup_from_profiles<R: ResticRunner + ?Sized>(
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect::<Vec<_>>();
-    runner.backup_command_with_env(
+    runner.backup_command_with_env_and_tag(
         &repository,
         &password,
         &filename,
         program,
         &args,
+        &backup_profile_snapshot_tag(&database.profile),
         &environment,
     )
 }
@@ -82,12 +129,13 @@ pub fn execute_database_backup<R: ResticRunner>(
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect::<Vec<_>>();
-    runner.backup_command_with_env(
+    runner.backup_command_with_env_and_tag(
         &config.storage.primary.repository,
         config.storage.primary.password.expose_secret(),
         &filename,
         program,
         &args,
+        &backup_profile_snapshot_tag(&config.profile),
         &env_refs,
     )
 }
@@ -152,7 +200,7 @@ fn dump_command(
 
 #[cfg(test)]
 mod tests {
-    use super::{DatabaseType, dump_command};
+    use super::{DatabaseType, dump_command, validate_dump_signature};
 
     #[test]
     fn dump_command_builds_postgres_arguments_and_secret_environment() {
@@ -185,5 +233,40 @@ mod tests {
         let missing_credentials =
             dump_command(DatabaseType::Postgres, "postgres://user@db/app").unwrap_err();
         assert!(missing_credentials.to_string().contains("credentials"));
+    }
+
+    #[test]
+    fn dump_signature_validation_supports_mysql_mariadb_and_postgres() {
+        for (database_type, content) in [
+            (
+                DatabaseType::Mysql,
+                "-- MySQL dump 10.13\nCREATE TABLE items (id int);",
+            ),
+            (
+                DatabaseType::Mysql,
+                "-- MariaDB dump 10.11\nCREATE TABLE items (id int);",
+            ),
+            (
+                DatabaseType::Postgres,
+                "-- PostgreSQL database dump\nCREATE TABLE items (id integer);",
+            ),
+        ] {
+            assert!(validate_dump_signature(content, database_type).signature_verified);
+        }
+    }
+
+    #[test]
+    fn dump_signature_validation_rejects_generic_sql_and_database_type_mismatch() {
+        assert!(
+            !validate_dump_signature("CREATE TABLE items (id int);", DatabaseType::Postgres,)
+                .signature_verified
+        );
+        assert!(
+            !validate_dump_signature(
+                "-- PostgreSQL database dump\nCREATE TABLE items (id int);",
+                DatabaseType::Mysql,
+            )
+            .signature_verified
+        );
     }
 }

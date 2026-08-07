@@ -1,4 +1,4 @@
-use backup::commands::restore::execute_restore;
+use backup::commands::restore::{execute_restore, measure_restore_output_for_database};
 use backup::commands::snapshots::execute_snapshots;
 use backup::config::model::*;
 mod support;
@@ -80,6 +80,101 @@ fn restore_validation_accepts_nonempty_database_sql_dump() {
     )
     .unwrap();
     backup::commands::restore::validate_restored_output(dir.path(), true).unwrap();
+}
+
+#[test]
+fn restore_output_validation_checks_typed_database_dump_signatures() {
+    let cases = [
+        (
+            DatabaseType::Mysql,
+            "-- MariaDB dump 10.11\nCREATE TABLE items (id int);",
+        ),
+        (
+            DatabaseType::Postgres,
+            "-- PostgreSQL database dump\nCREATE TABLE items (id integer);",
+        ),
+        (DatabaseType::Mysql, "-- MySQL dump 10.13\n"),
+        (DatabaseType::Postgres, "-- PostgreSQL database dump\n"),
+    ];
+
+    for (database_type, content) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("dump.sql"), content).unwrap();
+
+        let metrics = measure_restore_output_for_database(dir.path(), database_type).unwrap();
+
+        assert!(metrics.validation_passed());
+        assert!(metrics.validation_error.is_none());
+        assert_eq!(
+            metrics
+                .database_validation
+                .as_ref()
+                .map(|validation| validation.signature_verified),
+            Some(true)
+        );
+    }
+}
+
+#[test]
+fn restore_output_validation_rejects_missing_extension_invalid_content_and_type_mismatch() {
+    let cases = [
+        ("missing dump", None, ""),
+        (
+            "wrong extension",
+            Some("dump.txt"),
+            "-- PostgreSQL database dump\nCREATE TABLE items (id int);",
+        ),
+        ("invalid content", Some("dump.sql"), "not a database dump"),
+        (
+            "unsupported comment-only SQL",
+            Some("dump.sql"),
+            "-- unsupported SQL dump\n-- CREATE TABLE items",
+        ),
+        ("empty dump", Some("dump.sql"), ""),
+    ];
+
+    for database_type in [DatabaseType::Mysql, DatabaseType::Postgres] {
+        for (name, filename, content) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            if let Some(filename) = filename {
+                std::fs::write(dir.path().join(filename), content).unwrap();
+            }
+
+            let metrics = measure_restore_output_for_database(dir.path(), database_type).unwrap();
+
+            assert!(
+                !metrics.validation_passed(),
+                "case={name}, type={database_type}"
+            );
+            assert!(metrics.validation_error.is_some(), "case={name}");
+            assert_eq!(
+                metrics
+                    .database_validation
+                    .as_ref()
+                    .map(|validation| validation.signature_verified),
+                Some(false),
+                "case={name}, type={database_type}"
+            );
+        }
+
+        let other_dump = match database_type {
+            DatabaseType::Mysql => "-- PostgreSQL database dump\nCREATE TABLE items (id int);",
+            DatabaseType::Postgres => "-- MySQL dump 10.11\nCREATE TABLE items (id int);",
+        };
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("dump.sql"), other_dump).unwrap();
+        let metrics = measure_restore_output_for_database(dir.path(), database_type).unwrap();
+        assert!(
+            !metrics.validation_passed(),
+            "type mismatch: {database_type}"
+        );
+        assert!(
+            metrics
+                .validation_error
+                .as_deref()
+                .is_some_and(|error| error.contains("does not match"))
+        );
+    }
 }
 
 #[test]
