@@ -536,6 +536,14 @@ fn wizard_storage_script(name: &str, answers: &str, has_secondary: bool) -> Stri
     } else {
         String::new()
     };
+    let expected_pass_count = if has_secondary { 2 } else { 1 };
+    let secondary_assertions = if has_secondary {
+        format!(
+            "grep -Fq '\"profile\": \"{name}\"' \"$drill_base.json\"\ngrep -Fq '\"backend\": \"secondary\"' \"$drill_base.json\""
+        )
+    } else {
+        String::new()
+    };
     format!(
         r#"mkdir -p /work/{name}
 cp /work/e2e-key/id_ed25519 /work/{name}/id_ed25519
@@ -580,6 +588,27 @@ backup --profiles /work/{name}/profiles.yaml restore --target /work/{name}-prima
 assert_tree /work/source /work/{name}-primary/work/source
 {secondary_restore}
 report=$(find /work/reports/{name} -name 'execution-*.json' -print -quit); test -n "$report" && grep -Eq '"snapshot_id": "[^"]+"' "$report"
+drill_base=/work/reports/{name}/restore-drill-evidence
+rm -f "$drill_base.html" "$drill_base.json"
+backup --profiles /work/{name}/profiles.yaml report restore-drill --file "$drill_base"
+test -s "$drill_base.html" && test -s "$drill_base.json"
+execution_id=$(sed -n 's/.*"execution_id": "\([^"]*\)".*/\1/p' "$drill_base.json" | head -n 1)
+test -n "$execution_id"
+grep -Eq '"overall_status": "pass"' "$drill_base.json"
+grep -Fq "$execution_id" "$drill_base.html"
+grep -Eq '"snapshot_id": "[^"]+"' "$drill_base.json"
+grep -Eq '"file_count": [1-9][0-9]*' "$drill_base.json"
+grep -Eq '"total_bytes": [1-9][0-9]*' "$drill_base.json"
+grep -Eq '"elapsed_milliseconds": [1-9][0-9]*' "$drill_base.json"
+grep -Fq '"profile": "{name}"' "$drill_base.json"
+grep -Fq '"backend": "primary"' "$drill_base.json"
+{secondary_assertions}
+pass_count=$(grep -c '"status": "pass"' "$drill_base.json")
+test "$pass_count" -ge {expected_pass_count}
+test "$(stat -c '%a' "$drill_base.html")" = 600
+test "$(stat -c '%a' "$drill_base.json")" = 600
+test "$(stat -c '%a' /work/reports/{name})" = 700
+! grep -Eq 'e2e-password|minioadmin|backuppass' "$drill_base.html" "$drill_base.json"
 backup --profiles /work/{name}/profiles.yaml schedule disable
 if systemctl is-active --quiet backup-pipeline.timer; then
   systemctl status backup-pipeline.timer --no-pager || true
@@ -722,6 +751,23 @@ printf '%s\n' {answers} | BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' TERM=dumb
 for _ in {{1..60}}; do {client} {connection_args} {execute_flag} 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done
 {client} {connection_args} {execute_flag} "{seed}"
 backup --profiles /work/{name}/profiles.yaml database
+drill_base=/work/reports/{name}/database-restore-drill
+rm -f "$drill_base.html" "$drill_base.json"
+backup --profiles /work/{name}/profiles.yaml report restore-drill --file "$drill_base"
+test -s "$drill_base.html" && test -s "$drill_base.json"
+grep -Eq '"overall_status": "pass"' "$drill_base.json"
+grep -Eq '"database_verification": \{{' "$drill_base.json"
+grep -Eq '"signature_verified": true' "$drill_base.json"
+grep -Eq '"import_performed": false' "$drill_base.json"
+grep -Eq '"record_validation_performed": false' "$drill_base.json"
+grep -Eq '"file_count": [1-9][0-9]*' "$drill_base.json"
+grep -Eq '"total_bytes": [1-9][0-9]*' "$drill_base.json"
+grep -Eq '"elapsed_milliseconds": [1-9][0-9]*' "$drill_base.json"
+grep -Fq '"profile": "{name}"' "$drill_base.json"
+grep -Fq '"backend": "primary"' "$drill_base.json"
+test "$(stat -c '%a' "$drill_base.json")" = 600
+test "$(stat -c '%a' /work/reports/{name})" = 700
+! grep -Eq 'rootpass|pgpass|BACKUP_DATABASE_CONNECTION_URL' "$drill_base.html" "$drill_base.json"
 {client} {connection_args} {execute_flag} 'DROP TABLE {table};'
 rm -rf /work/{name}-restore
 backup --profiles /work/{name}/profiles.yaml restore --target /work/{name}-restore

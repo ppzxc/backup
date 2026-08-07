@@ -167,7 +167,12 @@ pub fn render_html_real(report_type: ReportType, data: &RealReportData) -> Strin
         ReportType::All => render_all_html(data),
         ReportType::Environment => render_environment_html(data),
         ReportType::TimeSync => render_time_sync_html(data),
-        ReportType::RestoreDrill => render_restore_drill_html(data),
+        ReportType::RestoreDrill => {
+            crate::commands::report::restore_drill::render_restore_drill_evidence_html_with_os_info(
+                &data.restore_drill_evidence_or_not_performed(),
+                &data.os_info,
+            )
+        }
     }
 }
 
@@ -568,113 +573,6 @@ fn render_time_sync_html(data: &RealReportData) -> String {
         data.chrony_sources,
         data.chrony_tracking,
         chrony_conf_perm_display,
-        data.audit.system_manager_name("시스템 운영팀"),
-        data.audit.security_officer_name("정보보안책임자"),
-    )
-}
-
-fn render_restore_drill_html(data: &RealReportData) -> String {
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="ko">
-<head>
-  <meta charset="UTF-8">
-  <title>백업 데이터 복구 및 정합성 테스트 결과 보고서</title>
-  <style>
-{}
-  </style>
-</head>
-<body>
-
-<div class="report-card">
-  <header>
-    <h1>백업 데이터 복구 및 정합성 테스트 결과 보고서</h1>
-  </header>
-
-  <table class="meta-table">
-    <tr>
-      <td class="label">훈련일시</td>
-      <td>{}</td>
-      <td class="label">훈련 담당</td>
-      <td>{}</td>
-    </tr>
-    <tr>
-      <td class="label">대상 OS</td>
-      <td>{}</td>
-      <td class="label">복원 경로</td>
-      <td>임시 격리 경로</td>
-    </tr>
-    <tr>
-      <td class="label">대상 스냅샷</td>
-      <td>미수행 (실측 Evidence 없음)</td>
-      <td class="label">승인자</td>
-      <td>{}</td>
-    </tr>
-  </table>
-
-  <h2>1. 훈련 개요 및 시나리오</h2>
-  <div style="font-size: 9.5pt; line-height: 1.6; margin-bottom: 20px;">
-    <b>목적:</b> 재해 재난 및 랜섬웨어 상황 시 백업 데이터로부터 서비스 복구가 원활히 수행되며 목표 복구 시간(RTO)을 충족하는지 검증함.<br>
-    <b>수행:</b> 실제 Restore Drill Evidence가 수집된 경우에만 concrete snapshot, Restore Output Validation 및 RTO를 판정함.
-  </div>
-
-  <h2>2. 상세 검증 결과</h2>
-  <table class="data-table">
-    <thead>
-      <tr>
-        <th style="width: 25%;">검토 항목</th>
-        <th style="width: 35%;">보안 감사 및 기술 표준 기준</th>
-        <th style="width: 25%;">실제 측정 수치</th>
-        <th style="width: 15%;">결과 판정</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>[1차] 원본 크기</td>
-        <td>-</td>
-        <td>복원 훈련 실행 로그 참조</td>
-        <td><span class="badge badge-warning">측정 로그 확인 필요</span></td>
-      </tr>
-      <tr>
-        <td>[1차] 복구 시간</td>
-        <td>RTO 기준 {}분 이내 복구</td>
-        <td>실측 Evidence 없음</td>
-        <td><span class="badge badge-warning">미수행</span></td>
-      </tr>
-      <tr>
-        <td>데이터 정합성 상태</td>
-        <td>Restore Output Validation</td>
-        <td>실측 Evidence 없음</td>
-        <td><span class="badge badge-warning">미수행</span></td>
-      </tr>
-    </tbody>
-  </table>
-
-  <h2>3. 특이사항 및 종합 의견</h2>
-  <div style="font-size: 9.5pt; line-height: 1.6; margin-bottom: 20px; background-color: #f8fafc; padding: 12px; border: 1px solid #cbd5e1; border-radius: 4px;">
-    실제 Restore Drill Evidence가 제공되지 않아 복구 성공 또는 RTO 충족을 판정하지 않음.
-  </div>
-
-  <div class="signature-area">
-    <div class="signature-box">
-      <div class="title">작성자</div>
-      <div class="sign">{} (인)</div>
-    </div>
-    <div class="signature-box">
-      <div class="title">승인자</div>
-      <div class="sign">{} (인)</div>
-    </div>
-  </div>
-</div>
-
-</body>
-</html>"#,
-        COMMON_REPORT_CSS,
-        data.timestamp,
-        data.audit.system_manager_name("시스템 운영팀"),
-        data.os_info,
-        data.audit.security_officer_name("정보보안책임자"),
-        data.config.restore_drill_policy.rto_minutes,
         data.audit.system_manager_name("시스템 운영팀"),
         data.audit.security_officer_name("정보보안책임자"),
     )

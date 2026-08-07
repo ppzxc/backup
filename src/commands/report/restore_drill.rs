@@ -394,8 +394,8 @@ impl RestoreDrillStorageResult {
 
 /// Immutable, serializable evidence for one Restore Drill execution.
 ///
-/// The collection side of the future Restore Drill implementation will create this value once.
-/// The render functions below only consume it; they do not query time, filesystems, or adapters.
+/// The Restore Drill collection seam creates this value once. The render functions below only
+/// consume it; they do not query time, filesystems, or adapters.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RestoreDrillEvidence {
     pub schema_version: String,
@@ -474,6 +474,14 @@ impl PartialEq for RestoreDrillEvidence {
 impl Eq for RestoreDrillEvidence {}
 
 impl RestoreDrillEvidence {
+    /// Creates an explicit non-result Evidence value for APIs that were asked to render a Restore
+    /// Drill without first collecting one. It cannot contain a snapshot, timing, or success claim.
+    pub fn not_collected(started_at: impl Into<String>, policy: RestoreDrillPolicy) -> Self {
+        let started_at = started_at.into();
+        Self::new("", started_at.clone(), started_at, policy, Vec::new())
+            .with_diagnostics(vec!["Restore Drill Evidence was not collected".into()])
+    }
+
     pub fn new(
         execution_id: impl Into<String>,
         started_at: impl Into<String>,
@@ -764,7 +772,15 @@ fn performed_label(performed: bool) -> &'static str {
 
 /// Pure HTML renderer for a previously collected Restore Drill Evidence value.
 pub fn render_restore_drill_evidence_html(evidence: &RestoreDrillEvidence) -> String {
-    let evidence = evidence.redacted();
+    render_restore_drill_evidence_html_with_os_info(evidence, "")
+}
+
+/// Pure HTML renderer for Evidence with caller-supplied host metadata.
+pub fn render_restore_drill_evidence_html_with_os_info(
+    evidence: &RestoreDrillEvidence,
+    os_info: &str,
+) -> String {
+    let evidence = renderable_evidence(evidence);
     let mut rows = String::new();
     for result in &evidence.storage_results {
         let diagnostic = result
@@ -834,7 +850,7 @@ pub fn render_restore_drill_evidence_html(evidence: &RestoreDrillEvidence) -> St
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Restore Drill Evidence</title>
+  <title>Restore Drill Evidence - 백업 데이터 복구 및 정합성 테스트 결과 보고서</title>
   <style>
     body {{ font-family: sans-serif; color: #1e293b; background: #f8fafc; margin: 0; padding: 24px; }}
     .evidence-card {{ max-width: 1500px; margin: 0 auto; background: white; padding: 28px; border: 1px solid #cbd5e1; border-radius: 8px; }}
@@ -851,12 +867,13 @@ pub fn render_restore_drill_evidence_html(evidence: &RestoreDrillEvidence) -> St
 </head>
 <body>
 <main class="evidence-card">
-  <h1>Restore Drill Evidence</h1>
+  <h1>Restore Drill Evidence - 백업 데이터 복구 및 정합성 테스트 결과 보고서</h1>
   <table>
     <tr><th>Execution ID</th><td>{}</td><th>Overall status</th><td>{}</td></tr>
     <tr><th>Host</th><td>{}</td><th>Schema version</th><td>{}</td></tr>
     <tr><th>Started</th><td>{}</td><th>Finished</th><td>{}</td></tr>
     <tr><th>RTO policy</th><td>{} minutes</td><th>Timeout policy</th><td>{} minutes</td></tr>
+    <tr><th>OS</th><td>{}</td><th>Tester</th><td>{}</td></tr>
   </table>
 
   <h2>Storage and profile results</h2>
@@ -868,7 +885,7 @@ pub fn render_restore_drill_evidence_html(evidence: &RestoreDrillEvidence) -> St
   <h2>Diagnostics</h2>
   <ul class="diagnostics">{}</ul>
 
-  <p>Tester: {} | CISO: {}</p>
+  <p>CISO: {}</p>
 </main>
 </body>
 </html>"#,
@@ -880,11 +897,18 @@ pub fn render_restore_drill_evidence_html(evidence: &RestoreDrillEvidence) -> St
         escape_html(&evidence.finished_at),
         evidence.rto_policy.rto_minutes,
         evidence.rto_policy.timeout_minutes,
+        escape_html(os_info),
+        escape_html(&evidence.tester),
         rows,
         top_level_diagnostics,
-        escape_html(&evidence.tester),
         escape_html(&evidence.ciso),
     )
+}
+
+fn renderable_evidence(evidence: &RestoreDrillEvidence) -> RestoreDrillEvidence {
+    let mut evidence = evidence.redacted();
+    evidence.overall_status = aggregate_status(&evidence.storage_results);
+    evidence
 }
 
 fn primary_result(evidence: &RestoreDrillEvidence) -> Option<&RestoreDrillStorageResult> {
@@ -895,17 +919,13 @@ fn primary_result(evidence: &RestoreDrillEvidence) -> Option<&RestoreDrillStorag
 }
 
 fn compatibility_result(evidence: &RestoreDrillEvidence) -> Option<&RestoreDrillStorageResult> {
-    evidence
-        .storage_results
-        .iter()
-        .find(|result| result.database_verification.is_some())
-        .or_else(|| primary_result(evidence))
+    primary_result(evidence)
 }
 
 fn human_elapsed(milliseconds: Option<u64>) -> String {
     milliseconds
         .map(|value| format!("{value} ms"))
-        .unwrap_or_else(|| "not measured".into())
+        .unwrap_or_else(|| "—".into())
 }
 
 /// Pure JSON renderer for a previously collected Restore Drill Evidence value.
@@ -913,7 +933,7 @@ fn human_elapsed(milliseconds: Option<u64>) -> String {
 /// The compatibility fields are derived from the primary result in this same value. They remain
 /// present for existing consumers while `storage_results` is the lossless multi-profile contract.
 pub fn render_restore_drill_evidence_json(evidence: &RestoreDrillEvidence) -> Result<String> {
-    let evidence = evidence.redacted();
+    let evidence = renderable_evidence(evidence);
     let database_result = evidence
         .storage_results
         .iter()
@@ -971,35 +991,26 @@ pub fn render_restore_drill_evidence_json(evidence: &RestoreDrillEvidence) -> Re
             object.insert("failure_diagnostic".into(), json!(diagnostic));
         }
     }
-    object.insert(
-        "target_snapshot_id".into(),
-        json!(primary_snapshot_id.unwrap_or_default()),
-    );
-    object.insert(
-        "target_snapshot_time".into(),
-        json!(primary_snapshot_time.unwrap_or_default()),
-    );
+    object.insert("target_snapshot_id".into(), json!(primary_snapshot_id));
+    object.insert("target_snapshot_time".into(), json!(primary_snapshot_time));
     object.insert(
         "recovery_results".into(),
         json!({
             "data_size_human": human_bytes(primary.and_then(|result| result.total_bytes)),
-            "elapsed_seconds": primary_elapsed_seconds.unwrap_or(0),
+            "elapsed_seconds": primary_elapsed_seconds,
             "elapsed_milliseconds": primary_elapsed_ms,
             "elapsed_human": human_elapsed(primary_elapsed_ms),
             "target_rto_minutes": evidence.rto_policy.rto_minutes,
             "timeout_minutes": evidence.rto_policy.timeout_minutes,
-            "rto_satisfied": primary_rto_satisfied.unwrap_or(false),
-            "data_integrity_verified": primary_integrity.unwrap_or(false),
+            "rto_satisfied": primary_rto_satisfied,
+            "data_integrity_verified": primary_integrity,
             "database_verification": database_verification,
         }),
     );
     object.insert("hostname".into(), json!(evidence.hostname));
     object.insert("tester".into(), json!(evidence.tester));
     object.insert("ciso".into(), json!(evidence.ciso));
-    object.insert(
-        "target_directory".into(),
-        json!(evidence.target_directory.unwrap_or_default()),
-    );
+    object.insert("target_directory".into(), json!(evidence.target_directory));
 
     Ok(serde_json::to_string_pretty(&value)?)
 }
@@ -1007,7 +1018,7 @@ pub fn render_restore_drill_evidence_json(evidence: &RestoreDrillEvidence) -> Re
 fn human_bytes(value: Option<u64>) -> String {
     value
         .map(|value| format_bytes(Some(value)))
-        .unwrap_or_else(|| "not measured".into())
+        .unwrap_or_else(|| "—".into())
 }
 
 #[cfg(test)]

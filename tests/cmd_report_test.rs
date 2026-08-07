@@ -532,7 +532,7 @@ fn report_without_action_separates_each_report_artifact() {
     let output = ReportCommand::run_with_adapters_and_meta(
         None,
         Some(base_file.clone()),
-        Some(ReportFormat::Json),
+        None,
         &config,
         &MockExecutor::new(),
         &RestoringRunner,
@@ -547,6 +547,24 @@ fn report_without_action_separates_each_report_artifact() {
     assert!(dir.path().join("audit-time-sync.json").exists());
     assert!(dir.path().join("audit-restore-drill.json").exists());
     assert!(!base_file.exists());
+
+    let html = fs::read_to_string(dir.path().join("audit-restore-drill.html")).unwrap();
+    let json = fs::read_to_string(dir.path().join("audit-restore-drill.json")).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let execution_id = value["execution_id"].as_str().unwrap();
+    assert!(!execution_id.is_empty());
+    assert!(html.contains(execution_id));
+    assert_eq!(
+        value["storage_results"][0]["snapshot_id"],
+        "report-snapshot-001"
+    );
+    assert_eq!(value["storage_results"][0]["profile"], "default");
+    assert_eq!(value["storage_results"][0]["backend"], "primary");
+    assert_eq!(value["storage_results"][0]["file_count"], 1);
+    assert_eq!(value["storage_results"][0]["total_bytes"], 8);
+    assert!(value["storage_results"][0]["elapsed_milliseconds"].is_number());
+    assert_eq!(value["storage_results"][0]["validation_status"], "pass");
+    assert!(html.contains("report-snapshot-001"));
 }
 
 #[test]
@@ -572,4 +590,26 @@ fn explicit_report_file_is_atomically_overwritten() {
     let content = fs::read_to_string(file).unwrap();
     assert!(content.contains("daily_backup_review"));
     assert!(!content.contains("old report"));
+}
+
+#[test]
+fn generic_restore_drill_export_requires_the_evidence_collection_path() {
+    let dir = tempdir().unwrap();
+    let config = backup::commands::report::ReportConfig::default();
+    let meta = backup::commands::report::AuditReportMeta::new("host-1", "2026-08-04");
+
+    let error = backup::commands::report::execute_report_export(
+        backup::commands::report::ReportExportOptions {
+            report_type: ReportType::RestoreDrill,
+            file: Some(&dir.path().join("restore-drill")),
+            format: Some(ReportFormat::Json),
+            output_dir: dir.path(),
+            meta: &meta,
+            config: &config,
+        },
+    )
+    .expect_err("generic exports must not claim a Restore Drill was collected");
+
+    assert!(error.to_string().contains("collected Evidence"));
+    assert!(dir.path().read_dir().unwrap().next().is_none());
 }

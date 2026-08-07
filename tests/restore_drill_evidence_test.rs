@@ -1,9 +1,15 @@
+use backup::commands::report::json_schema::{RecoveryResultsJson, RestoreDrillReportJson};
 use backup::commands::report::restore_drill::{
     DatabaseVerificationEvidence, RestoreDrillEvidence, RestoreDrillPolicy, RestoreDrillStatus,
     RestoreDrillStorageResult, render_restore_drill_evidence_html,
     render_restore_drill_evidence_json,
 };
+use backup::commands::report::{AuditReportMeta, RealReportData, ReportConfig, ReportType};
+use backup::commands::report::{html_template, json_schema};
 use backup::config::model::DatabaseType;
+
+mod support;
+use support::MockExecutor;
 
 fn passing_evidence() -> RestoreDrillEvidence {
     let policy = RestoreDrillPolicy::new(120, 240).unwrap();
@@ -94,6 +100,150 @@ fn html_and_json_render_the_same_injected_restore_drill_evidence() {
     assert_eq!(value["recovery_results"]["rto_satisfied"], true);
     assert_eq!(value["recovery_results"]["data_integrity_verified"], true);
     assert_eq!(value["schema_version"], "1");
+}
+
+#[test]
+fn public_report_renderers_use_the_injected_restore_drill_evidence() {
+    let evidence = passing_evidence();
+    let meta = AuditReportMeta::new("test-host", "2026-08-07T10:00:00+09:00");
+    let data = RealReportData::collect_with_meta_with_runner(
+        &ReportConfig::default(),
+        &meta,
+        &MockExecutor::new(),
+    )
+    .with_restore_drill_evidence(evidence.clone());
+
+    let html = html_template::render_html_real(ReportType::RestoreDrill, &data);
+    let json = json_schema::render_json_real(ReportType::RestoreDrill, &data).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    assert!(html.contains("drill-2026-08-07-001"));
+    assert!(html.contains("snapshot-full-001"));
+    assert!(!html.contains("측정 로그 확인 필요"));
+    assert_eq!(value["execution_id"], evidence.execution_id);
+    assert_eq!(value["target_snapshot_id"], "snapshot-full-001");
+    assert_eq!(value["overall_status"], "pass");
+}
+
+#[test]
+fn public_restore_drill_renderers_never_claim_success_without_evidence() {
+    let meta = AuditReportMeta::new("test-host", "2026-08-07T10:00:00+09:00");
+    let data = RealReportData::collect_with_meta_with_runner(
+        &ReportConfig::default(),
+        &meta,
+        &MockExecutor::new(),
+    );
+
+    let html = html_template::render_html_real(ReportType::RestoreDrill, &data);
+    let json = json_schema::render_json_real(ReportType::RestoreDrill, &data).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    assert!(html.contains("overall-status-not-performed"));
+    assert!(!html.contains("측정 로그 확인 필요"));
+    assert_eq!(value["overall_status"], "not_performed");
+    assert_eq!(value["report_status"], "NotPerformed");
+    assert_eq!(value["target_snapshot_id"], serde_json::Value::Null);
+    assert_eq!(
+        value["recovery_results"]["elapsed_milliseconds"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        value["recovery_results"]["elapsed_seconds"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        value["recovery_results"]["rto_satisfied"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        value["recovery_results"]["data_integrity_verified"],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn legacy_restore_drill_types_round_trip_nullable_evidence_fields() {
+    let passing: RestoreDrillReportJson =
+        serde_json::from_str(&render_restore_drill_evidence_json(&passing_evidence()).unwrap())
+            .unwrap();
+    assert_eq!(
+        passing.target_snapshot_id.as_deref(),
+        Some("snapshot-full-001")
+    );
+    assert_eq!(passing.recovery_results.elapsed_seconds, Some(3));
+    assert_eq!(passing.recovery_results.rto_satisfied, Some(true));
+
+    let not_performed = RestoreDrillEvidence::not_collected(
+        "2026-08-07T10:00:00+09:00",
+        RestoreDrillPolicy::default(),
+    );
+    let report: RestoreDrillReportJson =
+        serde_json::from_str(&render_restore_drill_evidence_json(&not_performed).unwrap()).unwrap();
+    let recovery: RecoveryResultsJson = report.recovery_results;
+    assert!(report.target_snapshot_id.is_none());
+    assert!(recovery.elapsed_seconds.is_none());
+    assert!(recovery.rto_satisfied.is_none());
+    assert!(recovery.data_integrity_verified.is_none());
+}
+
+#[test]
+fn renderers_recompute_overall_status_from_storage_results() {
+    let mut evidence = passing_evidence();
+    evidence.overall_status = RestoreDrillStatus::Fail;
+
+    let html = render_restore_drill_evidence_html(&evidence);
+    let json = render_restore_drill_evidence_json(&evidence).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    assert!(html.contains("overall-status-pass"));
+    assert_eq!(value["overall_status"], "pass");
+    assert_eq!(value["report_status"], "Pass");
+}
+
+#[test]
+fn compatibility_fields_aggregate_the_first_primary_result_not_a_database_result() {
+    let policy = RestoreDrillPolicy::default();
+    let database = RestoreDrillStorageResult::measured(
+        "database",
+        "primary",
+        "database-snapshot-001",
+        "2026-08-07T09:58:00Z",
+        "2026-08-07T10:00:01+09:00",
+        "2026-08-07T10:00:03+09:00",
+        2_000,
+        1,
+        2048,
+        "regular file count and total bytes",
+        &policy,
+    )
+    .with_database_verification(DatabaseVerificationEvidence {
+        db_type: DatabaseType::Postgres,
+        expected_signature: "PostgreSQL pg_dump SQL signature".into(),
+        signature_verified: true,
+        signature_status: RestoreDrillStatus::Pass,
+        validation_scope: "SQL dump signature only".into(),
+        db_integrity_verified: false,
+        import_performed: false,
+        record_validation_performed: false,
+    });
+    let evidence = RestoreDrillEvidence::new(
+        "drill-primary-aggregate-001",
+        "2026-08-07T10:00:00+09:00",
+        "2026-08-07T10:00:04+09:00",
+        policy,
+        vec![passing_evidence().storage_results[0].clone(), database],
+    );
+
+    let json = render_restore_drill_evidence_json(&evidence).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(value["target_snapshot_id"], "snapshot-full-001");
+    assert_eq!(value["target_snapshot_time"], "2026-08-07T09:59:00Z");
+    assert_eq!(value["recovery_results"]["elapsed_milliseconds"], 3_421);
+    assert_eq!(
+        value["recovery_results"]["data_size_human"],
+        "4.0 KiB (4,096)"
+    );
 }
 
 #[test]

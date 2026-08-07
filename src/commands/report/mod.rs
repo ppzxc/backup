@@ -5,7 +5,8 @@ pub mod restore_drill;
 pub use restore_drill::{
     DatabaseVerificationEvidence, RestoreDrillClock, RestoreDrillEvidence, RestoreDrillPolicy,
     RestoreDrillStatus, RestoreDrillStorageResult, RestoreDrillTimestamp, SystemRestoreDrillClock,
-    aggregate_status, render_restore_drill_evidence_html, render_restore_drill_evidence_json,
+    aggregate_status, render_restore_drill_evidence_html,
+    render_restore_drill_evidence_html_with_os_info, render_restore_drill_evidence_json,
 };
 
 use crate::commands::report::restore_drill::redact_restore_drill_diagnostic;
@@ -287,6 +288,7 @@ pub struct RealReportData {
     pub audit: crate::config::model::AuditConfig,
     pub os_info: String,
     pub failure_diagnostic: Option<String>,
+    restore_drill_evidence: Option<RestoreDrillEvidence>,
 }
 
 pub fn get_formatted_time() -> (String, String) {
@@ -421,12 +423,34 @@ impl RealReportData {
             audit,
             os_info,
             failure_diagnostic: None,
+            restore_drill_evidence: None,
         }
     }
 
     pub fn collect(config: &ReportConfig) -> Self {
         let meta = AuditReportMeta::current();
         Self::collect_with_meta(config, &meta)
+    }
+
+    /// Supplies the single Restore Drill Evidence value used by both public report renderers.
+    pub fn with_restore_drill_evidence(mut self, evidence: RestoreDrillEvidence) -> Self {
+        self.restore_drill_evidence = Some(evidence);
+        self
+    }
+
+    pub fn restore_drill_evidence_or_not_performed(&self) -> RestoreDrillEvidence {
+        self.restore_drill_evidence.clone().unwrap_or_else(|| {
+            RestoreDrillEvidence::not_collected(
+                self.timestamp.clone(),
+                self.config.restore_drill_policy.clone(),
+            )
+            .with_metadata(
+                self.hostname.clone(),
+                self.audit.system_manager_name("시스템 운영팀"),
+                self.audit.security_officer_name("정보보안책임자"),
+                None,
+            )
+        })
     }
 }
 
@@ -902,6 +926,7 @@ impl ReportCommand {
                 format: sub_format,
             }) => {
                 let final_file = sub_file.or(file);
+                let os_info = collect_os_info(command_runner);
                 let evidence = execute_restore_drill_with_runner(config, restic_runner)?
                     .with_metadata(
                         if meta.host_name.is_empty() {
@@ -913,11 +938,12 @@ impl ReportCommand {
                         config.audit.security_officer_name("정보보안책임자"),
                         None,
                     );
-                let report = execute_restore_drill_evidence_export(
+                let report = execute_restore_drill_evidence_export_with_os_info(
                     &evidence,
                     final_file.as_deref(),
                     sub_format.or(format),
                     output_dir,
+                    &os_info,
                 );
                 match report {
                     Ok(report) if evidence.overall_status == RestoreDrillStatus::Pass => Ok(report),
@@ -998,11 +1024,13 @@ impl ReportCommand {
                     let report_file = file.as_deref().map(|path| batch_report_path(path, r_type));
                     let report = if let Some(evidence) = evidence {
                         let status = evidence.overall_status;
-                        let report = execute_restore_drill_evidence_export(
+                        let os_info = collect_os_info(command_runner);
+                        let report = execute_restore_drill_evidence_export_with_os_info(
                             &evidence,
                             report_file.as_deref(),
                             format,
                             output_dir,
+                            &os_info,
                         );
                         if status != RestoreDrillStatus::Pass {
                             failures.push(format!(
@@ -1630,6 +1658,16 @@ pub fn execute_restore_drill_evidence_export(
     format: Option<ReportFormat>,
     output_dir: &Path,
 ) -> Result<String> {
+    execute_restore_drill_evidence_export_with_os_info(evidence, file, format, output_dir, "")
+}
+
+pub fn execute_restore_drill_evidence_export_with_os_info(
+    evidence: &RestoreDrillEvidence,
+    file: Option<&Path>,
+    format: Option<ReportFormat>,
+    output_dir: &Path,
+    os_info: &str,
+) -> Result<String> {
     let formats = match format {
         Some(format) => vec![format],
         None => vec![ReportFormat::Html, ReportFormat::Json],
@@ -1661,7 +1699,9 @@ pub fn execute_restore_drill_evidence_export(
             path = collision_safe_path(path);
         }
         let content = match format {
-            ReportFormat::Html => render_restore_drill_evidence_html(evidence),
+            ReportFormat::Html => {
+                render_restore_drill_evidence_html_with_os_info(evidence, os_info)
+            }
             ReportFormat::Json => match render_restore_drill_evidence_json(evidence) {
                 Ok(content) => content,
                 Err(error) => {
@@ -1791,6 +1831,11 @@ pub fn execute_report_export_with_report_config<R: CommandRunner + ?Sized>(
     opts: ReportExportOptionsForConfig,
     runner: &R,
 ) -> Result<String> {
+    if matches!(opts.report_type, ReportType::RestoreDrill) {
+        anyhow::bail!(
+            "Restore Drill export requires a collected Evidence value; use `report restore-drill`"
+        );
+    }
     let mut data =
         RealReportData::collect_with_report_config_with_runner(opts.config, opts.meta, runner);
     data.failure_diagnostic = opts

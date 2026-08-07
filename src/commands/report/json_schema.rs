@@ -111,11 +111,11 @@ pub struct NtpSyncReportJson {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveryResultsJson {
     pub data_size_human: String,
-    pub elapsed_seconds: u64,
+    pub elapsed_seconds: Option<u64>,
     pub elapsed_human: String,
     pub target_rto_minutes: u64,
-    pub rto_satisfied: bool,
-    pub data_integrity_verified: bool,
+    pub rto_satisfied: Option<bool>,
+    pub data_integrity_verified: Option<bool>,
     pub database_verification: serde_json::Value,
 }
 
@@ -127,9 +127,9 @@ pub struct RestoreDrillReportJson {
     pub test_date: String,
     pub tester: String,
     pub ciso: String,
-    pub target_snapshot_id: String,
-    pub target_snapshot_time: String,
-    pub target_directory: String,
+    pub target_snapshot_id: Option<String>,
+    pub target_snapshot_time: Option<String>,
+    pub target_directory: Option<String>,
     pub recovery_results: RecoveryResultsJson,
 }
 
@@ -233,51 +233,7 @@ pub fn render_json_real(report_type: ReportType, data: &RealReportData) -> Resul
             Ok(serde_json::to_string_pretty(&res)?)
         }
         ReportType::RestoreDrill => {
-            let test_date = if data.timestamp.len() >= 10 {
-                data.timestamp[0..10].to_string()
-            } else {
-                "2026-07-21".to_string()
-            };
-            let res = RestoreDrillReportJson {
-                hostname: data.hostname.clone(),
-                timestamp: data.timestamp.clone(),
-                report_type: "restore_drill".into(),
-                test_date,
-                tester: data
-                    .audit
-                    .system_manager
-                    .clone()
-                    .unwrap_or_else(|| "시스템 운영팀".into()),
-                ciso: data
-                    .audit
-                    .security_officer
-                    .clone()
-                    .unwrap_or_else(|| "정보보안책임자".into()),
-                target_snapshot_id: String::new(),
-                target_snapshot_time: String::new(),
-                target_directory: String::new(),
-                recovery_results: RecoveryResultsJson {
-                    data_size_human: "not measured".into(),
-                    elapsed_seconds: 0,
-                    elapsed_human: "not measured".into(),
-                    target_rto_minutes: data.config.restore_drill_policy.rto_minutes,
-                    rto_satisfied: false,
-                    data_integrity_verified: false,
-                    database_verification: serde_json::json!({
-                        "db_type": data.config.database_type.map(|database_type| database_type.to_string()),
-                        "db_snapshot_id": null,
-                        "db_snapshot_time": null,
-                        "expected_signature": data.config.database_type.map(crate::commands::database::DatabaseDumpValidation::expected_signature),
-                        "signature_verified": null,
-                        "signature_status": "not_performed",
-                        "validation_scope": "SQL dump signature only",
-                        "db_integrity_verified": false,
-                        "import_performed": false,
-                        "record_validation_performed": false
-                    }),
-                },
-            };
-            Ok(serde_json::to_string_pretty(&res)?)
+            render_restore_drill_evidence(&data.restore_drill_evidence_or_not_performed())
         }
     }
 }
