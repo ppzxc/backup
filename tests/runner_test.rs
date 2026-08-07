@@ -126,6 +126,32 @@ fn test_restic_tool_with_mock_executor() {
 }
 
 #[test]
+fn restic_tool_requests_snapshot_json_for_concrete_selection() {
+    let mock = MockExecutor::new();
+    mock.push_output(
+        "restic",
+        CommandOutput {
+            status_code: 0,
+            stdout: "[]".into(),
+            stderr: String::new(),
+        },
+    );
+
+    let restic_tool = ResticTool::new(&mock);
+    assert!(
+        restic_tool
+            .list_snapshot_infos("s3:bucket", "secret")
+            .unwrap()
+            .is_empty()
+    );
+    let calls = mock.get_calls();
+    assert_eq!(
+        &calls[0].1[4..],
+        &["snapshots".to_string(), "--json".to_string()]
+    );
+}
+
+#[test]
 fn restic_database_stream_forwards_credentials_only_through_environment() {
     let mock = MockExecutor::new();
     mock.push_output(

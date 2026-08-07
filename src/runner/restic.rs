@@ -1,4 +1,5 @@
 use crate::runner::executor::CommandRunner;
+use crate::runner::snapshot::{SnapshotInfo, parse_snapshot_json};
 use anyhow::Result;
 use std::io::Write;
 use tempfile::NamedTempFile;
@@ -13,6 +14,9 @@ pub trait ResticRunner {
         excludes: &[String],
     ) -> Result<String>;
     fn list_snapshots(&self, repo: &str, password: &str) -> Result<String>;
+    fn list_snapshot_infos(&self, repo: &str, password: &str) -> Result<Vec<SnapshotInfo>> {
+        parse_snapshot_json(&self.list_snapshots(repo, password)?).map_err(anyhow::Error::new)
+    }
     fn list_snapshots_with_env(
         &self,
         repo: &str,
@@ -20,6 +24,15 @@ pub trait ResticRunner {
         _env: &[(&str, &str)],
     ) -> Result<String> {
         self.list_snapshots(repo, password)
+    }
+    fn list_snapshot_infos_with_env(
+        &self,
+        repo: &str,
+        password: &str,
+        env: &[(&str, &str)],
+    ) -> Result<Vec<SnapshotInfo>> {
+        parse_snapshot_json(&self.list_snapshots_with_env(repo, password, env)?)
+            .map_err(anyhow::Error::new)
     }
     fn restore(&self, repo: &str, password: &str, snapshot: &str, target: &str) -> Result<String>;
     fn restore_with_env(
@@ -59,6 +72,27 @@ impl<'a, E: CommandRunner> ResticTool<'a, E> {
     pub fn new(executor: &'a E) -> Self {
         Self { executor }
     }
+
+    fn list_snapshot_output(
+        &self,
+        repo: &str,
+        password: &str,
+        environment: Option<&[(&str, &str)]>,
+        json: bool,
+    ) -> Result<String> {
+        let pass_file = create_temp_password_file(password)?;
+        let pass_path = pass_file.path().to_string_lossy();
+        let mut args = vec!["-r", repo, "--password-file", &pass_path, "snapshots"];
+        if json {
+            args.push("--json");
+        }
+        let output = match environment {
+            Some(environment) => self.executor.run_with_env("restic", &args, environment)?,
+            None => self.executor.run("restic", &args)?,
+        };
+        Self::checked(output)
+    }
+
     fn checked(output: crate::runner::executor::CommandOutput) -> Result<String> {
         if output.status_code != 0 {
             anyhow::bail!(
@@ -111,13 +145,7 @@ impl<'a, E: CommandRunner> ResticRunner for ResticTool<'a, E> {
     }
 
     fn list_snapshots(&self, repo: &str, password: &str) -> Result<String> {
-        let pass_file = create_temp_password_file(password)?;
-        let pass_path = pass_file.path().to_string_lossy();
-        let output = self.executor.run(
-            "restic",
-            &["-r", repo, "--password-file", &pass_path, "snapshots"],
-        )?;
-        Self::checked(output)
+        self.list_snapshot_output(repo, password, None, false)
     }
     fn list_snapshots_with_env(
         &self,
@@ -125,13 +153,20 @@ impl<'a, E: CommandRunner> ResticRunner for ResticTool<'a, E> {
         password: &str,
         env: &[(&str, &str)],
     ) -> Result<String> {
-        let pass_file = create_temp_password_file(password)?;
-        let pass_path = pass_file.path().to_string_lossy();
-        Self::checked(self.executor.run_with_env(
-            "restic",
-            &["-r", repo, "--password-file", &pass_path, "snapshots"],
-            env,
-        )?)
+        self.list_snapshot_output(repo, password, Some(env), false)
+    }
+    fn list_snapshot_infos(&self, repo: &str, password: &str) -> Result<Vec<SnapshotInfo>> {
+        parse_snapshot_json(&self.list_snapshot_output(repo, password, None, true)?)
+            .map_err(anyhow::Error::new)
+    }
+    fn list_snapshot_infos_with_env(
+        &self,
+        repo: &str,
+        password: &str,
+        env: &[(&str, &str)],
+    ) -> Result<Vec<SnapshotInfo>> {
+        parse_snapshot_json(&self.list_snapshot_output(repo, password, Some(env), true)?)
+            .map_err(anyhow::Error::new)
     }
     fn restore(&self, repo: &str, password: &str, snapshot: &str, target: &str) -> Result<String> {
         let pass_file = create_temp_password_file(password)?;

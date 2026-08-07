@@ -4,6 +4,13 @@ use anyhow::Result;
 use secrecy::ExposeSecret;
 use std::path::Path;
 
+pub use crate::runner::snapshot::{
+    SnapshotInfo, SnapshotJsonError, SnapshotSelection, SnapshotSelectionReason,
+    SnapshotSelectionStatus, parse_snapshot_json, select_latest_tagged_snapshot,
+    select_latest_tagged_snapshot_from_infos, select_latest_tagged_snapshot_from_json,
+    select_latest_tagged_snapshot_with_env,
+};
+
 pub fn execute_snapshots_from_profiles<R: ResticRunner + ?Sized>(
     config: &crate::config::model::ResticProfileConfig,
     config_path: &Path,

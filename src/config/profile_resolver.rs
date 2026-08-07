@@ -82,6 +82,32 @@ impl ProfileResolver {
         resolve_all_runnable_with_failures(config, "status")
     }
 
+    /// Resolves the effective Backup Profile tag list through the same inheritance chain used by
+    /// operational profile resolution.
+    pub fn resolve_backup_tags(
+        config: &ResticProfileConfig,
+        profile_name: &str,
+    ) -> Result<Vec<String>> {
+        let chain = inheritance_chain(config, profile_name).ok_or_else(|| {
+            anyhow::anyhow!("Backup Profile '{profile_name}' has an invalid inheritance chain")
+        })?;
+        let mut tags = Vec::new();
+        for section in chain {
+            if let Some(section_tags) = section
+                .backup
+                .as_ref()
+                .and_then(|backup| backup.tag.as_ref())
+            {
+                for tag in section_tags {
+                    if !tags.contains(tag) {
+                        tags.push(tag.clone());
+                    }
+                }
+            }
+        }
+        Ok(tags)
+    }
+
     /// Resolves the command-specific run selection: all runnable profiles when omitted, or one
     /// exact profile when supplied.
     pub fn resolve_for_run(

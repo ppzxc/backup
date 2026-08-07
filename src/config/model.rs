@@ -6,6 +6,12 @@ use std::path::Path;
 
 pub const DEFAULT_PROFILES_FILENAME: &str = "profiles.yaml";
 pub const DEFAULT_PROFILES_PATH: &str = "/etc/backup/profiles.yaml";
+pub const BACKUP_PROFILE_TAG_PREFIX: &str = "backup-profile:";
+
+/// Returns the CLI-owned tag that identifies snapshots produced by one exact Backup Profile.
+pub fn backup_profile_snapshot_tag(profile: &str) -> String {
+    format!("{BACKUP_PROFILE_TAG_PREFIX}{profile}")
+}
 
 const APPLICATION_SECRET_PREFIX: &str = "${BACKUP_";
 
@@ -271,6 +277,14 @@ impl BackupConfig {
             }
         };
 
+        let existing_profile_tags = restic_config
+            .profiles
+            .get(&self.profile)
+            .and_then(|profile| profile.backup.as_ref())
+            .and_then(|backup| backup.tag.as_ref())
+            .cloned()
+            .unwrap_or_default();
+
         restic_config.version = "2".into();
         restic_config.application =
             Some(self.application_metadata_with_secret_references(config_dir)?);
@@ -290,7 +304,10 @@ impl BackupConfig {
         if primary_profile.description.is_none() {
             primary_profile.description = Some("Primary Storage configuration".into());
         }
-        primary_profile.inherit = Some("default".into());
+        primary_profile.inherit = (self.profile != "default").then(|| "default".into());
+        if self.profile == "default" {
+            primary_profile.insecure_tls = Some(true);
+        }
         primary_profile.repository = Some(self.storage.primary.repository.clone());
         primary_profile.password_file = Some(self.profile_password_file(config_dir, false)?);
         primary_profile.password = None;
@@ -403,6 +420,7 @@ impl BackupConfig {
             None
         };
 
+        let profile_tags = normalize_backup_profile_tags(existing_profile_tags, &self.profile);
         let profile_section = ProfileSection {
             description: Some(format!("Backup profile for {}", self.profile)),
             inherit: Some("primary".into()),
@@ -415,7 +433,7 @@ impl BackupConfig {
                 } else {
                     Some(self.backup.excludes.clone())
                 },
-                tag: Some(vec![self.profile.clone()]),
+                tag: Some(profile_tags.clone()),
                 schedule: None,
                 schedule_permission: None,
                 schedule_priority: None,
@@ -465,6 +483,11 @@ impl BackupConfig {
         restic_config
             .profiles
             .insert(self.profile.clone(), profile_section);
+
+        // Setup owns the migration of generated runnable profiles to the reserved tag
+        // namespace. This changes future configuration only; it never mutates existing
+        // repository snapshots or infers their identity.
+        restic_config.ensure_reserved_backup_profile_tags()?;
 
         let yaml_content = serde_yaml::to_string(&restic_config)?;
         save_secure_file(profiles_yaml_path, &yaml_content)?;
@@ -1053,6 +1076,28 @@ impl ResticProfileConfig {
         })
     }
 
+    /// Ensures every runnable Backup Profile has its exact CLI-owned snapshot tag while
+    /// preserving ordinary user tags and removing stale tags from the reserved namespace.
+    pub fn ensure_reserved_backup_profile_tags(&mut self) -> Result<()> {
+        let runnable_profiles =
+            crate::config::profile_resolver::ProfileResolver::resolve_all_active(self)?;
+        for profile in runnable_profiles {
+            let section = self
+                .profiles
+                .get_mut(&profile.name)
+                .ok_or_else(|| anyhow::anyhow!("Unknown Backup Profile '{}'", profile.name))?;
+            let tags = section
+                .backup
+                .as_ref()
+                .and_then(|backup| backup.tag.as_ref())
+                .cloned()
+                .unwrap_or_default();
+            let backup = section.backup.get_or_insert_with(Default::default);
+            backup.tag = Some(normalize_backup_profile_tags(tags, &profile.name));
+        }
+        Ok(())
+    }
+
     /// Resolves the copy target declared by a Backup Profile through its inheritance chain.
     /// A copy command must name an existing Backend Profile before it reaches an external runner.
     pub fn effective_copy_profile(&self, profile: &str) -> Result<Option<String>> {
@@ -1170,6 +1215,19 @@ impl ResticProfileConfig {
             .map(|name| config_dir.join(name))
             .collect()
     }
+}
+
+fn normalize_backup_profile_tags(tags: Vec<String>, profile: &str) -> Vec<String> {
+    let mut normalized = tags
+        .into_iter()
+        .filter(|tag| !tag.starts_with(BACKUP_PROFILE_TAG_PREFIX))
+        .collect::<Vec<_>>();
+    if !normalized.iter().any(|tag| tag == profile) {
+        normalized.push(profile.into());
+    }
+    let reserved = backup_profile_snapshot_tag(profile);
+    normalized.push(reserved);
+    normalized
 }
 
 fn read_secure_sidecar(path: &Path) -> Result<String> {

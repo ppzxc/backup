@@ -4,6 +4,7 @@ use backup::commands::setup::{
     run_setup_with_prompter_and_runners,
 };
 use backup::config::model::*;
+use backup::config::profile_resolver::ProfileResolver;
 use backup::i18n::Language;
 use secrecy::SecretString;
 use support::{MockExecutor, MockResticProfileRunner};
@@ -26,6 +27,7 @@ fn test_create_default_profiles_file() {
     let content = std::fs::read_to_string(&config_path).unwrap();
     assert!(content.contains("host1"));
     assert!(content.contains("sftp:backup@192.168.1.100:/backup"));
+    assert!(content.contains("backup-profile:host1"));
 
     #[cfg(unix)]
     {
@@ -33,6 +35,140 @@ fn test_create_default_profiles_file() {
         let file_perms = std::fs::metadata(&config_path).unwrap().permissions();
         assert_eq!(file_perms.mode() & 0o777, 0o600);
     }
+}
+
+#[test]
+fn setup_reserves_an_exact_backup_profile_tag_without_dropping_user_tags() {
+    let dir = tempdir().unwrap();
+    let profiles = dir.path().join("profiles.yaml");
+    std::fs::write(
+        &profiles,
+        r#"
+version: "2"
+profiles:
+  primary:
+    repository: /primary
+  default:
+    backup:
+      tag: ["inherited-user-tag"]
+  daily:
+    inherit: default
+    backup:
+      source: [/data]
+      tag: ["user-tag", "backup-profile:stale"]
+"#,
+    )
+    .unwrap();
+
+    BackupConfig {
+        profile: "daily".into(),
+        backup: BackupTargets {
+            backup_type: BackupType::Directory,
+            targets: vec!["/data".into()],
+            excludes: vec![],
+        },
+        storage: StorageConfig {
+            primary: StorageTarget {
+                backend: "local".into(),
+                repository: "/primary".into(),
+                password: SecretString::new("primary-password".into()),
+                sftp: None,
+                s3: None,
+            },
+            secondary: None,
+        },
+        retention: RetentionPolicy::standard_defaults(),
+        reports: ReportsConfig::default(),
+        audit: AuditConfig::default(),
+        version: "2".into(),
+    }
+    .save_to_profiles_path(&profiles)
+    .unwrap();
+
+    let saved = ResticProfileConfig::load_from_path(&profiles).unwrap();
+    let tags = saved
+        .profiles
+        .get("daily")
+        .and_then(|profile| profile.backup.as_ref())
+        .and_then(|backup| backup.tag.as_ref())
+        .unwrap();
+    assert_eq!(tags, &["user-tag", "daily", "backup-profile:daily"]);
+    assert_eq!(
+        ProfileResolver::resolve_backup_tags(&saved, "daily").unwrap(),
+        vec![
+            "user-tag",
+            "daily",
+            "backup-profile:daily",
+            "inherited-user-tag"
+        ]
+    );
+    assert!(!tags.iter().any(|tag| tag == "backup-profile:stale"));
+}
+
+#[test]
+fn setup_preserves_inherited_user_tags_when_assigning_the_exact_profile_tag() {
+    let dir = tempdir().unwrap();
+    let profiles = dir.path().join("profiles.yaml");
+    std::fs::write(
+        &profiles,
+        r#"
+version: "2"
+profiles:
+  primary:
+    repository: /primary
+  default:
+    backup:
+      source: [/data]
+      tag: ["inherited-user-tag"]
+  daily:
+    inherit: default
+"#,
+    )
+    .unwrap();
+
+    BackupConfig {
+        profile: "daily".into(),
+        backup: BackupTargets {
+            backup_type: BackupType::Directory,
+            targets: vec!["/data".into()],
+            excludes: vec![],
+        },
+        storage: StorageConfig {
+            primary: StorageTarget {
+                backend: "local".into(),
+                repository: "/primary".into(),
+                password: SecretString::new("primary-password".into()),
+                sftp: None,
+                s3: None,
+            },
+            secondary: None,
+        },
+        retention: RetentionPolicy::standard_defaults(),
+        reports: ReportsConfig::default(),
+        audit: AuditConfig::default(),
+        version: "2".into(),
+    }
+    .save_to_profiles_path(&profiles)
+    .unwrap();
+
+    let saved = ResticProfileConfig::load_from_path(&profiles).unwrap();
+    let tags = saved
+        .profiles
+        .get("daily")
+        .and_then(|profile| profile.backup.as_ref())
+        .and_then(|backup| backup.tag.as_ref())
+        .unwrap();
+    assert_eq!(tags, &["daily", "backup-profile:daily"]);
+    assert_eq!(
+        ProfileResolver::resolve_backup_tags(&saved, "daily").unwrap(),
+        vec![
+            "daily",
+            "backup-profile:daily",
+            "inherited-user-tag",
+            "default",
+            "backup-profile:default",
+        ]
+    );
 }
 
 struct MockPrompter {
