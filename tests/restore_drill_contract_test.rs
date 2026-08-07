@@ -3,8 +3,9 @@ use backup::commands::report::restore_drill::{
     RestoreDrillClock, RestoreDrillStatus, RestoreDrillTimestamp,
 };
 use backup::commands::report::{
-    ReportConfig, RestoreDrillProfileConfig, RestoreDrillStorageConfig,
-    execute_restore_drill_evidence_export, execute_restore_drill_with_runner_and_clock,
+    ReportConfig, RestoreDrillEvidence, RestoreDrillPolicy, RestoreDrillProfileConfig,
+    RestoreDrillStorageConfig, execute_restore_drill_evidence_export,
+    execute_restore_drill_with_runner_and_clock,
 };
 use backup::config::model::{DatabaseType, ResticProfileConfig};
 use backup::runner::restic::ResticRunner;
@@ -41,6 +42,7 @@ impl RestoreDrillClock for FixedClock {
 struct StrictRestoreRunner {
     calls: Mutex<Vec<String>>,
     snapshots: Vec<SnapshotInfo>,
+    restore_error: Option<String>,
 }
 
 impl StrictRestoreRunner {
@@ -48,6 +50,15 @@ impl StrictRestoreRunner {
         Self {
             calls: Mutex::new(Vec::new()),
             snapshots,
+            restore_error: None,
+        }
+    }
+
+    fn failing_restore(snapshots: Vec<SnapshotInfo>, error: &str) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            snapshots,
+            restore_error: Some(error.into()),
         }
     }
 
@@ -101,10 +112,25 @@ impl ResticRunner for StrictRestoreRunner {
     ) -> Result<String> {
         assert_eq!(repository, "s3:primary-repository");
         assert_eq!(password, "primary-secret");
-        assert_eq!(snapshot, "full-snapshot-001");
+        assert!(
+            snapshot == "full-snapshot-001" || snapshot == "full-snapshot-timeout",
+            "unexpected snapshot {snapshot}"
+        );
         assert_eq!(environment, [("AWS_ACCESS_KEY_ID", "access")]);
         assert_eq!(timeout, std::time::Duration::from_secs(14_400));
         self.calls.lock().unwrap().push("restore".into());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(target).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "each isolated restore target must be private"
+            );
+        }
+        if let Some(error) = &self.restore_error {
+            anyhow::bail!("{error}");
+        }
         fs::write(Path::new(target).join("restored.txt"), "restored")?;
         Ok("restored".into())
     }
@@ -612,6 +638,124 @@ fn restore_drill_missing_tag_is_not_performed_and_never_restores_latest() {
     assert_eq!(evidence.overall_status, RestoreDrillStatus::NotPerformed);
     assert_eq!(runner.calls(), ["list-snapshots"]);
     assert!(evidence.storage_results[0].snapshot_id.is_none());
+}
+
+#[test]
+fn restore_drill_timeout_failure_records_stage_elapsed_time_and_cleans_target() {
+    let temp = tempdir().unwrap();
+    let config = config(temp.path());
+    let runner = StrictRestoreRunner::failing_restore(
+        vec![SnapshotInfo {
+            id: "full-snapshot-timeout".into(),
+            timestamp: "2026-08-07T09:00:00Z".into(),
+            tags: vec!["backup-profile:daily-files".into()],
+        }],
+        "Process execution timed out after 240 minutes; process group terminated",
+    );
+    let clock = FixedClock::new([
+        timestamp("2026-08-07T10:00:00Z", 1_000),
+        timestamp("2026-08-07T10:00:01Z", 2_000),
+        timestamp("2026-08-07T10:04:01Z", 242_000),
+        timestamp("2026-08-07T10:04:02Z", 243_000),
+    ]);
+
+    let evidence = execute_restore_drill_with_runner_and_clock(&config, &runner, &clock).unwrap();
+    let result = &evidence.storage_results[0];
+    assert_eq!(evidence.overall_status, RestoreDrillStatus::Fail);
+    assert_eq!(result.failure_stage.as_deref(), Some("restore"));
+    assert!(result.timed_out);
+    assert_eq!(result.elapsed_milliseconds, Some(240_000));
+    assert!(
+        result
+            .diagnostic
+            .as_deref()
+            .is_some_and(|diagnostic| diagnostic.contains("interrupted_stage=restore"))
+    );
+    assert_eq!(
+        fs::read_dir(config.restore_drill_work_dir).unwrap().count(),
+        0
+    );
+}
+
+#[test]
+fn restore_drill_export_preserves_first_artifact_when_second_format_fails() {
+    let temp = tempdir().unwrap();
+    let base = temp.path().join("restore-drill-report");
+    fs::create_dir(base.with_extension("json")).unwrap();
+    let evidence = RestoreDrillEvidence::new(
+        "restore-drill-export-001",
+        "2026-08-07T10:00:00Z",
+        "2026-08-07T10:00:01Z",
+        RestoreDrillPolicy::default(),
+        vec![
+            backup::commands::report::RestoreDrillStorageResult::not_performed(
+                "daily-files",
+                "primary",
+                "tagged snapshot is unavailable",
+            ),
+        ],
+    );
+
+    let error = execute_restore_drill_evidence_export(&evidence, Some(&base), None, temp.path())
+        .expect_err("the JSON directory should make the second format fail");
+
+    let html = base.with_extension("html");
+    assert!(html.exists(), "the successful HTML artifact must be kept");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&html).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert!(
+        error.to_string().contains(html.to_string_lossy().as_ref()),
+        "the partial artifact must be reported alongside the export failure: {error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_drill_export_rejects_a_symlinked_report_parent() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir().unwrap();
+    let real_output = temp.path().join("real-output");
+    fs::create_dir(&real_output).unwrap();
+    let symlinked_output = temp.path().join("symlinked-output");
+    symlink(&real_output, &symlinked_output).unwrap();
+    let evidence = RestoreDrillEvidence::new(
+        "restore-drill-export-002",
+        "2026-08-07T10:00:00Z",
+        "2026-08-07T10:00:01Z",
+        RestoreDrillPolicy::default(),
+        vec![
+            backup::commands::report::RestoreDrillStorageResult::not_performed(
+                "daily-files",
+                "primary",
+                "tagged snapshot is unavailable",
+            ),
+        ],
+    );
+
+    let error = execute_restore_drill_evidence_export(
+        &evidence,
+        None,
+        Some(backup::commands::report::ReportFormat::Json),
+        &symlinked_output,
+    )
+    .expect_err("a symlinked report parent must be rejected");
+
+    assert!(
+        error.to_string().contains("symlink"),
+        "expected a symlink diagnostic, got: {error}"
+    );
+    assert_eq!(fs::read_dir(real_output).unwrap().count(), 0);
 }
 
 struct MultiStorageRunner {

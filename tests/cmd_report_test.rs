@@ -412,6 +412,56 @@ fn restore_drill_failure_is_recorded_in_the_written_report() {
 }
 
 #[test]
+fn restore_drill_reports_drill_and_partial_export_failures_together() {
+    let temp = tempdir().unwrap();
+    let password = temp.path().join("primary-password");
+    fs::write(&password, "report-password").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&password, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let profiles_path = temp.path().join("profiles.yaml");
+    fs::write(
+        &profiles_path,
+        format!(
+            "version: '2'\napplication:\n  reports:\n    outputDir: {}\n    enableDailyReports: true\n    enableAnnualDrDrillReport: true\n  audit:\n    restore-drill-work-dir: {}/restore-drill\nprofiles:\n  primary:\n    repository: /tmp/repo\n    password-file: {}\n  files:\n    backup:\n      source: ['/work/source']\n",
+            temp.path().display(),
+            temp.path().display(),
+            password.display()
+        ),
+    )
+    .unwrap();
+    let profiles =
+        backup::config::model::ResticProfileConfig::load_from_path(&profiles_path).unwrap();
+    let output_file = temp.path().join("restore-drill-report");
+    fs::create_dir(output_file.with_extension("json")).unwrap();
+    let meta = backup::commands::report::AuditReportMeta::new("contract-host", "2026-08-04")
+        .with_profiles_path(&profiles_path);
+
+    let error = ReportCommand::run_with_profile_adapters(
+        Some(ReportAction::RestoreDrill {
+            file: Some(output_file.clone()),
+            format: None,
+        }),
+        None,
+        None,
+        &profiles,
+        &profiles_path,
+        &MockExecutor::new(),
+        &MockResticRunner::new(1, "snapshot query failed"),
+        &meta,
+    )
+    .unwrap_err();
+
+    let message = error.to_string();
+    assert!(message.contains("restore drill failed"));
+    assert!(message.contains("snapshot"));
+    assert!(message.contains("failure report also failed"));
+    assert!(output_file.with_extension("html").exists());
+}
+
+#[test]
 fn report_without_action_separates_each_report_artifact() {
     let dir = tempdir().unwrap();
     let base_file = dir.path().join("audit.json");

@@ -61,6 +61,32 @@ fn test_system_executor_run_with_timeout_times_out() {
     assert!(res.stderr.contains("timed out"));
 }
 
+#[cfg(unix)]
+#[test]
+fn test_system_executor_timeout_terminates_child_processes() {
+    use backup::runner::executor::SystemExecutor;
+    use std::fs;
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let marker = temp.path().join("child-finished");
+    let script = format!("sleep 1; printf child-finished > '{}'", marker.display());
+    let executor = SystemExecutor;
+
+    let result = executor
+        .run_with_timeout("sh", &["-c", &script], &[], Duration::from_millis(100))
+        .unwrap();
+
+    assert_eq!(result.status_code, -1);
+    assert!(result.stderr.contains("process group"));
+    std::thread::sleep(Duration::from_millis(1_100));
+    assert!(
+        !marker.exists(),
+        "a child process survived the timed-out restore command"
+    );
+    assert!(!fs::exists(marker).unwrap());
+}
+
 #[test]
 fn test_restic_tool_with_mock_executor() {
     let mock = MockExecutor::new();

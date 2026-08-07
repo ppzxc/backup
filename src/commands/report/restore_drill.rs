@@ -145,6 +145,10 @@ pub struct RestoreDrillStorageResult {
     pub database_verification: Option<DatabaseVerificationEvidence>,
     pub rto_satisfied: Option<bool>,
     pub diagnostic: Option<String>,
+    #[serde(default)]
+    pub failure_stage: Option<String>,
+    #[serde(default)]
+    pub timed_out: bool,
 }
 
 /// The intentionally limited validation scope for a restored Database Stream dump.
@@ -243,6 +247,14 @@ impl RestoreDrillStorageResult {
             } else {
                 None
             },
+            failure_stage: if !rto_satisfied {
+                Some("rto".into())
+            } else if !output_valid {
+                Some("validation".into())
+            } else {
+                None
+            },
+            timed_out: false,
         }
     }
 
@@ -270,6 +282,8 @@ impl RestoreDrillStorageResult {
             database_verification: None,
             rto_satisfied: None,
             diagnostic: Some(diagnostic.into()),
+            failure_stage: None,
+            timed_out: false,
         }
     }
 
@@ -288,6 +302,7 @@ impl RestoreDrillStorageResult {
         result.snapshot_time = Some(snapshot_time.into());
         result.elapsed_milliseconds = Some(elapsed_milliseconds);
         result.elapsed_seconds = Some(elapsed_milliseconds / 1_000);
+        result.failure_stage = Some("restore".into());
         result
     }
 
@@ -309,6 +324,16 @@ impl RestoreDrillStorageResult {
         verification: DatabaseVerificationEvidence,
     ) -> Self {
         self.database_verification = Some(verification);
+        self
+    }
+
+    pub(crate) fn with_failure_stage(mut self, stage: impl Into<String>) -> Self {
+        self.failure_stage = Some(stage.into());
+        self
+    }
+
+    pub(crate) fn mark_timed_out(mut self) -> Self {
+        self.timed_out = true;
         self
     }
 
@@ -334,6 +359,8 @@ impl RestoreDrillStorageResult {
             database_verification: None,
             rto_satisfied: None,
             diagnostic: Some(diagnostic.into()),
+            failure_stage: None,
+            timed_out: false,
         }
     }
 
@@ -359,6 +386,8 @@ impl RestoreDrillStorageResult {
             database_verification: None,
             rto_satisfied: None,
             diagnostic: Some(diagnostic.into()),
+            failure_stage: None,
+            timed_out: false,
         }
     }
 }
@@ -622,6 +651,24 @@ fn mask_diagnostic(value: &str, sensitive_values: &[&str]) -> String {
         .join(" ")
         .replace("<redacted>", "***MASKED***")
         .replace("******", "***MASKED***")
+        .split_whitespace()
+        .map(|token| {
+            if token.contains("***MASKED***") && (token.contains('/') || token.contains('\\')) {
+                "***MASKED***".to_string()
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
+pub(crate) fn redact_restore_drill_diagnostic(value: &str, sensitive_values: &[String]) -> String {
+    let sensitive_values = sensitive_values
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    mask_diagnostic(value, &sensitive_values)
 }
 
 fn looks_like_path(value: &str) -> bool {
@@ -743,7 +790,7 @@ pub fn render_restore_drill_evidence_html(evidence: &RestoreDrillEvidence) -> St
             r#"<tr>
   <td>{}</td><td>{}</td><td>{}</td><td>{}</td>
   <td>{}</td><td>{}</td><td>{}</td><td>{}</td>
-  <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>
+  <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>
 </tr>"#,
             escape_html(&result.profile),
             escape_html(&result.backend),
@@ -765,6 +812,8 @@ pub fn render_restore_drill_evidence_html(evidence: &RestoreDrillEvidence) -> St
                 .rto_satisfied
                 .map(|satisfied| if satisfied { "yes" } else { "no" })
                 .unwrap_or("—"),
+            display(result.failure_stage.as_deref()),
+            if result.timed_out { "yes" } else { "no" },
             diagnostic,
         ));
     }
@@ -812,7 +861,7 @@ pub fn render_restore_drill_evidence_html(evidence: &RestoreDrillEvidence) -> St
 
   <h2>Storage and profile results</h2>
   <table>
-    <thead><tr><th>Profile</th><th>Backend</th><th>Snapshot ID</th><th>Snapshot time</th><th>Elapsed ms</th><th>Files</th><th>Bytes</th><th>Validation method</th><th>Validation</th><th>Database signature</th><th>Result</th><th>RTO</th><th>Diagnostic</th></tr></thead>
+    <thead><tr><th>Profile</th><th>Backend</th><th>Snapshot ID</th><th>Snapshot time</th><th>Elapsed ms</th><th>Files</th><th>Bytes</th><th>Validation method</th><th>Validation</th><th>Database signature</th><th>Result</th><th>RTO</th><th>Failure stage</th><th>Timed out</th><th>Diagnostic</th></tr></thead>
     <tbody>{}</tbody>
   </table>
 

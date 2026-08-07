@@ -4,6 +4,20 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::io;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
+#[cfg(unix)]
+const SIGKILL: i32 = 9;
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn kill(pid: i32, signal: i32) -> i32;
+    fn setpgid(pid: i32, process_group: i32) -> i32;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutput {
     pub status_code: i32,
@@ -320,11 +334,22 @@ impl CommandRunner for SystemExecutor {
         env: &[(&str, &str)],
         timeout: Duration,
     ) -> Result<CommandOutput> {
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(args)
             .envs(env.iter().copied())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        unsafe {
+            command.pre_exec(|| {
+                if setpgid(0, 0) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command
             .spawn()
             .with_context(|| format!("Failed to execute process: {}", program))?;
 
@@ -341,13 +366,12 @@ impl CommandRunner for SystemExecutor {
                 }
                 Ok(None) => {
                     if start.elapsed() >= timeout {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        terminate_process_tree(&mut child);
                         return Ok(CommandOutput {
                             status_code: -1,
                             stdout: String::new(),
                             stderr: format!(
-                                "Process execution timed out after {} seconds",
+                                "Process execution timed out after {} seconds; process group terminated",
                                 timeout.as_secs()
                             ),
                         });
@@ -362,4 +386,21 @@ impl CommandRunner for SystemExecutor {
             }
         }
     }
+}
+
+fn terminate_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let process_group = -(child.id() as i32);
+        // The timed command is placed in its own process group before exec. Killing the
+        // negative process-group ID reaches descendants such as a shell-spawned restic helper.
+        unsafe {
+            let _ = kill(process_group, SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }

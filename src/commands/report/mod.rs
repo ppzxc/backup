@@ -8,6 +8,7 @@ pub use restore_drill::{
     aggregate_status, render_restore_drill_evidence_html, render_restore_drill_evidence_json,
 };
 
+use crate::commands::report::restore_drill::redact_restore_drill_diagnostic;
 use crate::commands::restore::{measure_restore_output, measure_restore_output_for_database};
 use crate::config::model::{AuditConfig, DatabaseType, ResticProfileConfig, RetentionPolicy};
 use crate::config::profile_resolver::ProfileResolver;
@@ -699,6 +700,29 @@ pub struct ReportCommandFailure {
     pub external_state_changes: Vec<String>,
 }
 
+#[derive(Debug)]
+struct RestoreDrillEvidenceExportFailure {
+    saved_paths: Vec<PathBuf>,
+    failures: Vec<String>,
+}
+
+impl std::fmt::Display for RestoreDrillEvidenceExportFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "restore drill evidence export failed; saved artifacts: {}; failures: {}",
+            self.saved_paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.failures.join("; ")
+        )
+    }
+}
+
+impl std::error::Error for RestoreDrillEvidenceExportFailure {}
+
 impl ReportCommandFailure {
     fn from_saved_report(message: String, report: &str) -> Self {
         let artifacts = saved_report_paths(report);
@@ -910,8 +934,8 @@ impl ReportCommand {
                         &report,
                     )
                     .into()),
-                    Err(report_error) => Err(ReportCommandFailure::from_saved_report(
-                        format!(
+                    Err(report_error) => {
+                        let message = format!(
                             "restore drill failed with status {:?}: {}; failure report also failed: {report_error}",
                             evidence.overall_status,
                             evidence
@@ -919,10 +943,27 @@ impl ReportCommand {
                                 .first()
                                 .map(String::as_str)
                                 .unwrap_or("no diagnostic provided")
-                        ),
-                        "",
-                    )
-                    .into()),
+                        );
+                        let (artifacts, external_state_changes) = report_error
+                            .downcast_ref::<RestoreDrillEvidenceExportFailure>()
+                            .map(|failure| {
+                                (
+                                    failure.saved_paths.clone(),
+                                    if failure.saved_paths.is_empty() {
+                                        Vec::new()
+                                    } else {
+                                        vec!["report artifacts committed".into()]
+                                    },
+                                )
+                            })
+                            .unwrap_or_default();
+                        Err(ReportCommandFailure {
+                            message,
+                            artifacts,
+                            external_state_changes,
+                        }
+                        .into())
+                    }
                 }
             }
             None => {
@@ -935,6 +976,7 @@ impl ReportCommand {
 
                 let mut saved_all = Vec::new();
                 let mut failures = Vec::new();
+                let mut partial_artifacts = Vec::new();
                 for r_type in report_types {
                     let evidence = if r_type == ReportType::RestoreDrill {
                         Some(
@@ -963,7 +1005,14 @@ impl ReportCommand {
                             output_dir,
                         );
                         if status != RestoreDrillStatus::Pass {
-                            failures.push(format!("restore drill: status {status:?}"));
+                            failures.push(format!(
+                                "restore drill: status {status:?}: {}",
+                                evidence
+                                    .diagnostics
+                                    .first()
+                                    .map(String::as_str)
+                                    .unwrap_or("no diagnostic provided")
+                            ));
                         }
                         report
                     } else {
@@ -982,20 +1031,39 @@ impl ReportCommand {
                     };
                     match report {
                         Ok(res_msg) => saved_all.push(res_msg),
-                        Err(error) => failures.push(format!("{r_type:?} report: {error}")),
+                        Err(error) => {
+                            if let Some(failure) =
+                                error.downcast_ref::<RestoreDrillEvidenceExportFailure>()
+                            {
+                                partial_artifacts.extend(failure.saved_paths.iter().cloned());
+                            }
+                            failures.push(format!("{r_type:?} report: {error}"));
+                        }
                     }
                 }
 
                 if !failures.is_empty() {
                     let output = saved_all.join("\n");
-                    return Err(ReportCommandFailure::from_saved_report(
+                    let mut command_failure = ReportCommandFailure::from_saved_report(
                         format!(
                             "report generation completed with failures: {}",
                             failures.join("; ")
                         ),
                         &output,
-                    )
-                    .into());
+                    );
+                    for artifact in partial_artifacts {
+                        if !command_failure.artifacts.contains(&artifact) {
+                            command_failure.artifacts.push(artifact);
+                        }
+                    }
+                    if !command_failure.artifacts.is_empty()
+                        && command_failure.external_state_changes.is_empty()
+                    {
+                        command_failure
+                            .external_state_changes
+                            .push("report artifacts committed".into());
+                    }
+                    return Err(command_failure.into());
                 }
 
                 Ok(format!(
@@ -1143,6 +1211,71 @@ fn storage_sensitive_values(storage: &RestoreDrillStorageConfig) -> Vec<String> 
     values
 }
 
+fn restore_error_sensitive_values(
+    config: &ReportConfig,
+    storage: &RestoreDrillStorageConfig,
+    target: Option<&Path>,
+) -> Vec<String> {
+    let mut values = storage_sensitive_values(storage);
+    values.push(config.restore_drill_work_dir.to_string_lossy().into_owned());
+    if let Some(target) = target {
+        values.push(target.to_string_lossy().into_owned());
+    }
+    values
+}
+
+fn restore_error_diagnostic(
+    config: &ReportConfig,
+    storage: &RestoreDrillStorageConfig,
+    target: Option<&Path>,
+    error: &anyhow::Error,
+) -> String {
+    redact_restore_drill_diagnostic(
+        &error.to_string(),
+        &restore_error_sensitive_values(config, storage, target),
+    )
+}
+
+fn restore_timed_out(error: &anyhow::Error) -> bool {
+    error.to_string().to_ascii_lowercase().contains("timed out")
+}
+
+fn restore_timeout_diagnostic(
+    config: &ReportConfig,
+    storage: &RestoreDrillStorageConfig,
+    target: &Path,
+    error: &anyhow::Error,
+    elapsed_milliseconds: u64,
+) -> (String, bool) {
+    let timed_out = restore_timed_out(error);
+    let detail = restore_error_diagnostic(config, storage, Some(target), error);
+    let diagnostic = if timed_out {
+        format!(
+            "restore timed out; elapsed_milliseconds={elapsed_milliseconds}; interrupted_stage=restore; process_group_termination=attempted; {detail}"
+        )
+    } else {
+        format!(
+            "restore failed; elapsed_milliseconds={elapsed_milliseconds}; interrupted_stage=restore; {detail}"
+        )
+    };
+    (diagnostic, timed_out)
+}
+
+fn close_restore_target(
+    mut result: RestoreDrillStorageResult,
+    target: tempfile::TempDir,
+) -> RestoreDrillStorageResult {
+    if target.close().is_err() {
+        result.status = RestoreDrillStatus::Fail;
+        result.failure_stage = Some("cleanup".into());
+        result.diagnostic = Some(match result.diagnostic.take() {
+            Some(diagnostic) => format!("{diagnostic}; temporary restore data cleanup failed"),
+            None => "temporary restore data cleanup failed".into(),
+        });
+    }
+    result
+}
+
 fn not_performed_restore_storage_result<C: RestoreDrillClock + ?Sized>(
     clock: &C,
     profile: &str,
@@ -1151,13 +1284,15 @@ fn not_performed_restore_storage_result<C: RestoreDrillClock + ?Sized>(
 ) -> RestoreDrillStorageResult {
     let operation_start = clock.now();
     let operation_finish = clock.now();
-    RestoreDrillStorageResult::not_performed(profile, backend, diagnostic).with_timing(
-        operation_start.wall_clock,
-        operation_finish.wall_clock,
-        operation_finish
-            .monotonic_milliseconds
-            .saturating_sub(operation_start.monotonic_milliseconds),
-    )
+    RestoreDrillStorageResult::not_performed(profile, backend, diagnostic)
+        .with_failure_stage("configuration")
+        .with_timing(
+            operation_start.wall_clock,
+            operation_finish.wall_clock,
+            operation_finish
+                .monotonic_milliseconds
+                .saturating_sub(operation_start.monotonic_milliseconds),
+        )
 }
 
 fn failed_restore_storage_result<C: RestoreDrillClock + ?Sized>(
@@ -1175,6 +1310,7 @@ fn failed_restore_storage_result<C: RestoreDrillClock + ?Sized>(
         operation_finish.wall_clock.clone(),
         diagnostic,
     )
+    .with_failure_stage("configuration")
     .with_timing(
         operation_start.wall_clock,
         operation_finish.wall_clock,
@@ -1200,8 +1336,13 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
         .collect::<Vec<_>>();
     if let Err(error) = prepare_restore_drill_work_dir(&config.restore_drill_work_dir) {
         let operation_finish = clock.now();
+        let diagnostic = redact_restore_drill_diagnostic(
+            &format!("restore drill work directory is unsafe: {error}"),
+            &[config.restore_drill_work_dir.to_string_lossy().into_owned()],
+        );
         return Ok(mark_database_validation_not_performed(
-            RestoreDrillStorageResult::not_performed(profile, &storage.backend, error.to_string())
+            RestoreDrillStorageResult::not_performed(profile, &storage.backend, diagnostic)
+                .with_failure_stage("workspace")
                 .with_timing(
                     operation_start.wall_clock,
                     operation_finish.wall_clock,
@@ -1237,7 +1378,7 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
             _ => RestoreDrillStorageResult::not_performed(profile, &storage.backend, diagnostic),
         };
         return Ok(mark_database_validation_not_performed(
-            result.with_timing(
+            result.with_failure_stage("snapshot-selection").with_timing(
                 operation_start.wall_clock,
                 operation_finish.wall_clock,
                 operation_finish
@@ -1263,12 +1404,39 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
         Ok(target) => target,
         Err(error) => {
             let operation_finish = clock.now();
+            let diagnostic = redact_restore_drill_diagnostic(
+                &format!("restore drill target directory could not be prepared: {error}"),
+                &restore_error_sensitive_values(config, storage, None),
+            );
             return Ok(mark_database_validation_not_performed(
-                RestoreDrillStorageResult::not_performed(
-                    profile,
-                    &storage.backend,
-                    format!("restore drill work directory could not be prepared: {error}"),
-                )
+                RestoreDrillStorageResult::not_performed(profile, &storage.backend, diagnostic)
+                    .with_failure_stage("workspace")
+                    .with_timing(
+                        operation_start.wall_clock,
+                        operation_finish.wall_clock,
+                        operation_finish
+                            .monotonic_milliseconds
+                            .saturating_sub(operation_start.monotonic_milliseconds),
+                    ),
+                database_type,
+            ));
+        }
+    };
+    if let Err(error) = ensure_private_restore_directory(target.path()) {
+        let operation_finish = clock.now();
+        let diagnostic = redact_restore_drill_diagnostic(
+            &format!("restore drill target directory is unsafe: {error}"),
+            &restore_error_sensitive_values(config, storage, Some(target.path())),
+        );
+        let cleanup_failed = target.close().is_err();
+        let diagnostic = if cleanup_failed {
+            format!("{diagnostic}; temporary restore data cleanup failed")
+        } else {
+            diagnostic
+        };
+        return Ok(mark_database_validation_not_performed(
+            RestoreDrillStorageResult::not_performed(profile, &storage.backend, diagnostic)
+                .with_failure_stage("workspace")
                 .with_timing(
                     operation_start.wall_clock,
                     operation_finish.wall_clock,
@@ -1276,15 +1444,15 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
                         .monotonic_milliseconds
                         .saturating_sub(operation_start.monotonic_milliseconds),
                 ),
-                database_type,
-            ));
-        }
-    };
+            database_type,
+        ));
+    }
+    let target_path = target.path().to_string_lossy().into_owned();
     let restore = runner.restore_with_env_and_timeout(
         &storage.repository,
         storage.password.expose_secret(),
         &snapshot_id,
-        target.path().to_string_lossy().as_ref(),
+        &target_path,
         &environment,
         Duration::from_millis(config.restore_drill_policy.timeout_milliseconds()),
     );
@@ -1293,17 +1461,30 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
         .monotonic_milliseconds
         .saturating_sub(operation_start.monotonic_milliseconds);
     if let Err(error) = restore {
+        let (diagnostic, timed_out) = restore_timeout_diagnostic(
+            config,
+            storage,
+            target.path(),
+            &error,
+            elapsed_milliseconds,
+        );
+        let result = RestoreDrillStorageResult::failed_after_snapshot(
+            profile,
+            &storage.backend,
+            snapshot_id,
+            snapshot_time,
+            operation_start.wall_clock,
+            operation_finish.wall_clock,
+            elapsed_milliseconds,
+            diagnostic,
+        );
+        let result = if timed_out {
+            result.mark_timed_out()
+        } else {
+            result
+        };
         return Ok(mark_database_validation_not_performed(
-            RestoreDrillStorageResult::failed_after_snapshot(
-                profile,
-                &storage.backend,
-                snapshot_id,
-                snapshot_time,
-                operation_start.wall_clock,
-                operation_finish.wall_clock,
-                elapsed_milliseconds,
-                error.to_string(),
-            ),
+            close_restore_target(result, target),
             database_type,
         ));
     }
@@ -1316,17 +1497,23 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
     let metrics = match metrics {
         Ok(metrics) => metrics,
         Err(error) => {
+            let diagnostic = format!(
+                "restore output validation failed; elapsed_milliseconds={elapsed_milliseconds}; interrupted_stage=validation; {}",
+                restore_error_diagnostic(config, storage, Some(target.path()), &error)
+            );
+            let result = RestoreDrillStorageResult::failed_after_snapshot(
+                profile,
+                &storage.backend,
+                snapshot_id,
+                snapshot_time,
+                operation_start.wall_clock,
+                operation_finish.wall_clock,
+                elapsed_milliseconds,
+                diagnostic,
+            )
+            .with_failure_stage("validation");
             return Ok(mark_database_validation_not_performed(
-                RestoreDrillStorageResult::failed_after_snapshot(
-                    profile,
-                    &storage.backend,
-                    snapshot_id,
-                    snapshot_time,
-                    operation_start.wall_clock,
-                    operation_finish.wall_clock,
-                    elapsed_milliseconds,
-                    error.to_string(),
-                ),
+                close_restore_target(result, target),
                 database_type,
             ));
         }
@@ -1353,8 +1540,9 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
         result.validation_status = RestoreDrillStatus::Fail;
         result.status = RestoreDrillStatus::Fail;
         result.diagnostic = Some(error);
+        result.failure_stage = Some("validation".into());
     }
-    Ok(result)
+    Ok(close_restore_target(result, target))
 }
 
 fn mark_database_validation_not_performed(
@@ -1369,6 +1557,7 @@ fn mark_database_validation_not_performed(
 }
 
 fn prepare_restore_drill_work_dir(path: &Path) -> Result<()> {
+    reject_symlink_components(path)?;
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             anyhow::bail!("restore-drill-work-dir cannot be a symlink")
@@ -1382,13 +1571,51 @@ fn prepare_restore_drill_work_dir(path: &Path) -> Result<()> {
         }
         Err(error) => return Err(error.into()),
     }
+    ensure_private_restore_directory(path)
+}
+
+fn ensure_private_restore_directory(path: &Path) -> Result<()> {
+    reject_symlink_components(path)?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!("restore-drill directory cannot be a symlink")
+    }
+    if !metadata.file_type().is_dir() {
+        anyhow::bail!("restore-drill directory must be a directory")
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-        let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+        let metadata = std::fs::symlink_metadata(path)?;
+        let mode = metadata.permissions().mode() & 0o777;
         if mode != 0o700 {
-            anyhow::bail!("restore-drill-work-dir permissions must be 700");
+            anyhow::bail!("restore-drill directory permissions must be 700");
+        }
+    }
+    Ok(())
+}
+
+fn reject_symlink_components(path: &Path) -> Result<()> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            std::path::Component::RootDir => current.push(std::path::MAIN_SEPARATOR.to_string()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => current.push(".."),
+            std::path::Component::Normal(part) => current.push(part),
+        }
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!("restore-drill directory cannot contain a symlink")
+            }
+            Ok(metadata) if !metadata.file_type().is_dir() => {
+                anyhow::bail!("restore-drill directory path contains a non-directory")
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
         }
     }
     Ok(())
@@ -1419,6 +1646,7 @@ pub fn execute_restore_drill_evidence_export(
         "restore-drill".into()
     };
     let mut saved_paths = Vec::new();
+    let mut failures = Vec::new();
     for format in formats {
         let extension = match format {
             ReportFormat::Html => "html",
@@ -1434,10 +1662,24 @@ pub fn execute_restore_drill_evidence_export(
         }
         let content = match format {
             ReportFormat::Html => render_restore_drill_evidence_html(evidence),
-            ReportFormat::Json => render_restore_drill_evidence_json(evidence)?,
+            ReportFormat::Json => match render_restore_drill_evidence_json(evidence) {
+                Ok(content) => content,
+                Err(error) => {
+                    failures.push(format!("{format:?}: {error}"));
+                    continue;
+                }
+            },
         };
-        write_file_with_perms(&path, &content)?;
-        saved_paths.push(path);
+        match write_file_with_perms(&path, &content) {
+            Ok(()) => saved_paths.push(path),
+            Err(error) => failures.push(format!("{format:?}: {error}")),
+        }
+    }
+    if !failures.is_empty() {
+        return Err(anyhow::Error::new(RestoreDrillEvidenceExportFailure {
+            saved_paths,
+            failures,
+        }));
     }
     Ok(format!(
         "ISMS report saved to {}",
@@ -1466,15 +1708,13 @@ pub fn render_html_isms_report_with_type(
 fn write_file_with_perms(file_path: &Path, content: &str) -> Result<()> {
     use std::io::Write;
 
-    if let Some(parent) = file_path.parent() {
-        std::fs::create_dir_all(parent)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
-        }
-    }
-    let parent = file_path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = file_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    prepare_private_report_directory(parent).map_err(|error| {
+        anyhow::anyhow!("report artifact parent directory is not safe: {error}")
+    })?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     temporary.write_all(content.as_bytes())?;
     temporary.flush()?;
@@ -1491,6 +1731,18 @@ fn write_file_with_perms(file_path: &Path, content: &str) -> Result<()> {
         )
     })?;
     Ok(())
+}
+
+fn prepare_private_report_directory(path: &Path) -> Result<()> {
+    reject_symlink_components(path)?;
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(path)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    ensure_private_restore_directory(path)
 }
 
 fn collision_safe_path(path: PathBuf) -> PathBuf {
