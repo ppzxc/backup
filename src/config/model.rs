@@ -8,6 +8,17 @@ pub const DEFAULT_PROFILES_FILENAME: &str = "profiles.yaml";
 pub const DEFAULT_PROFILES_PATH: &str = "/etc/backup/profiles.yaml";
 pub const BACKUP_PROFILE_TAG_PREFIX: &str = "backup-profile:";
 
+/// Secret values intended for a child-process environment. Values are exposed only when
+/// borrowed at the external command boundary.
+pub type SecretEnvironment = Vec<(String, SecretString)>;
+
+pub fn borrowed_environment(environment: &SecretEnvironment) -> Vec<(&str, &str)> {
+    environment
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.expose_secret().as_str()))
+        .collect()
+}
+
 /// Returns the CLI-owned tag that identifies snapshots produced by one exact Backup Profile.
 pub fn backup_profile_snapshot_tag(profile: &str) -> String {
     format!("{BACKUP_PROFILE_TAG_PREFIX}{profile}")
@@ -963,7 +974,7 @@ impl ResticProfileConfig {
     /// Resolves child-process-only S3 credentials for resticprofile commands.
     /// The unified configuration determines which sidecars are mandatory; no
     /// credential is retained in the configuration or process-global environment.
-    pub fn sidecar_environment(&self, config_dir: &Path) -> Result<Vec<(String, String)>> {
+    pub fn sidecar_environment(&self, config_dir: &Path) -> Result<SecretEnvironment> {
         let definitions = [
             (
                 "primary",
@@ -993,12 +1004,21 @@ impl ResticProfileConfig {
             let access_path = config_dir.join(access_file);
             let secret_path = config_dir.join(secret_file);
             if uses_s3_environment {
-                environment.push((access_var.into(), read_secure_sidecar(&access_path)?));
-                environment.push((secret_var.into(), read_secure_sidecar(&secret_path)?));
+                environment.push((
+                    access_var.into(),
+                    SecretString::new(read_secure_sidecar(&access_path)?),
+                ));
+                environment.push((
+                    secret_var.into(),
+                    SecretString::new(read_secure_sidecar(&secret_path)?),
+                ));
             } else {
                 for (variable, path) in [(access_var, access_path), (secret_var, secret_path)] {
                     if path.exists() {
-                        environment.push((variable.into(), read_secure_sidecar(&path)?));
+                        environment.push((
+                            variable.into(),
+                            SecretString::new(read_secure_sidecar(&path)?),
+                        ));
                     }
                 }
             }
@@ -1012,7 +1032,7 @@ impl ResticProfileConfig {
         &self,
         config_dir: &Path,
         backend: &str,
-    ) -> Result<Vec<(String, String)>> {
+    ) -> Result<SecretEnvironment> {
         let Some((access_var, secret_var)) = self.s3_sidecar_references(backend) else {
             return Ok(Vec::new());
         };
@@ -1023,11 +1043,11 @@ impl ResticProfileConfig {
         Ok(vec![
             (
                 "AWS_ACCESS_KEY_ID".into(),
-                read_secure_sidecar(&config_dir.join(access_file))?,
+                SecretString::new(read_secure_sidecar(&config_dir.join(access_file))?),
             ),
             (
                 "AWS_SECRET_ACCESS_KEY".into(),
-                read_secure_sidecar(&config_dir.join(secret_file))?,
+                SecretString::new(read_secure_sidecar(&config_dir.join(secret_file))?),
             ),
         ])
     }
@@ -1040,7 +1060,7 @@ impl ResticProfileConfig {
         &self,
         config_dir: &Path,
         profile: &str,
-    ) -> Result<Vec<(String, String)>> {
+    ) -> Result<SecretEnvironment> {
         let Some(target_name) = self.effective_copy_profile(profile)? else {
             return Ok(Vec::new());
         };
@@ -1056,11 +1076,11 @@ impl ResticProfileConfig {
         Ok(vec![
             (
                 "AWS_ACCESS_KEY_ID".into(),
-                read_secure_sidecar(&config_dir.join(access_file))?,
+                SecretString::new(read_secure_sidecar(&config_dir.join(access_file))?),
             ),
             (
                 "AWS_SECRET_ACCESS_KEY".into(),
-                read_secure_sidecar(&config_dir.join(secret_file))?,
+                SecretString::new(read_secure_sidecar(&config_dir.join(secret_file))?),
             ),
         ])
     }
@@ -1167,6 +1187,39 @@ impl ResticProfileConfig {
             backup.tag = Some(normalize_backup_profile_tags(tags, &profile.name));
         }
         Ok(())
+    }
+
+    /// Verifies that an operational Backup Profile can only create snapshots carrying
+    /// its exact CLI-owned identity tag. Existing legacy snapshots remain untouched;
+    /// this guard only protects new backup executions from producing ambiguous snapshots.
+    pub fn validate_reserved_backup_profile_tag(&self, profile: &str) -> Result<()> {
+        let expected = backup_profile_snapshot_tag(profile);
+        let tags =
+            crate::config::profile_resolver::ProfileResolver::resolve_backup_tags(self, profile)?;
+        if !tags.iter().any(|tag| tag == &expected) {
+            anyhow::bail!(
+                "Backup Profile '{profile}' must declare the exact reserved snapshot tag '{expected}'"
+            );
+        }
+        Ok(())
+    }
+
+    /// Validates a concrete profiles file before an operational adapter is invoked.
+    pub fn validate_reserved_backup_profile_tag_at_path(path: &Path, profile: &str) -> Result<()> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                Self::load_from_path(path)?.validate_reserved_backup_profile_tag(profile)
+            }
+            Ok(_) => anyhow::bail!(
+                "profiles configuration '{}' is not a regular file",
+                path.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
+                "profiles configuration '{}' is not a regular file",
+                path.display()
+            ),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Resolves the copy target declared by a Backup Profile through its inheritance chain.

@@ -1,5 +1,7 @@
+use crate::config::model::borrowed_environment;
 use crate::runner::executor::{CommandRunner, SystemExecutor};
 use crate::runner::rclone::RcloneRunner;
+use crate::runner::restic::ResticTool;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -230,66 +232,44 @@ impl SystemHealthDiagnoser {
             detail: scheduler_detail,
         });
 
-        // 4. Restore Drill RTO Item: non-destructively restore the latest snapshot.
-        let start_time = std::time::Instant::now();
-        let restic_res = (|| -> anyhow::Result<_> {
-            use std::io::Write;
-            let config = crate::config::model::ResticProfileConfig::load_from_path(target_config)?;
-            let config_dir = target_config
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."));
-            let (repository, password) = config.backend_credentials(config_dir, "primary")?;
-            let mut password_file = tempfile::NamedTempFile::new()?;
-            password_file.write_all(password.as_bytes())?;
-            password_file.flush()?;
-            let target = tempfile::tempdir()?;
-            let password_path = password_file.path().to_string_lossy();
-            let target_path = target.path().to_string_lossy();
-            let owned_environment = config.sidecar_environment(config_dir)?;
-            let environment = owned_environment
+        // 4. Restore Drill RTO Item: use the same concrete tagged-snapshot Evidence seam as
+        // the public report command, so doctor never invents a "latest" identity or timing.
+        let (rto_status, rto_detail) = (|| -> anyhow::Result<_> {
+            let profiles = crate::config::model::ResticProfileConfig::load_from_path(target_config)?;
+            let config = crate::commands::report::ReportConfig::from_profiles(
+                &profiles,
+                target_config,
+            )?;
+            let restic = ResticTool::new(runner);
+            let evidence = crate::commands::report::execute_restore_drill_with_runner(
+                &config,
+                &restic,
+            )?;
+            let elapsed_milliseconds = evidence
+                .storage_results
                 .iter()
-                .map(|(key, value)| (key.as_str(), value.as_str()))
-                .collect::<Vec<_>>();
-            let output = runner.run_with_env(
-                "restic",
-                &[
-                    "-r",
-                    &repository,
-                    "--password-file",
-                    &password_path,
-                    "restore",
-                    "latest",
-                    "--target",
-                    &target_path,
-                ],
-                &environment,
-            )?;
-            if output.status_code != 0 {
-                anyhow::bail!("restic restore exited with {}", output.status_code);
-            }
-            crate::commands::restore::validate_restored_output(
-                target.path(),
-                config
-                    .application
-                    .as_ref()
-                    .and_then(|application| application.database.as_ref())
-                    .is_some(),
-            )?;
-            Ok(())
-        })();
-        let elapsed = start_time.elapsed().as_secs_f64();
-
-        let (rto_status, rto_detail) = if restic_res.is_ok() {
-            (
-                DoctorStatus::Pass,
-                format!("{:.1}s (Latest snapshot restored and validated)", elapsed),
-            )
-        } else {
+                .filter_map(|result| result.elapsed_milliseconds)
+                .max()
+                .unwrap_or_default();
+            let status = evidence.overall_status;
+            let doctor_status = if status == crate::commands::report::RestoreDrillStatus::Pass {
+                DoctorStatus::Pass
+            } else {
+                DoctorStatus::Fail
+            };
+            Ok((
+                doctor_status,
+                format!(
+                    "Restore Drill Evidence status={status:?}, elapsed_milliseconds={elapsed_milliseconds}"
+                ),
+            ))
+        })()
+        .unwrap_or_else(|error| {
             (
                 DoctorStatus::Fail,
-                format!("{elapsed:.1}s (restic check could not execute)"),
+                format!("Restore Drill Evidence unavailable: {error}"),
             )
-        };
+        });
 
         items.push(DoctorItem {
             category: DoctorCategory::System,
@@ -344,10 +324,7 @@ fn check_restic_connectivity<C: CommandRunner + ?Sized>(
     password_file.flush()?;
     let password_path = password_file.path().to_string_lossy();
     let owned_environment = config.sidecar_environment(config_dir)?;
-    let environment = owned_environment
-        .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect::<Vec<_>>();
+    let environment = borrowed_environment(&owned_environment);
     let output = runner.run_with_env(
         "restic",
         &[

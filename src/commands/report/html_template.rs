@@ -1,12 +1,5 @@
 use crate::commands::report::{AuditDiagnosticResults, RealReportData, ReportType};
 
-/// Render an injected Restore Drill Evidence value without collecting any runtime data.
-pub fn render_restore_drill_evidence(
-    evidence: &crate::commands::report::restore_drill::RestoreDrillEvidence,
-) -> String {
-    crate::commands::report::restore_drill::render_restore_drill_evidence_html(evidence)
-}
-
 const COMMON_REPORT_CSS: &str = r#"
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
     body {

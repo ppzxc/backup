@@ -211,23 +211,7 @@ fn spawn_cleanup_watchdog(resources: &E2eResources) {
 }
 
 fn runner_attempt(resources: &E2eResources, script: &str) -> Result<String, String> {
-    let wrapped_script = format!(
-        r#"mkdir -p /work
-backup() {{
-  local profiles="" arg next_is_profiles=false
-  for arg in "$@"; do
-    if "$next_is_profiles"; then profiles="$arg"; next_is_profiles=false; continue; fi
-    [ "$arg" = "--profiles" ] && next_is_profiles=true
-  done
-  if [ -n "$profiles" ]; then
-    printf 'e2e-password' >/work/restic-password
-    chmod 600 /work/restic-password
-    sed -i 's/^    password: e2e-password$/    password-file: \/work\/restic-password/' "$profiles"
-  fi
-  command /usr/local/bin/backup "$@"
-}}
-{script}"#,
-    );
+    let wrapped_script = script.to_owned();
     let output = run_command_with_timeout(
         "docker",
         &["exec", &resources.runner, "bash", "-ceu", &wrapped_script],
@@ -389,6 +373,8 @@ where
 #[test]
 fn wizard_storage_script_verifies_scheduled_execution() {
     let script = wizard_storage_script("s3-primary", "'s3-primary'", false);
+    let multi_script = wizard_multi_profile_script("s3-primary", "'s3-primary'");
+    let no_snapshot_script = wizard_no_snapshot_script("s3-primary", "'s3-primary'");
 
     assert!(script.contains("BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00'"));
     assert!(script.contains("systemctl set-environment HOME=/root"));
@@ -405,6 +391,9 @@ fn wizard_storage_script_verifies_scheduled_execution() {
     assert!(script.contains("backup --profiles /work/s3-primary/profiles.yaml schedule disable"));
     assert!(script.contains("snapshots | grep -q 'Primary snapshots'"));
     assert!(script.contains("status | grep -q 'Profile:'"));
+    assert!(multi_script.contains("secondary-files"));
+    assert!(no_snapshot_script.contains("no-snapshot.yaml"));
+    assert!(no_snapshot_script.contains("no_snapshot_status=$?"));
 }
 
 #[test]
@@ -424,6 +413,8 @@ fn database_matrix_uses_setup_wizard_configuration_as_its_only_input() {
     assert!(!script.contains("restic -r s3:"));
     assert!(script.contains("restore --target /work/database-restore"));
     assert!(script.contains("--host=backup-e2e-postgres16"));
+    assert!(script.contains("malformed-sql-drill"));
+    assert!(script.contains("signature_verified\": false"));
 }
 
 #[test]
@@ -622,6 +613,151 @@ fi"#,
     )
 }
 
+fn wizard_multi_profile_script(name: &str, answers: &str) -> String {
+    // Re-run the real Setup Wizard with a second Backup Profile and an explicit
+    // secondary S3 target.  Answering "n" to the reuse prompt is intentional:
+    // it exercises the wizard's full multi-backend path instead of manufacturing
+    // a profile by editing YAML in the test shell.
+    let multi_answers = [
+        "'secondary-files'",
+        "''",
+        "'/work/source'",
+        "''",
+        "'1'",
+        "'1'",
+        "'1'",
+        "'n'",
+        "'\x1b[B'",
+        "''",
+        "'http://backup-e2e-minio:9000'",
+        "'minioadmin'",
+        "'minioadmin'",
+        "''",
+        "'wizard-s3-primary'",
+        "''",
+        "'y'",
+        "'\x1b[B'",
+        "''",
+        "'http://backup-e2e-minio:9000'",
+        "'minioadmin'",
+        "'minioadmin'",
+        "''",
+        "'wizard-s3-secondary'",
+        "''",
+        "''",
+        "'/work/reports/s3-primary'",
+        "''",
+        "''",
+    ]
+    .join(" ");
+    format!(
+        r#"printf '%s\n' {base_answers} | BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' TERM=dumb script -qec '/usr/local/bin/backup --profiles /work/{name}/multi-profiles.yaml setup --lang en' /dev/null
+printf '%s\n' {multi_answers} | BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' TERM=dumb script -qec '/usr/local/bin/backup --profiles /work/{name}/multi-profiles.yaml setup --lang en' /dev/null
+backup --profiles /work/{name}/multi-profiles.yaml schedule disable
+backup --profiles /work/{name}/multi-profiles.yaml run --skip-database
+if [ ! -s /work/{name}/secondary-aws-access-key-id ] || [ ! -s /work/{name}/secondary-aws-secret-access-key ] || ! grep -q '^  secondary:' /work/{name}/multi-profiles.yaml; then
+  echo 'multi-profile setup did not persist the secondary Backend Profile'
+  sed -n '1,220p' /work/{name}/multi-profiles.yaml
+  find /work/{name} -maxdepth 1 -type f -printf '%f %m\n' | sort
+  exit 1
+fi
+multi_drill=/work/reports/{name}/multi-profile-restore-drill
+rm -f "$multi_drill.html" "$multi_drill.json"
+set +e
+backup --profiles /work/{name}/multi-profiles.yaml report restore-drill --file "$multi_drill"
+multi_report_status=$?
+set -e
+if [ "$multi_report_status" != 0 ]; then
+  cat "$multi_drill.json"
+  exit "$multi_report_status"
+fi
+grep -Fq '"profile": "{name}"' "$multi_drill.json"
+grep -Fq '"profile": "secondary-files"' "$multi_drill.json"
+test "$(grep -c '"status": "pass"' "$multi_drill.json")" -ge 2"#,
+        base_answers = answers,
+        multi_answers = multi_answers,
+    )
+}
+
+fn wizard_no_snapshot_script(name: &str, answers: &str) -> String {
+    let empty_answers = answers
+        .replacen("'s3-primary'", "'empty-snapshot'", 1)
+        .replacen("'wizard-s3-primary'", "'wizard-s3-empty'", 1);
+    format!(
+        r#"printf '%s\n' {empty_answers} | BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' TERM=dumb script -qec '/usr/local/bin/backup --profiles /work/{name}/no-snapshot.yaml setup --lang en' /dev/null
+backup --profiles /work/{name}/no-snapshot.yaml schedule disable
+set +e
+backup --profiles /work/{name}/no-snapshot.yaml report restore-drill --file /work/reports/{name}/no-snapshot-drill >/work/{name}/no-snapshot.out 2>&1
+no_snapshot_status=$?
+set -e
+test "$no_snapshot_status" = 1
+grep -Fq 'not_performed' /work/reports/{name}/no-snapshot-drill.json"#,
+        empty_answers = empty_answers,
+    )
+}
+
+fn wizard_untagged_snapshot_script(name: &str, answers: &str) -> String {
+    let answers = answers
+        .replacen("'s3-primary'", "'untagged-snapshot'", 1)
+        .replacen("'wizard-s3-primary'", "'wizard-s3-untagged'", 1);
+    format!(
+        r#"printf '%s\n' {answers} | BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' TERM=dumb script -qec '/usr/local/bin/backup --profiles /work/{name}/untagged-snapshot.yaml setup --lang en' /dev/null >/work/{name}/untagged-setup.out 2>&1
+echo untagged-setup-ok
+backup --profiles /work/{name}/untagged-snapshot.yaml schedule disable
+echo untagged-schedule-ok
+set +e
+AWS_ACCESS_KEY_ID=minioadmin AWS_SECRET_ACCESS_KEY=minioadmin RESTIC_PASSWORD_FILE=/work/{name}/enc restic -r s3:http://backup-e2e-minio:9000/wizard-s3-untagged backup --tag legacy-untagged /work/source >/work/{name}/untagged-backup.out 2>&1
+legacy_backup_status=$?
+set -e
+if [ "$legacy_backup_status" != 0 ]; then cat /work/{name}/untagged-backup.out; exit "$legacy_backup_status"; fi
+echo untagged-backup-ok
+set +e
+backup --profiles /work/{name}/untagged-snapshot.yaml report restore-drill --file /work/reports/{name}/untagged-snapshot-drill >/work/{name}/untagged-snapshot.out 2>&1
+untagged_status=$?
+set -e
+if [ "$untagged_status" != 1 ]; then cat /work/{name}/untagged-snapshot.out; exit 1; fi
+echo untagged-report-status=$untagged_status
+grep -Fq 'not_performed' /work/reports/{name}/untagged-snapshot-drill.json"#
+    )
+}
+
+fn wizard_empty_output_script(name: &str, answers: &str) -> String {
+    let answers = answers
+        .replacen("'s3-primary'", "'empty-output'", 1)
+        .replacen("'wizard-s3-primary'", "'wizard-s3-empty-output'", 1)
+        .replacen("'/work/source'", "'/work/empty-source'", 1);
+    format!(
+        r#"mkdir -p /work/empty-source
+: >/work/empty-source/only-empty-file
+printf '%s\n' {answers} | BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' TERM=dumb script -qec '/usr/local/bin/backup --profiles /work/{name}/empty-output.yaml setup --lang en' /dev/null >/work/{name}/empty-output-setup.out 2>&1
+backup --profiles /work/{name}/empty-output.yaml schedule disable
+backup --profiles /work/{name}/empty-output.yaml run --skip-database --skip-secondary-sync
+set +e
+backup --profiles /work/{name}/empty-output.yaml report restore-drill --file /work/reports/{name}/empty-output-drill >/work/{name}/empty-output.out 2>&1
+empty_output_status=$?
+set -e
+if [ "$empty_output_status" != 1 ]; then cat /work/{name}/empty-output.out; exit 1; fi
+if ! grep -Fq '"overall_status": "fail"' /work/reports/{name}/empty-output-drill.json; then cat /work/reports/{name}/empty-output-drill.json; exit 1; fi
+if ! grep -Fq 'Restore Output Validation' /work/reports/{name}/empty-output-drill.json; then cat /work/reports/{name}/empty-output-drill.json; exit 1; fi"#
+    )
+}
+
+fn wizard_secondary_failure_script(name: &str) -> String {
+    format!(
+        r#"chmod 000 /work/{name}/secondary-aws-access-key-id /work/{name}/secondary-aws-secret-access-key
+set +e
+backup --profiles /work/{name}/multi-profiles.yaml report restore-drill --file /work/reports/{name}/secondary-failure-drill >/work/{name}/secondary-failure.out 2>&1
+secondary_failure_status=$?
+set -e
+chmod 600 /work/{name}/secondary-aws-access-key-id /work/{name}/secondary-aws-secret-access-key
+test "$secondary_failure_status" = 1
+grep -Fq '"backend": "primary"' /work/reports/{name}/secondary-failure-drill.json
+grep -Fq '"backend": "secondary"' /work/reports/{name}/secondary-failure-drill.json
+grep -Fq '"status": "pass"' /work/reports/{name}/secondary-failure-drill.json
+grep -Fq '"status": "fail"' /work/reports/{name}/secondary-failure-drill.json"#
+    )
+}
+
 fn execution_report_poll_script(
     directory: &str,
     variable: &str,
@@ -667,6 +803,13 @@ fn wizard_storage_case(
         resources,
         &wizard_storage_script(name, &answers, has_secondary),
     );
+    if name == "s3-primary" {
+        runner(resources, &wizard_multi_profile_script(name, &answers));
+        runner(resources, &wizard_no_snapshot_script(name, &answers));
+        runner(resources, &wizard_untagged_snapshot_script(name, &answers));
+        runner(resources, &wizard_empty_output_script(name, &answers));
+        runner(resources, &wizard_secondary_failure_script(name));
+    }
 }
 
 fn database_setup_script(
@@ -745,9 +888,31 @@ fn database_setup_script(
     };
     let execute_flag = if database_type == "mysql" { "-e" } else { "-c" };
     let rows_only_flag = if database_type == "mysql" { "-N" } else { "-t" };
+    let malformed_sql_case = if database_type == "postgres" {
+        format!(
+            r#"
+# A concrete tagged snapshot with malformed SQL must fail signature validation.
+mkdir -p /work/{name}/e2e-bin
+printf '#!/bin/sh\nprintf "not a database dump\\n"\n' >/work/{name}/e2e-bin/pg_dump
+chmod 755 /work/{name}/e2e-bin/pg_dump
+PATH=/work/{name}/e2e-bin:$PATH backup --profiles /work/{name}/profiles.yaml database
+set +e
+backup --profiles /work/{name}/profiles.yaml report restore-drill --file /work/reports/{name}/malformed-sql-drill >/work/{name}/malformed-sql.out 2>&1
+malformed_sql_status=$?
+set -e
+test "$malformed_sql_status" = 1
+grep -Fq '"overall_status": "fail"' /work/reports/{name}/malformed-sql-drill.json
+            grep -Fq 'signature_verified": false' /work/reports/{name}/malformed-sql-drill.json
+"#,
+            name = name,
+        )
+    } else {
+        String::new()
+    };
     format!(
         r#"mkdir -p /work/{name}
 printf '%s\n' {answers} | BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' TERM=dumb script -qec '/usr/local/bin/backup --profiles /work/{name}/profiles.yaml setup --lang en' /dev/null
+backup --profiles /work/{name}/profiles.yaml schedule disable
 for _ in {{1..60}}; do {client} {connection_args} {execute_flag} 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done
 {client} {connection_args} {execute_flag} "{seed}"
 backup --profiles /work/{name}/profiles.yaml database
@@ -768,6 +933,10 @@ grep -Fq '"backend": "primary"' "$drill_base.json"
 test "$(stat -c '%a' "$drill_base.json")" = 600
 test "$(stat -c '%a' /work/reports/{name})" = 700
 ! grep -Eq 'rootpass|pgpass|BACKUP_DATABASE_CONNECTION_URL' "$drill_base.html" "$drill_base.json"
+{malformed_sql_case}
+# Restore coverage must still use a valid, newest tagged database snapshot after
+# the intentionally malformed dump has been proven to fail validation.
+{valid_database_backup}
 {client} {connection_args} {execute_flag} 'DROP TABLE {table};'
 rm -rf /work/{name}-restore
 backup --profiles /work/{name}/profiles.yaml restore --target /work/{name}-restore
@@ -775,6 +944,12 @@ backup --profiles /work/{name}/profiles.yaml restore --target /work/{name}-resto
 {client} {connection_args} {rows_only_flag} {execute_flag} "{query}" | grep -q '{expected_value}'
 backup --profiles /work/{name}/profiles.yaml snapshots | grep -q 'Primary snapshots'
 backup --profiles /work/{name}/profiles.yaml status | grep -q 'Profile: {name}'"#,
+        malformed_sql_case = malformed_sql_case,
+        valid_database_backup = if database_type == "postgres" {
+            format!("backup --profiles /work/{name}/profiles.yaml database")
+        } else {
+            String::new()
+        },
     )
 }
 

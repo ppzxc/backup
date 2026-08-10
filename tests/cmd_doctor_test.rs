@@ -231,10 +231,15 @@ fn doctor_probes_non_rclone_backend_through_restic() {
     }
 
     impl CommandRunner for RecordingCommands {
-        fn run(&self, _program: &str, _args: &[&str]) -> Result<CommandOutput> {
+        fn run(&self, _program: &str, args: &[&str]) -> Result<CommandOutput> {
+            let stdout = if args.contains(&"--json") {
+                r#"[{"id":"snapshot-001","time":"2026-08-10T09:00:00Z","tags":["backup-profile:daily"]}]"#.into()
+            } else {
+                "Reference ID: test".into()
+            };
             Ok(CommandOutput {
                 status_code: 0,
-                stdout: "Reference ID: test".into(),
+                stdout,
                 stderr: String::new(),
             })
         }
@@ -256,9 +261,14 @@ fn doctor_probes_non_rclone_backend_through_restic() {
             {
                 std::fs::write(Path::new(target).join("restored.txt"), "restored").unwrap();
             }
+            let stdout = if args.contains(&"--json") {
+                r#"[{"id":"snapshot-001","time":"2026-08-10T09:00:00Z","tags":["backup-profile:daily"]}]"#.into()
+            } else {
+                String::new()
+            };
             Ok(CommandOutput {
                 status_code: 0,
-                stdout: String::new(),
+                stdout: stdout.into(),
                 stderr: String::new(),
             })
         }
@@ -269,7 +279,10 @@ fn doctor_probes_non_rclone_backend_through_restic() {
     let config_path = config.path().join("profiles.yaml");
     write_mode_600(
         &config_path,
-        "version: '2'\nprofiles:\n  primary:\n    repository: s3:s3.example/bucket\n    password-file: password\n",
+        &format!(
+            "version: '2'\napplication:\n  audit:\n    restore-drill-work-dir: {}/restore-drill\nprofiles:\n  primary:\n    repository: s3:s3.example/bucket\n    password-file: password\n  daily:\n    inherit: primary\n    backup:\n      source: ['/data']\n      tag: ['backup-profile:daily']\n",
+            config.path().display()
+        ),
     );
     write_mode_600(&config.path().join("password"), "doctor-password");
     let rclone = RecordingRclone {
@@ -295,4 +308,107 @@ fn doctor_probes_non_rclone_backend_through_restic() {
         call.first().is_some_and(|program| program == "restic")
             && call.iter().any(|argument| argument == "snapshots")
     }));
+}
+
+#[test]
+fn doctor_restore_check_uses_concrete_tagged_snapshot_evidence() {
+    use anyhow::Result;
+    use backup::commands::doctor::{DoctorCategory, SystemHealthDiagnoser};
+    use backup::runner::executor::{CommandOutput, CommandRunner};
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    struct EvidenceCommands {
+        calls: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl CommandRunner for EvidenceCommands {
+        fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput> {
+            self.calls.lock().unwrap().push(
+                std::iter::once(program.to_string())
+                    .chain(args.iter().map(|arg| (*arg).to_string()))
+                    .collect(),
+            );
+            let stdout = if args.contains(&"--json") {
+                r#"[{"id":"snapshot-001","time":"2026-08-10T09:00:00Z","tags":["backup-profile:daily"]}]"#
+            } else {
+                "Reference ID: test"
+            };
+            Ok(CommandOutput {
+                status_code: 0,
+                stdout: stdout.into(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_with_env(
+            &self,
+            program: &str,
+            args: &[&str],
+            _environment: &[(&str, &str)],
+        ) -> Result<CommandOutput> {
+            self.calls.lock().unwrap().push(
+                std::iter::once(program.to_string())
+                    .chain(args.iter().map(|arg| (*arg).to_string()))
+                    .collect(),
+            );
+            if args.contains(&"--target") {
+                let target = args
+                    .windows(2)
+                    .find_map(|pair| (pair[0] == "--target").then_some(pair[1]))
+                    .unwrap();
+                std::fs::write(Path::new(target).join("restored.txt"), "restored")?;
+            }
+            let stdout = if args.contains(&"--json") {
+                r#"[{"id":"snapshot-001","time":"2026-08-10T09:00:00Z","tags":["backup-profile:daily"]}]"#
+            } else {
+                "snapshot latest"
+            };
+            Ok(CommandOutput {
+                status_code: 0,
+                stdout: stdout.into(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = temp.path().join("profiles.yaml");
+    write_mode_600(
+        &config_path,
+        &format!(
+            "version: '2'\napplication:\n  audit:\n    restore-drill-work-dir: {}/restore-drill\nprofiles:\n  primary:\n    repository: /primary\n    password-file: password\n  daily:\n    inherit: primary\n    backup:\n      source: ['/data']\n",
+            temp.path().display()
+        ),
+    );
+    write_mode_600(&temp.path().join("password"), "doctor-password");
+    let runner = EvidenceCommands {
+        calls: Mutex::new(Vec::new()),
+    };
+
+    let snapshot = SystemHealthDiagnoser::diagnose_with_runner(
+        &MockRcloneRunner::new(0, "unused"),
+        &runner,
+        Some(&config_path),
+    );
+
+    let restore_item = snapshot
+        .items
+        .iter()
+        .find(|item| item.category == DoctorCategory::System && item.criterion.contains("복구"))
+        .unwrap();
+    assert_eq!(
+        restore_item.status,
+        backup::commands::doctor::DoctorStatus::Pass,
+        "{restore_item:?}; calls={:?}",
+        runner.calls.lock().unwrap()
+    );
+    let calls = runner.calls.lock().unwrap();
+    let restore_call = calls
+        .iter()
+        .find(|call| call.contains(&"restore".into()))
+        .unwrap();
+    assert!(restore_call.contains(&"snapshot-001".into()));
+    assert!(!restore_call.contains(&"latest".into()));
+    assert!(!restore_item.detail.contains("Latest snapshot"));
 }

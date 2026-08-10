@@ -9,7 +9,7 @@ use backup::commands::report::{
 };
 use backup::config::model::{DatabaseType, ResticProfileConfig};
 use backup::runner::restic::ResticRunner;
-use backup::runner::snapshot::SnapshotInfo;
+use backup::runner::snapshot::{SnapshotInfo, SnapshotJsonError};
 use secrecy::SecretString;
 use std::collections::VecDeque;
 use std::fs;
@@ -42,6 +42,7 @@ impl RestoreDrillClock for FixedClock {
 struct StrictRestoreRunner {
     calls: Mutex<Vec<String>>,
     snapshots: Vec<SnapshotInfo>,
+    snapshot_error: Option<SnapshotJsonError>,
     restore_error: Option<String>,
 }
 
@@ -50,6 +51,7 @@ impl StrictRestoreRunner {
         Self {
             calls: Mutex::new(Vec::new()),
             snapshots,
+            snapshot_error: None,
             restore_error: None,
         }
     }
@@ -58,7 +60,17 @@ impl StrictRestoreRunner {
         Self {
             calls: Mutex::new(Vec::new()),
             snapshots,
+            snapshot_error: None,
             restore_error: Some(error.into()),
+        }
+    }
+
+    fn malformed_snapshots() -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            snapshots: Vec::new(),
+            snapshot_error: Some(SnapshotJsonError::Malformed),
+            restore_error: None,
         }
     }
 
@@ -94,6 +106,9 @@ impl ResticRunner for StrictRestoreRunner {
         assert_eq!(password, "primary-secret");
         assert_eq!(environment, [("AWS_ACCESS_KEY_ID", "access")]);
         self.calls.lock().unwrap().push("list-snapshots".into());
+        if let Some(error) = self.snapshot_error {
+            return Err(anyhow::Error::new(error));
+        }
         Ok(self.snapshots.clone())
     }
 
@@ -164,7 +179,10 @@ fn config(root: &Path) -> ReportConfig {
     config.profile = "daily-files".into();
     config.primary_repository = "s3:primary-repository".into();
     config.primary_password = SecretString::new("primary-secret".into());
-    config.primary_environment = vec![("AWS_ACCESS_KEY_ID".into(), "access".into())];
+    config.primary_environment = vec![(
+        "AWS_ACCESS_KEY_ID".into(),
+        SecretString::new("access".into()),
+    )];
     config.restore_drill_work_dir = root.join("restore-drill");
     config
 }
@@ -437,6 +455,7 @@ fn restore_drill_marks_database_validation_not_performed_when_backend_is_unconfi
             password: SecretString::new(String::new()),
             environment: Vec::new(),
         }),
+        primary_diagnostic: None,
         secondary: None,
         secondary_diagnostic: None,
     }];
@@ -504,6 +523,7 @@ fn restore_drill_reports_each_database_signature_failure_for_both_supported_type
                     password: SecretString::new("primary-secret".into()),
                     environment: Vec::new(),
                 }),
+                primary_diagnostic: None,
                 secondary: None,
                 secondary_diagnostic: None,
             }];
@@ -638,6 +658,31 @@ fn restore_drill_missing_tag_is_not_performed_and_never_restores_latest() {
     assert_eq!(evidence.overall_status, RestoreDrillStatus::NotPerformed);
     assert_eq!(runner.calls(), ["list-snapshots"]);
     assert!(evidence.storage_results[0].snapshot_id.is_none());
+}
+
+#[test]
+fn restore_drill_malformed_snapshot_json_is_not_performed() {
+    let temp = tempdir().unwrap();
+    let config = config(temp.path());
+    let runner = StrictRestoreRunner::malformed_snapshots();
+    let clock = FixedClock::new([
+        timestamp("2026-08-07T10:00:00Z", 10_000),
+        timestamp("2026-08-07T10:00:01Z", 11_000),
+        timestamp("2026-08-07T10:00:02Z", 12_000),
+        timestamp("2026-08-07T10:00:03Z", 13_000),
+    ]);
+
+    let evidence = execute_restore_drill_with_runner_and_clock(&config, &runner, &clock).unwrap();
+    assert_eq!(evidence.overall_status, RestoreDrillStatus::NotPerformed);
+    assert_eq!(
+        evidence.storage_results[0].status,
+        RestoreDrillStatus::NotPerformed
+    );
+    assert_eq!(
+        evidence.storage_results[0].failure_stage.as_deref(),
+        Some("snapshot-selection")
+    );
+    assert_eq!(runner.calls(), ["list-snapshots"]);
 }
 
 #[test]
@@ -1014,7 +1059,10 @@ fn restore_drill_keeps_primary_evidence_when_secondary_configuration_is_inactive
         ["list:/primary", "restore:/primary:/primary-alpha-snapshot"]
     );
     assert_eq!(evidence.storage_results[0].status, RestoreDrillStatus::Pass);
-    assert_eq!(evidence.storage_results[1].status, RestoreDrillStatus::Fail);
+    assert_eq!(
+        evidence.storage_results[1].status,
+        RestoreDrillStatus::NotApplicable
+    );
     assert!(
         evidence.storage_results[1]
             .diagnostic

@@ -911,15 +911,83 @@ fn renderable_evidence(evidence: &RestoreDrillEvidence) -> RestoreDrillEvidence 
     evidence
 }
 
-fn primary_result(evidence: &RestoreDrillEvidence) -> Option<&RestoreDrillStorageResult> {
-    evidence
+fn compatibility_primary_results(
+    evidence: &RestoreDrillEvidence,
+) -> Vec<&RestoreDrillStorageResult> {
+    let file_results = evidence
         .storage_results
         .iter()
-        .find(|result| result.backend == "primary")
+        .filter(|result| result.backend == "primary" && result.database_verification.is_none())
+        .collect::<Vec<_>>();
+    if file_results.is_empty() {
+        evidence
+            .storage_results
+            .iter()
+            .filter(|result| result.backend == "primary")
+            .collect()
+    } else {
+        file_results
+    }
 }
 
-fn compatibility_result(evidence: &RestoreDrillEvidence) -> Option<&RestoreDrillStorageResult> {
-    primary_result(evidence)
+fn aggregate_primary_elapsed_milliseconds(results: &[&RestoreDrillStorageResult]) -> Option<u64> {
+    results
+        .iter()
+        .filter_map(|result| result.elapsed_milliseconds)
+        .max()
+}
+
+fn aggregate_primary_total_bytes(results: &[&RestoreDrillStorageResult]) -> Option<u64> {
+    (!results.is_empty())
+        .then(|| {
+            results
+                .iter()
+                .map(|result| result.total_bytes)
+                .collect::<Option<Vec<_>>>()
+                .and_then(|values| values.into_iter().try_fold(0_u64, u64::checked_add))
+        })
+        .flatten()
+}
+
+fn aggregate_primary_rto(results: &[&RestoreDrillStorageResult]) -> Option<bool> {
+    if results.is_empty() {
+        return None;
+    }
+    if results.iter().any(|result| {
+        result.status == RestoreDrillStatus::Fail
+            || result.status == RestoreDrillStatus::NotPerformed
+            || result.rto_satisfied == Some(false)
+    }) {
+        Some(false)
+    } else if results
+        .iter()
+        .all(|result| result.rto_satisfied == Some(true))
+    {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+fn aggregate_primary_integrity(results: &[&RestoreDrillStorageResult]) -> Option<bool> {
+    if results.is_empty() {
+        return None;
+    }
+    if results.iter().any(|result| {
+        matches!(
+            result.validation_status,
+            RestoreDrillStatus::Fail | RestoreDrillStatus::NotPerformed
+        )
+    }) {
+        Some(false)
+    } else if results
+        .iter()
+        .all(|result| result.validation_status == RestoreDrillStatus::Pass)
+    {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 fn human_elapsed(milliseconds: Option<u64>) -> String {
@@ -930,29 +998,34 @@ fn human_elapsed(milliseconds: Option<u64>) -> String {
 
 /// Pure JSON renderer for a previously collected Restore Drill Evidence value.
 ///
-/// The compatibility fields are derived from the primary result in this same value. They remain
-/// present for existing consumers while `storage_results` is the lossless multi-profile contract.
+/// The compatibility fields are derived from the real file-Primary aggregate in this same value.
+/// Snapshot identity is only emitted when that aggregate has one member; consumers that need
+/// per-profile identity must use the lossless `storage_results` contract.
 pub fn render_restore_drill_evidence_json(evidence: &RestoreDrillEvidence) -> Result<String> {
     let evidence = renderable_evidence(evidence);
     let database_result = evidence
         .storage_results
         .iter()
         .find(|result| result.database_verification.is_some());
-    let primary = compatibility_result(&evidence);
+    let primary_results = compatibility_primary_results(&evidence);
+    let primary = primary_results.first().copied();
     let mut value = serde_json::to_value(&evidence)?;
     let object = value
         .as_object_mut()
         .expect("RestoreDrillEvidence serializes as an object");
     let status = evidence.overall_status;
-    let primary_snapshot_id = primary.and_then(|result| result.snapshot_id.clone());
-    let primary_snapshot_time = primary.and_then(|result| result.snapshot_time.clone());
-    let primary_elapsed_ms = primary.and_then(|result| result.elapsed_milliseconds);
-    let primary_elapsed_seconds = primary
-        .and_then(|result| result.elapsed_seconds)
-        .or_else(|| primary_elapsed_ms.map(|value| value / 1_000));
-    let primary_rto_satisfied = primary.and_then(|result| result.rto_satisfied);
-    let primary_integrity =
-        primary.map(|result| result.validation_status == RestoreDrillStatus::Pass);
+    let single_primary = primary_results.len() == 1;
+    let primary_snapshot_id = single_primary
+        .then(|| primary.and_then(|result| result.snapshot_id.clone()))
+        .flatten();
+    let primary_snapshot_time = single_primary
+        .then(|| primary.and_then(|result| result.snapshot_time.clone()))
+        .flatten();
+    let primary_elapsed_ms = aggregate_primary_elapsed_milliseconds(&primary_results);
+    let primary_elapsed_seconds = primary_elapsed_ms.map(|value| value / 1_000);
+    let primary_rto_satisfied = aggregate_primary_rto(&primary_results);
+    let primary_integrity = aggregate_primary_integrity(&primary_results);
+    let primary_total_bytes = aggregate_primary_total_bytes(&primary_results);
     let mut database_verification = if let Some(result) = database_result {
         serde_json::to_value(
             result
@@ -996,7 +1069,7 @@ pub fn render_restore_drill_evidence_json(evidence: &RestoreDrillEvidence) -> Re
     object.insert(
         "recovery_results".into(),
         json!({
-            "data_size_human": human_bytes(primary.and_then(|result| result.total_bytes)),
+            "data_size_human": human_bytes(primary_total_bytes),
             "elapsed_seconds": primary_elapsed_seconds,
             "elapsed_milliseconds": primary_elapsed_ms,
             "elapsed_human": human_elapsed(primary_elapsed_ms),

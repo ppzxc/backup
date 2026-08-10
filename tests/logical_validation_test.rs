@@ -3,7 +3,6 @@ mod support;
 use backup::runner::executor::CommandOutput;
 use backup::runner::resticprofile::{ResticProfileRunner, ResticProfileTool};
 use std::fs;
-use std::path::Path;
 use support::MockExecutor;
 use tempfile::tempdir;
 
@@ -25,6 +24,14 @@ fn test_permission_failure_detection() {
 
 #[test]
 fn test_executor_non_zero_exit_error_propagation() {
+    let directory = tempdir().unwrap();
+    let config_path = directory.path().join("profiles.yaml");
+    fs::write(
+        &config_path,
+        "version: '2'\nprofiles:\n  self:\n    repository: /tmp/repository\n    backup:\n      source: ['/work/source']\n      tag: ['backup-profile:self']\n",
+    )
+    .unwrap();
+
     let mock = MockExecutor::new();
     mock.push_output(
         "resticprofile",
@@ -36,8 +43,7 @@ fn test_executor_non_zero_exit_error_propagation() {
     );
 
     let tool = ResticProfileTool::new(&mock);
-    let path = Path::new("/etc/backup/profiles.yaml");
-    let res = tool.backup(path, "self", false);
+    let res = tool.backup(&config_path, "self", false);
 
     assert!(res.is_err());
     let err_msg = res.unwrap_err().to_string();

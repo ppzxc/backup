@@ -233,6 +233,7 @@ fn mysql_database_stream_uses_portable_dump_arguments() {
     let calls = runner.command_calls.lock().unwrap();
     assert_eq!(calls[0].0, "mysqldump");
     assert!(!calls[0].1.contains(&"--skip-generated-columns".to_string()));
+    assert_eq!(calls[0].3.as_deref(), Some("backup-profile:default"));
 }
 
 #[test]
@@ -463,15 +464,21 @@ profiles:
 #[test]
 fn test_execute_run_profile() {
     use backup::commands::run::PipelineOptions;
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("profiles.yaml");
+    std::fs::write(
+        &config_path,
+        "version: '2'\nprofiles:\n  self:\n    repository: /repository\n    backup:\n      source: ['/data']\n      tag: ['backup-profile:self']\n",
+    )
+    .unwrap();
     let mock_runner = MockResticProfileRunner::new(0, "resticprofile backup complete");
-    let config_path = Path::new("/etc/backup/profiles.yaml");
     let opts = PipelineOptions {
         dry_run: false,
         skip_database: false,
         skip_secondary_sync: false,
         skip_retention: false,
     };
-    let result = execute_run_profile(config_path, "self", &opts, &mock_runner).unwrap();
+    let result = execute_run_profile(&config_path, "self", &opts, &mock_runner).unwrap();
     assert!(result.contains("resticprofile backup complete"));
     let calls = mock_runner.calls.lock().unwrap();
     assert_eq!(
@@ -481,6 +488,30 @@ fn test_execute_run_profile() {
             .collect::<Vec<_>>(),
         ["backup"]
     );
+}
+
+#[test]
+fn execute_run_profile_rejects_missing_reserved_snapshot_tag_before_adapter_call() {
+    use backup::commands::run::PipelineOptions;
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("profiles.yaml");
+    std::fs::write(
+        &config_path,
+        "version: '2'\nprofiles:\n  daily:\n    repository: /repository\n    backup:\n      source: ['/data']\n",
+    )
+    .unwrap();
+    let runner = MockResticProfileRunner::new(0, "should not run");
+
+    let error = backup::commands::run::execute_run_profile(
+        &config_path,
+        "daily",
+        &PipelineOptions::default(),
+        &runner,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("backup-profile:daily"));
+    assert!(runner.calls.lock().unwrap().is_empty());
 }
 
 #[test]

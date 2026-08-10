@@ -94,11 +94,15 @@ fn html_and_json_render_the_same_injected_restore_drill_evidence() {
 
     // The compatibility fields are derived from this same evidence rather than placeholders.
     assert_eq!(value["report_type"], "restore_drill");
-    assert_eq!(value["target_snapshot_id"], "snapshot-full-001");
-    assert_eq!(value["target_snapshot_time"], "2026-08-07T09:59:00Z");
+    assert_eq!(value["target_snapshot_id"], serde_json::Value::Null);
+    assert_eq!(value["target_snapshot_time"], serde_json::Value::Null);
     assert_eq!(value["recovery_results"]["elapsed_seconds"], 3);
     assert_eq!(value["recovery_results"]["rto_satisfied"], true);
     assert_eq!(value["recovery_results"]["data_integrity_verified"], true);
+    assert_eq!(
+        value["recovery_results"]["data_size_human"],
+        "6.0 KiB (6,144)"
+    );
     assert_eq!(value["schema_version"], "1");
 }
 
@@ -121,7 +125,7 @@ fn public_report_renderers_use_the_injected_restore_drill_evidence() {
     assert!(html.contains("snapshot-full-001"));
     assert!(!html.contains("측정 로그 확인 필요"));
     assert_eq!(value["execution_id"], evidence.execution_id);
-    assert_eq!(value["target_snapshot_id"], "snapshot-full-001");
+    assert_eq!(value["target_snapshot_id"], serde_json::Value::Null);
     assert_eq!(value["overall_status"], "pass");
 }
 
@@ -166,10 +170,7 @@ fn legacy_restore_drill_types_round_trip_nullable_evidence_fields() {
     let passing: RestoreDrillReportJson =
         serde_json::from_str(&render_restore_drill_evidence_json(&passing_evidence()).unwrap())
             .unwrap();
-    assert_eq!(
-        passing.target_snapshot_id.as_deref(),
-        Some("snapshot-full-001")
-    );
+    assert!(passing.target_snapshot_id.is_none());
     assert_eq!(passing.recovery_results.elapsed_seconds, Some(3));
     assert_eq!(passing.recovery_results.rto_satisfied, Some(true));
 
@@ -201,7 +202,7 @@ fn renderers_recompute_overall_status_from_storage_results() {
 }
 
 #[test]
-fn compatibility_fields_aggregate_the_first_primary_result_not_a_database_result() {
+fn compatibility_fields_prefer_file_primary_aggregate_over_database_result() {
     let policy = RestoreDrillPolicy::default();
     let database = RestoreDrillStorageResult::measured(
         "database",

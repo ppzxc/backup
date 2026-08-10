@@ -51,6 +51,54 @@ profiles:
 }
 
 #[test]
+fn backup_run_requires_the_exact_reserved_snapshot_tag() {
+    use backup::config::model::ResticProfileConfig;
+
+    let missing = ResticProfileConfig {
+        version: "2".into(),
+        application: None,
+        global: None,
+        groups: None,
+        profiles: [(
+            "daily".into(),
+            backup::config::model::ProfileSection {
+                backup: Some(backup::config::model::BackupCommandSection {
+                    source: Some(vec!["/data".into()]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let error = missing
+        .validate_reserved_backup_profile_tag("daily")
+        .unwrap_err();
+    assert!(error.to_string().contains("backup-profile:daily"));
+
+    let tagged = ResticProfileConfig {
+        profiles: [(
+            "daily".into(),
+            backup::config::model::ProfileSection {
+                backup: Some(backup::config::model::BackupCommandSection {
+                    source: Some(vec!["/data".into()]),
+                    tag: Some(vec!["user-tag".into(), "backup-profile:daily".into()]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
+        ..missing
+    };
+    tagged
+        .validate_reserved_backup_profile_tag("daily")
+        .unwrap();
+}
+
+#[test]
 fn effective_backup_settings_merge_partial_inheritance_fields() {
     use backup::config::model::ResticProfileConfig;
 

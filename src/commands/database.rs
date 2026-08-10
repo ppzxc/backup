@@ -1,7 +1,10 @@
-use crate::config::model::{BackupConfig, BackupType, DatabaseType, backup_profile_snapshot_tag};
+use crate::config::model::{
+    BackupConfig, BackupType, DatabaseType, SecretEnvironment, backup_profile_snapshot_tag,
+    borrowed_environment,
+};
 use crate::runner::restic::ResticRunner;
 use anyhow::{Result, bail};
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,10 +84,7 @@ pub fn execute_database_backup_from_profiles<R: ResticRunner + ?Sized>(
     let (repository, password) = backend;
     let mut owned_environment = config.sidecar_environment(config_dir)?;
     owned_environment.extend(environment);
-    let environment = owned_environment
-        .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect::<Vec<_>>();
+    let environment = borrowed_environment(&owned_environment);
     runner.backup_command_with_env_and_tag(
         &repository,
         &password,
@@ -125,10 +125,7 @@ pub fn execute_database_backup<R: ResticRunner>(
             program, filename
         ));
     }
-    let env_refs = environment
-        .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect::<Vec<_>>();
+    let env_refs = borrowed_environment(&environment);
     runner.backup_command_with_env_and_tag(
         &config.storage.primary.repository,
         config.storage.primary.password.expose_secret(),
@@ -143,7 +140,7 @@ pub fn execute_database_backup<R: ResticRunner>(
 fn dump_command(
     db_type: DatabaseType,
     url: &str,
-) -> Result<(&'static str, Vec<String>, String, Vec<(String, String)>)> {
+) -> Result<(&'static str, Vec<String>, String, SecretEnvironment)> {
     let parsed = url::Url::parse(url)?;
     let scheme = parsed.scheme().to_ascii_lowercase();
     let expected_scheme = match db_type {
@@ -176,7 +173,7 @@ fn dump_command(
                 "mysqldump",
                 args,
                 format!("{database}.sql"),
-                vec![("MYSQL_PWD".into(), password.into())],
+                vec![("MYSQL_PWD".into(), SecretString::new(password.into()))],
             ))
         }
         DatabaseType::Postgres => {
@@ -192,7 +189,7 @@ fn dump_command(
                 "pg_dump",
                 args,
                 format!("{database}.sql"),
-                vec![("PGPASSWORD".into(), password.into())],
+                vec![("PGPASSWORD".into(), SecretString::new(password.into()))],
             ))
         }
     }
@@ -201,6 +198,7 @@ fn dump_command(
 #[cfg(test)]
 mod tests {
     use super::{DatabaseType, dump_command, validate_dump_signature};
+    use secrecy::ExposeSecret;
 
     #[test]
     fn dump_command_builds_postgres_arguments_and_secret_environment() {
@@ -221,7 +219,9 @@ mod tests {
                 "--port=5432"
             ]
         );
-        assert_eq!(environment, [("PGPASSWORD".into(), "db-secret".into())]);
+        assert_eq!(environment.len(), 1);
+        assert_eq!(environment[0].0, "PGPASSWORD");
+        assert_eq!(environment[0].1.expose_secret(), "db-secret");
     }
 
     #[test]

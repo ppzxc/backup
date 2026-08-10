@@ -298,6 +298,13 @@ fn test_mock_rclone_runner() {
 
 #[test]
 fn test_resticprofile_tool_with_mock_executor() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("profiles.yaml");
+    std::fs::write(
+        &path,
+        "version: '2'\nprofiles:\n  self:\n    repository: /repository\n    backup:\n      source: ['/data']\n      tag: ['backup-profile:self']\n",
+    )
+    .unwrap();
     let mock = MockExecutor::new();
     mock.push_output(
         "resticprofile",
@@ -317,12 +324,11 @@ fn test_resticprofile_tool_with_mock_executor() {
     );
 
     let tool = ResticProfileTool::new(&mock);
-    let path = Path::new("/etc/backup/profiles.yaml");
 
-    let backup_res = tool.backup(path, "self", false).unwrap();
+    let backup_res = tool.backup(&path, "self", false).unwrap();
     assert_eq!(backup_res, "profile backup ok");
 
-    let sched_res = tool.schedule_enable(path).unwrap();
+    let sched_res = tool.schedule_enable(&path).unwrap();
     assert_eq!(sched_res, "schedule enabled");
 
     let calls = mock.get_calls();
@@ -332,7 +338,7 @@ fn test_resticprofile_tool_with_mock_executor() {
         calls[0].1,
         vec![
             "--config",
-            "/etc/backup/profiles.yaml",
+            path.to_str().unwrap(),
             "--name",
             "self",
             "backup"
@@ -340,8 +346,62 @@ fn test_resticprofile_tool_with_mock_executor() {
     );
     assert_eq!(
         calls[1].1,
-        vec!["--config", "/etc/backup/profiles.yaml", "schedule", "--all"]
+        vec!["--config", path.to_str().unwrap(), "schedule", "--all"]
     );
+}
+
+#[test]
+fn resticprofile_backup_rejects_a_profile_without_its_reserved_snapshot_tag() {
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("profiles.yaml");
+    std::fs::write(
+        &config_path,
+        "version: '2'\nprofiles:\n  daily:\n    repository: /repository\n    backup:\n      source: ['/data']\n",
+    )
+    .unwrap();
+
+    let mock = MockExecutor::new();
+    let error = ResticProfileTool::new(&mock)
+        .backup(&config_path, "daily", false)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("backup-profile:daily"));
+    assert_eq!(mock.call_count("resticprofile"), 0);
+}
+
+#[test]
+fn resticprofile_backup_rejects_a_missing_config_before_launching() {
+    let mock = MockExecutor::new();
+    let error = ResticProfileTool::new(&mock)
+        .backup(Path::new("/nonexistent/profiles.yaml"), "daily", false)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("not a regular file"));
+    assert_eq!(mock.call_count("resticprofile"), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn resticprofile_backup_rejects_a_symlinked_config_before_launching() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let real_path = directory.path().join("real-profiles.yaml");
+    let link_path = directory.path().join("profiles.yaml");
+    std::fs::write(
+        &real_path,
+        "version: '2'\nprofiles:\n  self:\n    repository: /repository\n    backup:\n      source: ['/data']\n      tag: ['backup-profile:self']\n",
+    )
+    .unwrap();
+    symlink(&real_path, &link_path).unwrap();
+
+    let mock = MockExecutor::new();
+    let error = ResticProfileTool::new(&mock)
+        .backup(&link_path, "self", false)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("not a regular file"));
+    assert_eq!(mock.call_count("resticprofile"), 0);
 }
 
 #[test]
@@ -393,7 +453,7 @@ fn resticprofile_profile_commands_share_validated_sidecar_environment() {
     let config_path = directory.path().join("profiles.yaml");
     std::fs::write(
         &config_path,
-        "version: '2'\nprofiles:\n  primary:\n    repository: s3:s3.example/bucket\n    env:\n      AWS_ACCESS_KEY_ID: '{{ .Env.BACKUP_PRIMARY_AWS_ACCESS_KEY_ID }}'\n      AWS_SECRET_ACCESS_KEY: '{{ .Env.BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY }}'\n  archive:\n    inherit: primary\n    backup:\n      source: ['/data']\n    copy:\n      profile: secondary\n      repository: s3:s3.example/secondary\n  secondary:\n    repository: s3:s3.example/secondary\n    env:\n      AWS_ACCESS_KEY_ID: '{{ .Env.BACKUP_SECONDARY_AWS_ACCESS_KEY_ID }}'\n      AWS_SECRET_ACCESS_KEY: '{{ .Env.BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY }}'\n",
+        "version: '2'\nprofiles:\n  primary:\n    repository: s3:s3.example/bucket\n    env:\n      AWS_ACCESS_KEY_ID: '{{ .Env.BACKUP_PRIMARY_AWS_ACCESS_KEY_ID }}'\n      AWS_SECRET_ACCESS_KEY: '{{ .Env.BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY }}'\n  archive:\n    inherit: primary\n    backup:\n      source: ['/data']\n      tag: ['backup-profile:archive']\n    copy:\n      profile: secondary\n      repository: s3:s3.example/secondary\n  secondary:\n    repository: s3:s3.example/secondary\n    env:\n      AWS_ACCESS_KEY_ID: '{{ .Env.BACKUP_SECONDARY_AWS_ACCESS_KEY_ID }}'\n      AWS_SECRET_ACCESS_KEY: '{{ .Env.BACKUP_SECONDARY_AWS_SECRET_ACCESS_KEY }}'\n",
     )
     .unwrap();
     for (name, value) in [
@@ -449,7 +509,7 @@ fn resticprofile_rejects_s3_sidecars_with_insecure_permissions_before_launching(
     let config_path = directory.path().join("profiles.yaml");
     std::fs::write(
         &config_path,
-        "version: '2'\nprofiles:\n  primary:\n    repository: s3:s3.example/bucket\n    env:\n      AWS_ACCESS_KEY_ID: '{{ .Env.BACKUP_PRIMARY_AWS_ACCESS_KEY_ID }}'\n      AWS_SECRET_ACCESS_KEY: '{{ .Env.BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY }}'\n  archive:\n    inherit: primary\n    backup:\n      source: ['/data']\n",
+        "version: '2'\nprofiles:\n  primary:\n    repository: s3:s3.example/bucket\n    env:\n      AWS_ACCESS_KEY_ID: '{{ .Env.BACKUP_PRIMARY_AWS_ACCESS_KEY_ID }}'\n      AWS_SECRET_ACCESS_KEY: '{{ .Env.BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY }}'\n  archive:\n    inherit: primary\n    backup:\n      source: ['/data']\n      tag: ['backup-profile:archive']\n",
     )
     .unwrap();
     for name in ["primary-aws-access-key-id", "primary-aws-secret-access-key"] {
@@ -491,7 +551,7 @@ fn resticprofile_sftp_backend_does_not_require_s3_sidecars() {
     let config_path = directory.path().join("profiles.yaml");
     std::fs::write(
         &config_path,
-        "version: '2'\nprofiles:\n  primary:\n    repository: sftp:user@host:/repo\n  archive:\n    inherit: primary\n    backup:\n      source: ['/data']\n",
+        "version: '2'\nprofiles:\n  primary:\n    repository: sftp:user@host:/repo\n  archive:\n    inherit: primary\n    backup:\n      source: ['/data']\n      tag: ['backup-profile:archive']\n",
     )
     .unwrap();
     let mock = MockExecutor::new();

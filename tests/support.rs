@@ -79,7 +79,7 @@ impl CommandRunner for MockExecutor {
 pub struct MockResticRunner {
     pub exit_code: i32,
     pub response: String,
-    pub command_calls: Mutex<Vec<(String, Vec<String>, Vec<(String, String)>)>>,
+    pub command_calls: Mutex<Vec<(String, Vec<String>, Vec<(String, String)>, Option<String>)>>,
 }
 impl MockResticRunner {
     pub fn new(exit_code: i32, response: &str) -> Self {
@@ -131,21 +131,30 @@ impl ResticRunner for MockResticRunner {
             env.iter()
                 .map(|(key, value)| ((*key).into(), (*value).into()))
                 .collect(),
+            None,
         ));
         self.result()
     }
 
     fn backup_command_with_env_and_tag(
         &self,
-        repo: &str,
-        password: &str,
-        filename: &str,
+        _repo: &str,
+        _password: &str,
+        _filename: &str,
         program: &str,
         args: &[String],
-        _tag: &str,
+        tag: &str,
         env: &[(&str, &str)],
     ) -> Result<String> {
-        self.backup_command_with_env(repo, password, filename, program, args, env)
+        self.command_calls.lock().unwrap().push((
+            program.into(),
+            args.to_vec(),
+            env.iter()
+                .map(|(key, value)| ((*key).into(), (*value).into()))
+                .collect(),
+            Some(tag.into()),
+        ));
+        self.result()
     }
 }
 

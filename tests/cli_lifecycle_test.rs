@@ -4,7 +4,7 @@ use tempfile::TempDir;
 
 fn unified_profiles_yaml(application: &str, profile: &str) -> String {
     format!(
-        "version: '2'\napplication:\n{application}\nprofiles:\n  {profile}:\n    repository: /tmp/repo\n    password: test-password\n    backup: {{source: ['/tmp']}}\n"
+        "version: '2'\napplication:\n{application}\nprofiles:\n  {profile}:\n    repository: /tmp/repo\n    password: test-password\n    backup: {{source: ['/tmp'], tag: ['backup-profile:{profile}']}}\n"
     )
 }
 

@@ -1,3 +1,4 @@
+use crate::config::model::{SecretEnvironment, borrowed_environment};
 use crate::runner::executor::{CommandOutput, CommandRunner};
 use anyhow::Result;
 use std::path::Path;
@@ -51,10 +52,7 @@ impl<'a, E: CommandRunner> ResticProfileTool<'a, E> {
         if args.last() == Some(&"copy") {
             append_copy_s3_environment(config_path, profile, &mut owned_env)?;
         }
-        let env: Vec<_> = owned_env
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
-            .collect();
+        let env = borrowed_environment(&owned_env);
         self.executor.run_with_env("resticprofile", args, &env)
     }
 
@@ -66,10 +64,7 @@ impl<'a, E: CommandRunner> ResticProfileTool<'a, E> {
         timeout: std::time::Duration,
     ) -> Result<CommandOutput> {
         let owned_env = profile_sidecar_environment(config_path, profile)?;
-        let env: Vec<_> = owned_env
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
-            .collect();
+        let env = borrowed_environment(&owned_env);
         self.executor
             .run_with_timeout("resticprofile", args, &env, timeout)
     }
@@ -77,10 +72,7 @@ impl<'a, E: CommandRunner> ResticProfileTool<'a, E> {
 
 /// Builds the secret environment for one resticprofile invocation. Credentials
 /// remain owned here until they are borrowed by `CommandRunner` at launch time.
-fn profile_sidecar_environment(
-    config_path: &Path,
-    _profile: &str,
-) -> Result<Vec<(String, String)>> {
+fn profile_sidecar_environment(config_path: &Path, _profile: &str) -> Result<SecretEnvironment> {
     if !config_path.exists() {
         return Ok(Vec::new());
     }
@@ -92,7 +84,7 @@ fn profile_sidecar_environment(
 fn append_copy_s3_environment(
     config_path: &Path,
     profile: &str,
-    environment: &mut Vec<(String, String)>,
+    environment: &mut SecretEnvironment,
 ) -> Result<()> {
     let config = crate::config::model::ResticProfileConfig::load_from_path(config_path)?;
     let config_dir = config_path.parent().unwrap_or(Path::new("."));
@@ -102,6 +94,10 @@ fn append_copy_s3_environment(
 
 impl<'a, E: CommandRunner> ResticProfileRunner for ResticProfileTool<'a, E> {
     fn backup(&self, config_path: &Path, profile: &str, dry_run: bool) -> Result<String> {
+        crate::config::model::ResticProfileConfig::validate_reserved_backup_profile_tag_at_path(
+            config_path,
+            profile,
+        )?;
         let config_str = config_path.to_string_lossy();
         let mut args = vec!["--config", &config_str, "--name", profile];
         if dry_run {

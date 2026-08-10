@@ -1,7 +1,7 @@
 use backup::cli::{AdapterSelection, AdapterSet, Cli, CliRuntimeContext, SchedulerMode, dispatch};
 use backup::commands::report::{
-    ReportAction, ReportCommand, ReportFormat, ReportType, execute_report_file_export,
-    render_html_isms_report, render_html_isms_report_with_type,
+    AuditReportMeta, ReportAction, ReportCommand, ReportFormat, ReportType,
+    execute_report_file_export, render_html_isms_report, render_html_isms_report_with_type,
 };
 use backup::i18n::Language;
 use clap::Parser;
@@ -306,6 +306,89 @@ fn test_report_command_fails_on_missing_config() {
     let non_existent_path = std::path::Path::new("/tmp/non_existent_config_12345.yaml");
     let res = backup::commands::report::run_report(non_existent_path, None, None, None);
     assert!(res.is_err());
+}
+
+#[test]
+fn environment_report_does_not_require_restore_drill_credentials() {
+    let temp = tempdir().unwrap();
+    let profiles_path = temp.path().join("profiles.yaml");
+    fs::write(
+        &profiles_path,
+        format!(
+            "version: '2'\napplication:\n  reports:\n    outputDir: {}\n    enableDailyReports: true\n    enableAnnualDrDrillReport: true\nprofiles:\n  primary:\n    repository: s3:bucket\n    env:\n      AWS_ACCESS_KEY_ID: '{{{{ .Env.BACKUP_PRIMARY_AWS_ACCESS_KEY_ID }}}}'\n      AWS_SECRET_ACCESS_KEY: '{{{{ .Env.BACKUP_PRIMARY_AWS_SECRET_ACCESS_KEY }}}}'\n  daily:\n    inherit: primary\n    backup:\n      source: ['/data']\n",
+            temp.path().display()
+        ),
+    )
+    .unwrap();
+    let profiles =
+        backup::config::model::ResticProfileConfig::load_from_path(&profiles_path).unwrap();
+    let output = temp.path().join("environment.json");
+
+    let result = ReportCommand::run_with_profile_adapters(
+        Some(ReportAction::Environment {
+            file: Some(output.clone()),
+            format: Some(ReportFormat::Json),
+        }),
+        None,
+        None,
+        &profiles,
+        &profiles_path,
+        &MockExecutor::new(),
+        &MockResticRunner::new(0, "unused"),
+        &AuditReportMeta::new("host", "2026-08-10"),
+    );
+
+    assert!(result.is_ok(), "{result:?}");
+    assert!(output.exists());
+}
+
+#[test]
+fn restore_drill_missing_primary_credentials_writes_not_performed_evidence() {
+    let temp = tempdir().unwrap();
+    let profiles_path = temp.path().join("profiles.yaml");
+    fs::write(
+        &profiles_path,
+        format!(
+            "version: '2'\napplication:\n  reports:\n    outputDir: {}\n    enableDailyReports: true\n    enableAnnualDrDrillReport: true\n  audit:\n    restore-drill-work-dir: {}/restore-drill\nprofiles:\n  primary:\n    repository: /primary\n    password-file: missing-password\n  daily:\n    inherit: primary\n    backup:\n      source: ['/data']\n",
+            temp.path().display(),
+            temp.path().display()
+        ),
+    )
+    .unwrap();
+    let profiles =
+        backup::config::model::ResticProfileConfig::load_from_path(&profiles_path).unwrap();
+    let output = temp.path().join("restore-drill.json");
+
+    let error = ReportCommand::run_with_profile_adapters(
+        Some(ReportAction::RestoreDrill {
+            file: Some(output.clone()),
+            format: Some(ReportFormat::Json),
+        }),
+        None,
+        None,
+        &profiles,
+        &profiles_path,
+        &MockExecutor::new(),
+        &MockResticRunner::new(0, "unused"),
+        &AuditReportMeta::new("host", "2026-08-10"),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("failure report"));
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
+    assert_eq!(report["overall_status"], "not_performed");
+    assert!(
+        report["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| diagnostic
+                .as_str()
+                .is_some_and(|diagnostic| diagnostic.contains("primary Backend Profile"))),
+        "diagnostics: {}",
+        report["diagnostics"]
+    );
 }
 
 #[test]

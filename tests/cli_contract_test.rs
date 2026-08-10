@@ -514,7 +514,7 @@ fn binary_contract_matrix_covers_every_command_and_option_case() {
     let invalid_profiles = temp.path().join("invalid-profiles.yaml");
     write_mode_600(
         &profiles,
-        "version: '2'\nprofiles:\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  default:\n    inherit: primary\n    backup:\n      source: ['/tmp']\n",
+        "version: '2'\nprofiles:\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  default:\n    inherit: primary\n    backup:\n      source: ['/tmp']\n      tag: ['backup-profile:default']\n",
     );
     write_mode_600(&temp.path().join("primary-password"), "primary-secret");
     write_mode_600(&invalid_profiles, "version: [invalid\n");
@@ -641,7 +641,7 @@ fn binary_contract_reaches_successful_dispatch_and_report_with_explicit_fixture(
     write_mode_600(
         &profiles,
         format!(
-            "version: '2'\napplication:\n  reports:\n    outputDir: {}\n    enableDailyReports: false\n    enableAnnualDrDrillReport: false\nprofiles:\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  default:\n    inherit: primary\n    backup:\n      source: ['/tmp']\n",
+            "version: '2'\napplication:\n  reports:\n    outputDir: {}\n    enableDailyReports: false\n    enableAnnualDrDrillReport: false\nprofiles:\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  default:\n    inherit: primary\n    backup:\n      source: ['/tmp']\n      tag: ['backup-profile:default']\n",
             reports.display()
         ),
     );
@@ -922,7 +922,7 @@ fn shared_dispatch_reaches_the_strict_adapter_with_exact_profile_and_dry_run() {
     let profiles = temp.path().join("profiles.yaml");
     write_mode_600(
         &profiles,
-        "version: '2'\nprofiles:\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  secondary:\n    repository: /secondary-repository\n    password-file: secondary-password\n  default:\n    inherit: primary\n    backup:\n      source: ['/tmp']\n    copy:\n      profile: secondary\n",
+        "version: '2'\nprofiles:\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  secondary:\n    repository: /secondary-repository\n    password-file: secondary-password\n  default:\n    inherit: primary\n    backup:\n      source: ['/tmp']\n      tag: ['backup-profile:default']\n    copy:\n      profile: secondary\n",
     );
     write_mode_600(&temp.path().join("primary-password"), "primary-secret");
     write_mode_600(&temp.path().join("secondary-password"), "secondary-secret");
@@ -986,7 +986,7 @@ fn shared_dispatch_preserves_run_failure_report_artifacts_and_state() {
     write_mode_600(
         &profiles,
         format!(
-            "version: '2'\napplication:\n  reports:\n    outputDir: {}\n    enableDailyReports: false\n    enableAnnualDrDrillReport: false\nprofiles:\n  primary:\n    repository: /tmp/repo\n    password-file: /tmp/password\n  default:\n    inherit: primary\n    backup:\n      source: ['/tmp']\n",
+            "version: '2'\napplication:\n  reports:\n    outputDir: {}\n    enableDailyReports: false\n    enableAnnualDrDrillReport: false\nprofiles:\n  primary:\n    repository: /tmp/repo\n    password-file: /tmp/password\n  default:\n    inherit: primary\n    backup:\n      source: ['/tmp']\n      tag: ['backup-profile:default']\n",
             reports.display()
         ),
     );
@@ -1593,6 +1593,10 @@ fn database_contract_runs_one_stream_and_dry_run_performs_no_external_call() {
     assert_eq!(database_call.filename, "app.sql");
     assert_eq!(database_call.program, "pg_dump");
     assert_eq!(
+        database_call.tag.as_deref(),
+        Some("backup-profile:database")
+    );
+    assert_eq!(
         database_call.args,
         vec![
             "--host=db",
@@ -1892,6 +1896,7 @@ struct DatabaseCallExpectation {
     program: String,
     args: Vec<String>,
     environment: Vec<(String, String)>,
+    tag: Option<String>,
     output: String,
 }
 
@@ -2049,6 +2054,40 @@ impl StrictRunDatabaseAdapter {
             self.trace.lock().unwrap()
         );
     }
+
+    fn record_database_call(
+        &self,
+        repository: &str,
+        password: &str,
+        filename: &str,
+        program: &str,
+        args: &[String],
+        tag: Option<&str>,
+        environment: &[(&str, &str)],
+    ) -> Result<String> {
+        self.trace.lock().unwrap().push("database".into());
+        let expected = self
+            .expected
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("unexpected database backup call"))?;
+        let actual_environment = environment
+            .iter()
+            .map(|(key, value)| ((*key).into(), (*value).into()))
+            .collect::<Vec<_>>();
+        if repository != expected.repository
+            || password != expected.password
+            || filename != expected.filename
+            || program != expected.program
+            || args != expected.args
+            || tag.map(str::to_owned) != expected.tag
+            || actual_environment != expected.environment
+        {
+            anyhow::bail!("unexpected database adapter arguments or environment");
+        }
+        Ok(expected.output)
+    }
 }
 
 impl ResticRunner for StrictRunDatabaseAdapter {
@@ -2096,27 +2135,15 @@ impl ResticRunner for StrictRunDatabaseAdapter {
         args: &[String],
         environment: &[(&str, &str)],
     ) -> Result<String> {
-        self.trace.lock().unwrap().push("database".into());
-        let expected = self
-            .expected
-            .lock()
-            .unwrap()
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("unexpected database backup call"))?;
-        let actual_environment = environment
-            .iter()
-            .map(|(key, value)| ((*key).into(), (*value).into()))
-            .collect::<Vec<_>>();
-        if repository != expected.repository
-            || password != expected.password
-            || filename != expected.filename
-            || program != expected.program
-            || args != expected.args
-            || actual_environment != expected.environment
-        {
-            anyhow::bail!("unexpected database adapter arguments or environment");
-        }
-        Ok(expected.output)
+        self.record_database_call(
+            repository,
+            password,
+            filename,
+            program,
+            args,
+            None,
+            environment,
+        )
     }
 
     fn backup_command_with_env_and_tag(
@@ -2126,10 +2153,18 @@ impl ResticRunner for StrictRunDatabaseAdapter {
         filename: &str,
         program: &str,
         args: &[String],
-        _tag: &str,
+        tag: &str,
         environment: &[(&str, &str)],
     ) -> Result<String> {
-        self.backup_command_with_env(repository, password, filename, program, args, environment)
+        self.record_database_call(
+            repository,
+            password,
+            filename,
+            program,
+            args,
+            Some(tag),
+            environment,
+        )
     }
 }
 
@@ -2270,6 +2305,7 @@ struct DatabaseCall {
     program: String,
     args: Vec<String>,
     environment: Vec<(String, String)>,
+    tag: Option<String>,
 }
 
 struct LifecycleResticAdapter {
@@ -2299,6 +2335,28 @@ impl LifecycleResticAdapter {
 
     fn unexpected(operation: &str) -> Result<String> {
         anyhow::bail!("unexpected lifecycle restic {operation} call")
+    }
+
+    fn record_database_call(
+        &self,
+        repository: &str,
+        filename: &str,
+        program: &str,
+        args: &[String],
+        tag: Option<&str>,
+        environment: &[(&str, &str)],
+    ) {
+        self.database_calls.lock().unwrap().push(DatabaseCall {
+            repository: repository.into(),
+            filename: filename.into(),
+            program: program.into(),
+            args: args.to_vec(),
+            environment: environment
+                .iter()
+                .map(|(key, value)| ((*key).into(), (*value).into()))
+                .collect(),
+            tag: tag.map(Into::into),
+        });
     }
 }
 
@@ -2360,30 +2418,22 @@ impl ResticRunner for LifecycleResticAdapter {
         args: &[String],
         environment: &[(&str, &str)],
     ) -> Result<String> {
-        self.database_calls.lock().unwrap().push(DatabaseCall {
-            repository: repository.into(),
-            filename: filename.into(),
-            program: program.into(),
-            args: args.to_vec(),
-            environment: environment
-                .iter()
-                .map(|(key, value)| ((*key).into(), (*value).into()))
-                .collect(),
-        });
+        self.record_database_call(repository, filename, program, args, None, environment);
         Ok("database stream complete\n".into())
     }
 
     fn backup_command_with_env_and_tag(
         &self,
         repository: &str,
-        password: &str,
+        _password: &str,
         filename: &str,
         program: &str,
         args: &[String],
-        _tag: &str,
+        tag: &str,
         environment: &[(&str, &str)],
     ) -> Result<String> {
-        self.backup_command_with_env(repository, password, filename, program, args, environment)
+        self.record_database_call(repository, filename, program, args, Some(tag), environment);
+        Ok("database stream complete\n".into())
     }
 }
 
@@ -2561,7 +2611,7 @@ fn run_contract_fixture() -> RunContractFixture {
     write_mode_600(
         &profiles,
         format!(
-            "version: '2'\napplication:\n  reports:\n    outputDir: {}\n    enableDailyReports: false\n    enableAnnualDrDrillReport: false\n  database:\n    profile: database\n    type: postgres\n    connection-url: ${{BACKUP_DATABASE_CONNECTION_URL}}\nprofiles:\n  default: {{}}\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  secondary:\n    repository: /secondary-repository\n    password-file: secondary-password\n  alpha:\n    inherit: primary\n    backup:\n      source: ['/alpha']\n    copy:\n      profile: secondary\n  beta:\n    inherit: primary\n    backup:\n      source: ['/beta']\n    copy:\n      profile: secondary\n  database:\n    inherit: primary\n",
+            "version: '2'\napplication:\n  reports:\n    outputDir: {}\n    enableDailyReports: false\n    enableAnnualDrDrillReport: false\n  database:\n    profile: database\n    type: postgres\n    connection-url: ${{BACKUP_DATABASE_CONNECTION_URL}}\nprofiles:\n  default: {{}}\n  primary:\n    repository: /primary-repository\n    password-file: primary-password\n  secondary:\n    repository: /secondary-repository\n    password-file: secondary-password\n  alpha:\n    inherit: primary\n    backup:\n      source: ['/alpha']\n      tag: ['backup-profile:alpha']\n    copy:\n      profile: secondary\n  beta:\n    inherit: primary\n    backup:\n      source: ['/beta']\n      tag: ['backup-profile:beta']\n    copy:\n      profile: secondary\n  database:\n    inherit: primary\n    backup:\n      tag: ['backup-profile:database']\n",
             reports.display()
         ) + "  archive:\n    repository: /archive-repository\n    password-file: archive-password\n",
     );
@@ -2698,6 +2748,7 @@ fn database_call_expectation() -> DatabaseCallExpectation {
             "--port=5432".into(),
         ],
         environment: vec![("PGPASSWORD".into(), "db-secret".into())],
+        tag: Some("backup-profile:database".into()),
         output: "database stream complete\n".into(),
     }
 }

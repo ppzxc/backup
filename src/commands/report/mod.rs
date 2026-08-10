@@ -11,7 +11,9 @@ pub use restore_drill::{
 
 use crate::commands::report::restore_drill::redact_restore_drill_diagnostic;
 use crate::commands::restore::{measure_restore_output, measure_restore_output_for_database};
-use crate::config::model::{AuditConfig, DatabaseType, ResticProfileConfig, RetentionPolicy};
+use crate::config::model::{
+    AuditConfig, DatabaseType, ResticProfileConfig, RetentionPolicy, SecretEnvironment,
+};
 use crate::config::profile_resolver::ProfileResolver;
 use crate::runner::executor::{CommandRunner, SystemExecutor};
 use crate::runner::restic::{ResticRunner, ResticTool};
@@ -46,7 +48,7 @@ pub struct RestoreDrillStorageConfig {
     pub backend: String,
     pub repository: String,
     pub password: SecretString,
-    pub environment: Vec<(String, String)>,
+    pub environment: SecretEnvironment,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +56,7 @@ pub struct RestoreDrillProfileConfig {
     pub profile: String,
     pub database_type: Option<DatabaseType>,
     pub primary: Option<RestoreDrillStorageConfig>,
+    pub primary_diagnostic: Option<String>,
     pub secondary: Option<RestoreDrillStorageConfig>,
     pub secondary_diagnostic: Option<String>,
 }
@@ -68,7 +71,7 @@ pub struct ReportConfig {
     pub retention: RetentionPolicy,
     pub primary_repository: String,
     pub primary_password: SecretString,
-    pub primary_environment: Vec<(String, String)>,
+    pub primary_environment: SecretEnvironment,
     pub database_type: Option<DatabaseType>,
     pub restore_drill_policy: RestoreDrillPolicy,
     pub restore_drill_work_dir: PathBuf,
@@ -77,12 +80,28 @@ pub struct ReportConfig {
 
 impl ReportConfig {
     pub fn from_profiles(profiles: &ResticProfileConfig, profiles_path: &Path) -> Result<Self> {
+        let mut config = Self::from_profiles_without_restore_drill(profiles, profiles_path)?;
+        config.populate_restore_drill_from_profiles(profiles, profiles_path)?;
+        Ok(config)
+    }
+
+    pub fn from_profiles_for_action(
+        profiles: &ResticProfileConfig,
+        profiles_path: &Path,
+        include_restore_drill: bool,
+    ) -> Result<Self> {
+        if include_restore_drill {
+            Self::from_profiles(profiles, profiles_path)
+        } else {
+            Self::from_profiles_without_restore_drill(profiles, profiles_path)
+        }
+    }
+
+    fn from_profiles_without_restore_drill(
+        profiles: &ResticProfileConfig,
+        _profiles_path: &Path,
+    ) -> Result<Self> {
         let application = profiles.application_config();
-        application.audit.validate_restore_drill_policy()?;
-        let database_profile = application
-            .database
-            .as_ref()
-            .map(|database| database.profile.clone());
         let database_type = application
             .database
             .as_ref()
@@ -106,32 +125,95 @@ impl ReportConfig {
             })
             .ok_or_else(|| anyhow::anyhow!("profiles.yaml has no runnable Backup Profile"))?;
         let settings = profiles.effective_backup_settings(&profile_name)?;
-        let config_dir = profiles_path.parent().unwrap_or_else(|| Path::new("."));
-        let primary_environment = profiles.backend_sidecar_environment(config_dir, "primary")?;
-        let primary_storage = restore_drill_storage_from_profiles(
-            profiles,
-            config_dir,
-            "primary",
-            primary_environment.clone(),
+        let restore_drill_policy = RestoreDrillPolicy::new(
+            application.audit.resolved_restore_drill_rto_minutes(),
+            application.audit.resolved_restore_drill_timeout_minutes(),
         )?;
-        let (secondary_storage, secondary_diagnostic) =
-            if profiles.profiles.contains_key("secondary") {
-                match profiles
-                    .backend_sidecar_environment(config_dir, "secondary")
-                    .and_then(|environment| {
-                        restore_drill_storage_from_profiles(
-                            profiles,
-                            config_dir,
-                            "secondary",
-                            environment,
-                        )
-                    }) {
-                    Ok(storage) => (storage, None),
-                    Err(error) => (None, Some(error.to_string())),
-                }
-            } else {
-                (None, None)
-            };
+
+        let primary_repository = match profiles.backend_repository("primary") {
+            Ok(repository) => repository,
+            Err(error) if profiles.profiles.contains_key("primary") => return Err(error),
+            Err(_) => String::new(),
+        };
+
+        Ok(Self {
+            output_dir: PathBuf::from(application.reports.output_dir),
+            audit: application.audit.clone(),
+            profile: profile_name,
+            targets: settings.source,
+            excludes: settings.exclude,
+            retention: settings.retention,
+            primary_repository,
+            primary_password: SecretString::new(String::new()),
+            primary_environment: Vec::new(),
+            database_type,
+            restore_drill_policy,
+            restore_drill_work_dir: PathBuf::from(
+                application.audit.resolved_restore_drill_work_dir(),
+            ),
+            restore_drill_profiles: Vec::new(),
+        })
+    }
+
+    fn populate_restore_drill_from_profiles(
+        &mut self,
+        profiles: &ResticProfileConfig,
+        profiles_path: &Path,
+    ) -> Result<()> {
+        let application = profiles.application_config();
+        let database_profile = application
+            .database
+            .as_ref()
+            .map(|database| database.profile.clone());
+        let config_dir = profiles_path.parent().unwrap_or_else(|| Path::new("."));
+        let (primary_storage, primary_environment, primary_diagnostic) = match profiles
+            .backend_sidecar_environment(config_dir, "primary")
+            .and_then(|environment| {
+                restore_drill_storage_from_profiles(
+                    profiles,
+                    config_dir,
+                    "primary",
+                    environment.clone(),
+                )
+                .map(|storage| (storage, environment))
+            }) {
+            Ok((storage, environment)) => (storage, environment, None),
+            Err(error) => (
+                None,
+                Vec::new(),
+                Some(format!(
+                    "primary Backend Profile credentials are unavailable: {}",
+                    redact_restore_drill_diagnostic(&error.to_string(), &[]),
+                )),
+            ),
+        };
+        let (secondary_storage, secondary_diagnostic) = if profiles
+            .backend_repository("secondary")
+            .ok()
+            .is_some_and(|repository| !repository.trim().is_empty())
+        {
+            match profiles
+                .backend_sidecar_environment(config_dir, "secondary")
+                .and_then(|environment| {
+                    restore_drill_storage_from_profiles(
+                        profiles,
+                        config_dir,
+                        "secondary",
+                        environment,
+                    )
+                }) {
+                Ok(storage) => (storage, None),
+                Err(error) => (
+                    None,
+                    Some(format!(
+                        "secondary Backend Profile credentials are unavailable: {}",
+                        redact_restore_drill_diagnostic(&error.to_string(), &[]),
+                    )),
+                ),
+            }
+        } else {
+            (None, None)
+        };
         let restore_drill_profiles = ProfileResolver::resolve_for_run(profiles, None)?
             .into_iter()
             .map(|profile| {
@@ -149,7 +231,7 @@ impl ReportConfig {
                 };
                 let profile_database_type =
                     if database_profile.as_deref() == Some(profile.name.as_str()) {
-                        database_type
+                        self.database_type
                     } else {
                         None
                     };
@@ -157,39 +239,24 @@ impl ReportConfig {
                     profile: profile.name,
                     database_type: profile_database_type,
                     primary: primary_storage.clone(),
+                    primary_diagnostic: primary_diagnostic.clone(),
                     secondary,
                     secondary_diagnostic,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let restore_drill_policy = RestoreDrillPolicy::new(
-            application.audit.resolved_restore_drill_rto_minutes(),
-            application.audit.resolved_restore_drill_timeout_minutes(),
-        )?;
 
-        Ok(Self {
-            output_dir: PathBuf::from(application.reports.output_dir),
-            audit: application.audit.clone(),
-            profile: profile_name,
-            targets: settings.source,
-            excludes: settings.exclude,
-            retention: settings.retention,
-            primary_repository: primary_storage
-                .as_ref()
-                .map(|storage| storage.repository.clone())
-                .unwrap_or_default(),
-            primary_password: primary_storage
-                .as_ref()
-                .map(|storage| storage.password.clone())
-                .unwrap_or_else(|| SecretString::new(String::new())),
-            primary_environment,
-            database_type,
-            restore_drill_policy,
-            restore_drill_work_dir: PathBuf::from(
-                application.audit.resolved_restore_drill_work_dir(),
-            ),
-            restore_drill_profiles,
-        })
+        self.primary_repository = primary_storage
+            .as_ref()
+            .map(|storage| storage.repository.clone())
+            .unwrap_or_default();
+        self.primary_password = primary_storage
+            .as_ref()
+            .map(|storage| storage.password.clone())
+            .unwrap_or_else(|| SecretString::new(String::new()));
+        self.primary_environment = primary_environment;
+        self.restore_drill_profiles = restore_drill_profiles;
+        Ok(())
     }
 
     fn resolved_restore_drill_profiles(&self) -> Vec<RestoreDrillProfileConfig> {
@@ -205,6 +272,7 @@ impl ReportConfig {
                 password: self.primary_password.clone(),
                 environment: self.primary_environment.clone(),
             }),
+            primary_diagnostic: None,
             secondary: None,
             secondary_diagnostic: None,
         }]
@@ -235,7 +303,7 @@ fn restore_drill_storage_from_profiles(
     profiles: &ResticProfileConfig,
     config_dir: &Path,
     backend: &str,
-    environment: Vec<(String, String)>,
+    environment: SecretEnvironment,
 ) -> Result<Option<RestoreDrillStorageConfig>> {
     if !profiles.profiles.contains_key(backend) {
         return Ok(None);
@@ -865,7 +933,13 @@ impl ReportCommand {
         restic_runner: &R,
         meta: &AuditReportMeta,
     ) -> Result<String> {
-        let report_config = ReportConfig::from_profiles(profiles, profiles_path)?;
+        let includes_restore_drill =
+            action.is_none() || matches!(action.as_ref(), Some(ReportAction::RestoreDrill { .. }));
+        let report_config = ReportConfig::from_profiles_for_action(
+            profiles,
+            profiles_path,
+            includes_restore_drill,
+        )?;
         Self::run_with_report_config_and_meta(
             action,
             file,
@@ -927,17 +1001,7 @@ impl ReportCommand {
             }) => {
                 let final_file = sub_file.or(file);
                 let os_info = collect_os_info(command_runner);
-                let evidence = execute_restore_drill_with_runner(config, restic_runner)?
-                    .with_metadata(
-                        if meta.host_name.is_empty() {
-                            "localhost"
-                        } else {
-                            &meta.host_name
-                        },
-                        config.audit.system_manager_name("시스템 운영팀"),
-                        config.audit.security_officer_name("정보보안책임자"),
-                        None,
-                    );
+                let evidence = execute_restore_drill_or_failure(config, restic_runner, meta);
                 let report = execute_restore_drill_evidence_export_with_os_info(
                     &evidence,
                     final_file.as_deref(),
@@ -1005,19 +1069,11 @@ impl ReportCommand {
                 let mut partial_artifacts = Vec::new();
                 for r_type in report_types {
                     let evidence = if r_type == ReportType::RestoreDrill {
-                        Some(
-                            execute_restore_drill_with_runner(config, restic_runner)?
-                                .with_metadata(
-                                    if meta.host_name.is_empty() {
-                                        "localhost"
-                                    } else {
-                                        &meta.host_name
-                                    },
-                                    config.audit.system_manager_name("시스템 운영팀"),
-                                    config.audit.security_officer_name("정보보안책임자"),
-                                    None,
-                                ),
-                        )
+                        Some(execute_restore_drill_or_failure(
+                            config,
+                            restic_runner,
+                            meta,
+                        ))
                     } else {
                         None
                     };
@@ -1115,6 +1171,41 @@ fn batch_report_path(path: &Path, report_type: ReportType) -> PathBuf {
     parent.join(format!("{stem}-{suffix}"))
 }
 
+fn execute_restore_drill_or_failure<R: ResticRunner + ?Sized>(
+    config: &ReportConfig,
+    runner: &R,
+    meta: &AuditReportMeta,
+) -> RestoreDrillEvidence {
+    let metadata = (
+        if meta.host_name.is_empty() {
+            "localhost"
+        } else {
+            &meta.host_name
+        },
+        config.audit.system_manager_name("시스템 운영팀"),
+        config.audit.security_officer_name("정보보안책임자"),
+    );
+    match execute_restore_drill_with_runner(config, runner) {
+        Ok(evidence) => evidence.with_metadata(metadata.0, metadata.1, metadata.2, None),
+        Err(error) => {
+            let mut sensitive_values =
+                vec![config.restore_drill_work_dir.to_string_lossy().into_owned()];
+            for profile in &config.restore_drill_profiles {
+                for storage in [&profile.primary, &profile.secondary].into_iter().flatten() {
+                    sensitive_values.extend(storage_sensitive_values(storage));
+                }
+            }
+            RestoreDrillEvidence::not_collected(
+                meta.timestamp.clone(),
+                config.restore_drill_policy.clone(),
+            )
+            .with_metadata(metadata.0, metadata.1, metadata.2, None)
+            .with_diagnostics(vec![format!("Restore Drill collection failed: {error}")])
+            .with_sensitive_values(sensitive_values)
+        }
+    }
+}
+
 pub fn execute_restore_drill_with_runner<R: ResticRunner + ?Sized>(
     config: &ReportConfig,
     runner: &R,
@@ -1151,16 +1242,27 @@ pub fn execute_restore_drill_with_runner_and_clock<
             sensitive_values.extend(storage_sensitive_values(storage));
         }
 
-        let primary = match profile.primary {
-            Some(storage) if storage_is_configured(&storage) => collect_restore_storage_result(
-                config,
-                runner,
-                clock,
-                &profile.profile,
-                &storage,
+        let primary = match (profile.primary, profile.primary_diagnostic) {
+            (_, Some(diagnostic)) => mark_database_validation_not_performed(
+                not_performed_restore_storage_result(
+                    clock,
+                    &profile.profile,
+                    "primary",
+                    &diagnostic,
+                ),
                 profile.database_type,
-            )?,
-            Some(_) | None => mark_database_validation_not_performed(
+            ),
+            (Some(storage), None) if storage_is_configured(&storage) => {
+                collect_restore_storage_result(
+                    config,
+                    runner,
+                    clock,
+                    &profile.profile,
+                    &storage,
+                    profile.database_type,
+                )?
+            }
+            (Some(_), None) | (None, None) => mark_database_validation_not_performed(
                 not_performed_restore_storage_result(
                     clock,
                     &profile.profile,
@@ -1235,7 +1337,12 @@ fn storage_sensitive_values(storage: &RestoreDrillStorageConfig) -> Vec<String> 
         storage.repository.clone(),
         storage.password.expose_secret().to_owned(),
     ];
-    values.extend(storage.environment.iter().map(|(_, value)| value.clone()));
+    values.extend(
+        storage
+            .environment
+            .iter()
+            .map(|(_, value)| value.expose_secret().to_owned()),
+    );
     values
 }
 
@@ -1310,17 +1417,11 @@ fn not_performed_restore_storage_result<C: RestoreDrillClock + ?Sized>(
     backend: &str,
     diagnostic: &str,
 ) -> RestoreDrillStorageResult {
-    let operation_start = clock.now();
-    let operation_finish = clock.now();
-    RestoreDrillStorageResult::not_performed(profile, backend, diagnostic)
-        .with_failure_stage("configuration")
-        .with_timing(
-            operation_start.wall_clock,
-            operation_finish.wall_clock,
-            operation_finish
-                .monotonic_milliseconds
-                .saturating_sub(operation_start.monotonic_milliseconds),
-        )
+    with_immediate_timing(
+        clock,
+        RestoreDrillStorageResult::not_performed(profile, backend, diagnostic)
+            .with_failure_stage("configuration"),
+    )
 }
 
 fn failed_restore_storage_result<C: RestoreDrillClock + ?Sized>(
@@ -1329,17 +1430,20 @@ fn failed_restore_storage_result<C: RestoreDrillClock + ?Sized>(
     backend: &str,
     diagnostic: String,
 ) -> RestoreDrillStorageResult {
+    with_immediate_timing(
+        clock,
+        RestoreDrillStorageResult::failed(profile, backend, "", "", diagnostic)
+            .with_failure_stage("configuration"),
+    )
+}
+
+fn with_immediate_timing<C: RestoreDrillClock + ?Sized>(
+    clock: &C,
+    result: RestoreDrillStorageResult,
+) -> RestoreDrillStorageResult {
     let operation_start = clock.now();
     let operation_finish = clock.now();
-    RestoreDrillStorageResult::failed(
-        profile,
-        backend,
-        operation_start.wall_clock.clone(),
-        operation_finish.wall_clock.clone(),
-        diagnostic,
-    )
-    .with_failure_stage("configuration")
-    .with_timing(
+    result.with_timing(
         operation_start.wall_clock,
         operation_finish.wall_clock,
         operation_finish
@@ -1360,7 +1464,7 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
     let environment = storage
         .environment
         .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .map(|(key, value)| (key.as_str(), value.expose_secret().as_str()))
         .collect::<Vec<_>>();
     if let Err(error) = prepare_restore_drill_work_dir(&config.restore_drill_work_dir) {
         let operation_finish = clock.now();
@@ -1369,15 +1473,21 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
             &[config.restore_drill_work_dir.to_string_lossy().into_owned()],
         );
         return Ok(mark_database_validation_not_performed(
-            RestoreDrillStorageResult::not_performed(profile, &storage.backend, diagnostic)
-                .with_failure_stage("workspace")
-                .with_timing(
-                    operation_start.wall_clock,
-                    operation_finish.wall_clock,
-                    operation_finish
-                        .monotonic_milliseconds
-                        .saturating_sub(operation_start.monotonic_milliseconds),
-                ),
+            RestoreDrillStorageResult::failed(
+                profile,
+                &storage.backend,
+                operation_start.wall_clock.clone(),
+                operation_finish.wall_clock.clone(),
+                diagnostic,
+            )
+            .with_failure_stage("workspace")
+            .with_timing(
+                operation_start.wall_clock.clone(),
+                operation_finish.wall_clock.clone(),
+                operation_finish
+                    .monotonic_milliseconds
+                    .saturating_sub(operation_start.monotonic_milliseconds),
+            ),
             database_type,
         ));
     }
@@ -1395,8 +1505,7 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
             .unwrap_or_else(|| "tagged snapshot selection was not performed".into());
         let reason = selection.reason;
         let result = match reason {
-            Some(SnapshotSelectionReason::QueryFailed)
-            | Some(SnapshotSelectionReason::MalformedJson) => RestoreDrillStorageResult::failed(
+            Some(SnapshotSelectionReason::QueryFailed) => RestoreDrillStorageResult::failed(
                 profile,
                 &storage.backend,
                 operation_start.wall_clock.clone(),
@@ -1437,15 +1546,21 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
                 &restore_error_sensitive_values(config, storage, None),
             );
             return Ok(mark_database_validation_not_performed(
-                RestoreDrillStorageResult::not_performed(profile, &storage.backend, diagnostic)
-                    .with_failure_stage("workspace")
-                    .with_timing(
-                        operation_start.wall_clock,
-                        operation_finish.wall_clock,
-                        operation_finish
-                            .monotonic_milliseconds
-                            .saturating_sub(operation_start.monotonic_milliseconds),
-                    ),
+                RestoreDrillStorageResult::failed(
+                    profile,
+                    &storage.backend,
+                    operation_start.wall_clock.clone(),
+                    operation_finish.wall_clock.clone(),
+                    diagnostic,
+                )
+                .with_failure_stage("workspace")
+                .with_timing(
+                    operation_start.wall_clock.clone(),
+                    operation_finish.wall_clock.clone(),
+                    operation_finish
+                        .monotonic_milliseconds
+                        .saturating_sub(operation_start.monotonic_milliseconds),
+                ),
                 database_type,
             ));
         }
@@ -1463,15 +1578,21 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
             diagnostic
         };
         return Ok(mark_database_validation_not_performed(
-            RestoreDrillStorageResult::not_performed(profile, &storage.backend, diagnostic)
-                .with_failure_stage("workspace")
-                .with_timing(
-                    operation_start.wall_clock,
-                    operation_finish.wall_clock,
-                    operation_finish
-                        .monotonic_milliseconds
-                        .saturating_sub(operation_start.monotonic_milliseconds),
-                ),
+            RestoreDrillStorageResult::failed(
+                profile,
+                &storage.backend,
+                operation_start.wall_clock.clone(),
+                operation_finish.wall_clock.clone(),
+                diagnostic,
+            )
+            .with_failure_stage("workspace")
+            .with_timing(
+                operation_start.wall_clock,
+                operation_finish.wall_clock,
+                operation_finish
+                    .monotonic_milliseconds
+                    .saturating_sub(operation_start.monotonic_milliseconds),
+            ),
             database_type,
         ));
     }
@@ -2003,7 +2124,10 @@ mod tests {
         config.profile = "manual-files".into();
         config.primary_repository = "/primary-repository".into();
         config.primary_password = SecretString::new("primary-secret".into());
-        config.primary_environment = vec![("AWS_ACCESS_KEY_ID".into(), "access".into())];
+        config.primary_environment = vec![(
+            "AWS_ACCESS_KEY_ID".into(),
+            SecretString::new("access".into()),
+        )];
 
         let profiles = config.resolved_restore_drill_profiles();
         assert_eq!(profiles.len(), 1);
@@ -2018,7 +2142,10 @@ mod tests {
             backend: "secondary".into(),
             repository: "/secondary-repository".into(),
             password: SecretString::new("secondary-secret".into()),
-            environment: vec![("AWS_SECRET_ACCESS_KEY".into(), "secondary-access".into())],
+            environment: vec![(
+                "AWS_SECRET_ACCESS_KEY".into(),
+                SecretString::new("secondary-access".into()),
+            )],
         };
 
         assert!(storage_is_configured(&storage));

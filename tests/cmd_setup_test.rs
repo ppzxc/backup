@@ -848,7 +848,8 @@ fn setup_stages_s3_credentials_in_secure_sidecars_for_child_processes() {
     let profiles = directory.path().join("profiles.yaml");
     config.save_to_profiles_path(&profiles).unwrap();
     let staged = backup::config::model::ResticProfileConfig::load_from_path(&profiles).unwrap();
-    let environment = staged.sidecar_environment(directory.path()).unwrap();
+    let owned_environment = staged.sidecar_environment(directory.path()).unwrap();
+    let environment = backup::config::model::borrowed_environment(&owned_environment);
     assert_eq!(
         environment,
         vec![

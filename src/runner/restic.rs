@@ -88,11 +88,11 @@ pub trait ResticRunner {
     }
 }
 
-pub struct ResticTool<'a, E: CommandRunner> {
+pub struct ResticTool<'a, E: CommandRunner + ?Sized> {
     executor: &'a E,
 }
 
-impl<'a, E: CommandRunner> ResticTool<'a, E> {
+impl<'a, E: CommandRunner + ?Sized> ResticTool<'a, E> {
     pub fn new(executor: &'a E) -> Self {
         Self { executor }
     }
@@ -168,7 +168,7 @@ fn create_temp_password_file(password: &str) -> Result<NamedTempFile> {
     Ok(file)
 }
 
-impl<'a, E: CommandRunner> ResticRunner for ResticTool<'a, E> {
+impl<'a, E: CommandRunner + ?Sized> ResticRunner for ResticTool<'a, E> {
     fn init_repo(&self, repo: &str, password: &str) -> Result<String> {
         let pass_file = create_temp_password_file(password)?;
         let pass_path = pass_file.path().to_string_lossy();
@@ -311,7 +311,7 @@ impl<'a, E: CommandRunner> ResticRunner for ResticTool<'a, E> {
     }
 }
 
-fn backup_command_output<E: CommandRunner>(
+fn backup_command_output<E: CommandRunner + ?Sized>(
     executor: &E,
     repo: &str,
     password: &str,

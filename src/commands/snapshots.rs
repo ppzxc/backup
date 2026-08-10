@@ -1,4 +1,4 @@
-use crate::config::model::BackupConfig;
+use crate::config::model::{BackupConfig, borrowed_environment};
 use crate::runner::restic::ResticRunner;
 use anyhow::Result;
 use secrecy::ExposeSecret;
@@ -18,10 +18,7 @@ pub fn execute_snapshots_from_profiles<R: ResticRunner + ?Sized>(
 ) -> Result<String> {
     let config_dir = config_path.parent().unwrap_or(Path::new("."));
     let owned_environment = config.sidecar_environment(config_dir)?;
-    let environment = owned_environment
-        .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect::<Vec<_>>();
+    let environment = borrowed_environment(&owned_environment);
     let (primary_repository, primary_password) = config
         .backend_credentials(config_dir, "primary")
         .map_err(|error| {

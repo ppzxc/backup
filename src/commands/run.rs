@@ -135,7 +135,6 @@ pub fn write_execution_report_from_profiles(
         .sidecar_environment(config_dir)?
         .into_iter()
         .map(|(_, value)| value)
-        .map(SecretString::new)
         .collect::<Vec<_>>();
     secrets.extend(
         config
@@ -389,6 +388,10 @@ pub fn execute_run_profile<R: ResticProfileRunner + ?Sized>(
 ) -> Result<String> {
     let _span = info_span!("primary backup", profile = %profile).entered();
     info!(profile = %profile, "Executing primary backup stage");
+    crate::config::model::ResticProfileConfig::validate_reserved_backup_profile_tag_at_path(
+        config_path,
+        profile,
+    )?;
     let engine = PipelineEngine::new(runner);
     engine.execute(config_path, profile, opts)
 }
