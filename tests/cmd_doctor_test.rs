@@ -41,9 +41,10 @@ fn doctor_reports_missing_explicit_temporary_config_path() {
 
     let temp = tempfile::tempdir().unwrap();
     let missing_config = temp.path().join("missing/profiles.yaml");
+    let runner = MockExecutor::new();
     let snapshot = SystemHealthDiagnoser::diagnose_with_runner(
         &MockRcloneRunner::new(0, "syno_backup"),
-        &MockExecutor::new(),
+        &runner,
         Some(&missing_config),
     );
 
@@ -56,6 +57,13 @@ fn doctor_reports_missing_explicit_temporary_config_path() {
         config_item.detail,
         "Unified profiles configuration is missing"
     );
+    assert!(
+        snapshot
+            .items
+            .iter()
+            .all(|item| item.category == DoctorCategory::Config)
+    );
+    assert!(runner.get_calls().is_empty());
 }
 
 #[test]

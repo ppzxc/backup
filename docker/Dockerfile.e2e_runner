@@ -17,7 +17,7 @@ FROM debian:bookworm
 ENV DEBIAN_FRONTEND=noninteractive \
     container=docker
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates cron curl mariadb-client postgresql-client rclone openssh-client systemd \
+    ca-certificates cron curl jq mariadb-client postgresql-client rclone openssh-client systemd \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /workspace/target/release/backup /usr/local/bin/backup
 COPY --from=resticprofile /go/bin/resticprofile /usr/local/bin/resticprofile

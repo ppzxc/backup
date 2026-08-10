@@ -4,6 +4,7 @@ use crate::runner::rclone::RcloneRunner;
 use crate::runner::restic::ResticTool;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 use tempfile::NamedTempFile;
@@ -70,6 +71,24 @@ impl SystemHealthDiagnoser {
             config_path.unwrap_or_else(|| Path::new(crate::config::model::DEFAULT_PROFILES_PATH));
 
         let mut items = Vec::new();
+
+        // Validate the selected unified configuration before probing any external adapter.
+        // A doctor run must not turn a missing, symlinked, or malformed profiles path into an
+        // apparently useful set of unrelated dependency results.
+        if let Some(detail) = doctor_config_preflight_failure(target_config) {
+            items.push(DoctorItem {
+                category: DoctorCategory::Config,
+                criterion: "백업 환경 및 보안 권한 (ISMS-P 2.9.2)".into(),
+                status: DoctorStatus::Fail,
+                detail,
+            });
+            return SystemHealthSnapshot {
+                host_name: host_name.to_owned(),
+                timestamp,
+                overall_pass: false,
+                items,
+            };
+        }
 
         let (restic_status, restic_detail) = match runner.run("restic", &["version"]) {
             Ok(out) if out.status_code == 0 => (DoctorStatus::Pass, out.stdout.trim().to_string()),
@@ -289,6 +308,32 @@ impl SystemHealthDiagnoser {
             items,
         }
     }
+}
+
+fn doctor_config_preflight_failure(path: &Path) -> Option<String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Some("Unified profiles configuration is missing".into());
+        }
+        Err(error) => {
+            return Some(format!(
+                "Unified profiles configuration is unavailable: {error}"
+            ));
+        }
+    };
+
+    if !metadata.file_type().is_file() {
+        return Some("Unified profiles configuration must be a regular file".into());
+    }
+
+    if let Err(error) = crate::config::model::ResticProfileConfig::load_from_path(path) {
+        return Some(format!(
+            "Unified profiles configuration is invalid: {error}"
+        ));
+    }
+
+    None
 }
 
 struct ConfiguredStorageTarget {

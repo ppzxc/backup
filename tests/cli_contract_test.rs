@@ -454,12 +454,7 @@ fn contract_expectation(
 ) -> backup::cli::ContractExpectation {
     let succeeds = command_path == "backup" || command_path == "backup.version";
     let adapter_trace = if command_path == "backup.doctor" {
-        vec![
-            "restic version env=[] timeout=None".into(),
-            "chronyc tracking env=[] timeout=None".into(),
-            "timedatectl status env=[] timeout=None".into(),
-            "systemctl is-active backup-pipeline.timer env=[] timeout=None".into(),
-        ]
+        Vec::new()
     } else if command_path == "backup.update" {
         vec![
             "curl -fsSL -H User-Agent: backup-cli -H Accept: application/vnd.github.v3+json https://api.github.com/repos/ppzxc/backup/releases/latest env=[] timeout=None".into(),
