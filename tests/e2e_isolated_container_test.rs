@@ -414,17 +414,28 @@ fn database_matrix_uses_setup_wizard_configuration_as_its_only_input() {
     assert!(script.contains("restore --target /work/database-restore"));
     assert!(script.contains("--host=backup-e2e-postgres16"));
     assert!(script.contains("malformed-sql-drill"));
-    assert!(script.contains("signature_verified\": false"));
+    assert!(script.contains("signature_verified == false"));
+    let mysql_script = database_setup_script(
+        "database-mysql",
+        "mysql",
+        "mysql://root:rootpass@backup-e2e-mariadb12:3306/app12",
+        "app12",
+        "Maria12",
+    );
+    assert!(mysql_script.contains("e2e-bin/mysqldump"));
 }
 
 #[test]
 fn restore_timeout_script_exercises_process_termination_and_cleanup_contract() {
-    let script = wizard_restore_timeout_script("s3-primary");
+    let script = wizard_restore_timeout_script("s3-primary", "'s3-primary'");
 
-    assert!(script.contains("restore-drill-timeout-minutes: 1"));
+    assert!(script.contains("setup --lang en"));
+    assert!(script.contains("BACKUP_TEST_RESTORE_DRILL_TIMEOUT_MINUTES='1'"));
+    assert!(!script.contains("sed -i"));
+    assert!(script.contains("BACKUP_TEST_RESTORE_DRILL_RTO_MINUTES='1'"));
     assert!(script.contains("sleep 65"));
     assert!(script.contains("restore timed out"));
-    assert!(script.contains("timed_out\": true"));
+    assert!(script.contains("timed_out == true"));
     assert!(script.contains("test -z \"$(find /work/s3-primary/timeout-work"));
 }
 
@@ -678,10 +689,18 @@ if [ ! -s /work/{name}/secondary-aws-access-key-id ] || [ ! -s /work/{name}/seco
   find /work/{name} -maxdepth 1 -type f -printf '%f %m\n' | sort
   exit 1
 fi
+real_restic=$(command -v restic)
+mkdir -p /work/{name}/multi-trace-bin
+cat > /work/{name}/multi-trace-bin/restic <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>/work/{name}/multi-restic-trace.log
+exec "$real_restic" "\$@"
+EOF
+chmod 755 /work/{name}/multi-trace-bin/restic
 multi_drill=/work/reports/{name}/multi-profile-restore-drill
 rm -f "$multi_drill.html" "$multi_drill.json"
 set +e
-backup --profiles /work/{name}/multi-profiles.yaml report restore-drill --file "$multi_drill"
+PATH=/work/{name}/multi-trace-bin:$PATH backup --profiles /work/{name}/multi-profiles.yaml report restore-drill --file "$multi_drill"
 multi_report_status=$?
 set -e
 if [ "$multi_report_status" != 0 ]; then
@@ -691,12 +710,16 @@ fi
 grep -Fq '"profile": "{name}"' "$multi_drill.json"
 grep -Fq '"profile": "secondary-files"' "$multi_drill.json"
 test "$(grep -c '"status": "pass"' "$multi_drill.json")" -ge 2
+test "$(grep -c ' restore ' /work/{name}/multi-restic-trace.log)" = 3
+grep -Fq 'wizard-s3-primary' /work/{name}/multi-restic-trace.log
+grep -Fq 'wizard-s3-secondary' /work/{name}/multi-restic-trace.log
 if ! jq -e '
   .schema_version == "1" and
   .overall_status == "pass" and
   (.storage_results | length) == 4 and
   ([.storage_results[] | select(.status == "pass")] | length) == 3 and
   ([.storage_results[] | select(.status == "not_applicable")] | length) == 1 and
+  ([.storage_results[] | "\(.profile):\(.backend)"] | sort) == ["s3-primary:primary", "s3-primary:secondary", "secondary-files:primary", "secondary-files:secondary"] and
   all(.storage_results[]; (.status == "not_applicable") or ((.snapshot_id | type) == "string" and (.snapshot_id | length) > 0 and (.elapsed_milliseconds | type) == "number" and .elapsed_milliseconds > 0 and (.file_count | type) == "number" and .file_count > 0 and (.total_bytes | type) == "number" and .total_bytes > 0))
 ' "$multi_drill.json"; then
   jq . "$multi_drill.json"
@@ -719,7 +742,18 @@ backup --profiles /work/{name}/no-snapshot.yaml report restore-drill --file /wor
 no_snapshot_status=$?
 set -e
 test "$no_snapshot_status" = 1
-grep -Fq 'not_performed' /work/reports/{name}/no-snapshot-drill.json"#,
+if ! jq -e '
+  .schema_version == "1" and
+  .overall_status == "not_performed" and
+  (.storage_results | length) == 2 and
+  .storage_results[0].status == "not_performed" and
+  .storage_results[0].snapshot_id == null and
+  .storage_results[1].status == "not_applicable" and
+  all(.storage_results[]; .snapshot_id == null)
+' /work/reports/{name}/no-snapshot-drill.json; then
+  jq . /work/reports/{name}/no-snapshot-drill.json
+  exit 1
+fi"#,
         empty_answers = empty_answers,
     )
 }
@@ -745,7 +779,18 @@ untagged_status=$?
 set -e
 if [ "$untagged_status" != 1 ]; then cat /work/{name}/untagged-snapshot.out; exit 1; fi
 echo untagged-report-status=$untagged_status
-grep -Fq 'not_performed' /work/reports/{name}/untagged-snapshot-drill.json"#
+if ! jq -e '
+  .schema_version == "1" and
+  .overall_status == "not_performed" and
+  (.storage_results | length) == 2 and
+  .storage_results[0].status == "not_performed" and
+  .storage_results[0].snapshot_id == null and
+  .storage_results[1].status == "not_applicable" and
+  all(.storage_results[]; .snapshot_id == null)
+' /work/reports/{name}/untagged-snapshot-drill.json; then
+  jq . /work/reports/{name}/untagged-snapshot-drill.json
+  exit 1
+fi"#
     )
 }
 
@@ -765,8 +810,19 @@ backup --profiles /work/{name}/empty-output.yaml report restore-drill --file /wo
 empty_output_status=$?
 set -e
 if [ "$empty_output_status" != 1 ]; then cat /work/{name}/empty-output.out; exit 1; fi
-if ! grep -Fq '"overall_status": "fail"' /work/reports/{name}/empty-output-drill.json; then cat /work/reports/{name}/empty-output-drill.json; exit 1; fi
-if ! grep -Fq 'Restore Output Validation' /work/reports/{name}/empty-output-drill.json; then cat /work/reports/{name}/empty-output-drill.json; exit 1; fi"#
+if ! jq -e '
+  .schema_version == "1" and
+  .overall_status == "fail" and
+  (.storage_results | length) == 2 and
+  .storage_results[0].status == "fail" and
+  .storage_results[0].failure_stage == "validation" and
+  (.storage_results[0].snapshot_id | type) == "string" and
+  .storage_results[1].status == "not_applicable"
+' /work/reports/{name}/empty-output-drill.json; then
+  jq . /work/reports/{name}/empty-output-drill.json
+  exit 1
+fi
+grep -Fq 'Restore Output Validation' /work/reports/{name}/empty-output-drill.json"#
     )
 }
 
@@ -782,16 +838,26 @@ test "$secondary_failure_status" = 1
 grep -Fq '"backend": "primary"' /work/reports/{name}/secondary-failure-drill.json
 grep -Fq '"backend": "secondary"' /work/reports/{name}/secondary-failure-drill.json
 grep -Fq '"status": "pass"' /work/reports/{name}/secondary-failure-drill.json
-grep -Fq '"status": "fail"' /work/reports/{name}/secondary-failure-drill.json"#
+grep -Fq '"status": "fail"' /work/reports/{name}/secondary-failure-drill.json
+if ! jq -e '
+  .schema_version == "1" and
+  .overall_status == "fail" and
+  (.storage_results | length) == 4 and
+  ([.storage_results[] | select(.status == "pass")] | length) == 2 and
+  ([.storage_results[] | select(.status == "fail")] | length) == 1 and
+  ([.storage_results[] | select(.status == "not_applicable")] | length) == 1 and
+  ([.storage_results[] | "\(.profile):\(.backend)"] | sort) == ["s3-primary:primary", "s3-primary:secondary", "secondary-files:primary", "secondary-files:secondary"]
+' /work/reports/{name}/secondary-failure-drill.json; then
+  jq . /work/reports/{name}/secondary-failure-drill.json
+  exit 1
+fi"#
     )
 }
 
-fn wizard_restore_timeout_script(name: &str) -> String {
+fn wizard_restore_timeout_script(name: &str, answers: &str) -> String {
     format!(
-        r###"cp /work/{name}/profiles.yaml /work/{name}/timeout.yaml
-sed -i '/^  audit:$/a\    restore-drill-rto-minutes: 1' /work/{name}/timeout.yaml
-sed -i '/^  audit:$/a\    restore-drill-timeout-minutes: 1' /work/{name}/timeout.yaml
-sed -i '/^  audit:$/a\    restore-drill-work-dir: /work/{name}/timeout-work' /work/{name}/timeout.yaml
+        r###"printf '%s\n' {answers} | BACKUP_TEST_RESTORE_DRILL_RTO_MINUTES='1' BACKUP_TEST_RESTORE_DRILL_TIMEOUT_MINUTES='1' BACKUP_TEST_RESTORE_DRILL_WORK_DIR='/work/{name}/timeout-work' BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' TERM=dumb script -qec '/usr/local/bin/backup --profiles /work/{name}/timeout.yaml setup --lang en' /dev/null
+backup --profiles /work/{name}/timeout.yaml schedule disable
 real_restic=$(command -v restic)
 mkdir -p /work/{name}/timeout-bin
 cat > /work/{name}/timeout-bin/restic <<EOF
@@ -807,11 +873,23 @@ PATH=/work/{name}/timeout-bin:$PATH backup --profiles /work/{name}/timeout.yaml 
 timeout_status=$?
 set -e
 if [ "$timeout_status" != 1 ]; then cat /work/{name}/timeout.out; cat /work/reports/{name}/timeout-drill.json; exit 1; fi
-grep -Fq '"overall_status": "fail"' /work/reports/{name}/timeout-drill.json
-grep -Fq '"timed_out": true' /work/reports/{name}/timeout-drill.json
+if ! jq -e '
+  .schema_version == "1" and
+  .overall_status == "fail" and
+  (.storage_results | length) == 2 and
+  .storage_results[0].status == "fail" and
+  .storage_results[0].timed_out == true and
+  .storage_results[0].failure_stage == "restore" and
+  .storage_results[1].status == "not_applicable" and
+  all(.storage_results[]; .snapshot_id == null or (.snapshot_id | type) == "string")
+' /work/reports/{name}/timeout-drill.json; then
+  jq . /work/reports/{name}/timeout-drill.json
+  exit 1
+fi
 grep -Fq 'restore timed out' /work/reports/{name}/timeout-drill.json
 test -d /work/{name}/timeout-work
 test -z "$(find /work/{name}/timeout-work -mindepth 1 -maxdepth 1 -print -quit)""###,
+        answers = answers,
     )
 }
 
@@ -866,7 +944,7 @@ fn wizard_storage_case(
         runner(resources, &wizard_untagged_snapshot_script(name, &answers));
         runner(resources, &wizard_empty_output_script(name, &answers));
         runner(resources, &wizard_secondary_failure_script(name));
-        runner(resources, &wizard_restore_timeout_script(name));
+        runner(resources, &wizard_restore_timeout_script(name, &answers));
     }
 }
 
@@ -946,27 +1024,38 @@ fn database_setup_script(
     };
     let execute_flag = if database_type == "mysql" { "-e" } else { "-c" };
     let rows_only_flag = if database_type == "mysql" { "-N" } else { "-t" };
-    let malformed_sql_case = if database_type == "postgres" {
-        format!(
-            r#"
-# A concrete tagged snapshot with malformed SQL must fail signature validation.
+    let dump_program = if database_type == "mysql" {
+        "mysqldump"
+    } else {
+        "pg_dump"
+    };
+    let malformed_sql_case = format!(
+        r#"
+# A concrete tagged snapshot with malformed SQL must fail signature validation for every DB type.
 mkdir -p /work/{name}/e2e-bin
-printf '#!/bin/sh\nprintf "not a database dump\\n"\n' >/work/{name}/e2e-bin/pg_dump
-chmod 755 /work/{name}/e2e-bin/pg_dump
+printf '#!/bin/sh\nprintf "not a database dump\\n"\n' >/work/{name}/e2e-bin/{dump_program}
+chmod 755 /work/{name}/e2e-bin/{dump_program}
 PATH=/work/{name}/e2e-bin:$PATH backup --profiles /work/{name}/profiles.yaml database
 set +e
 backup --profiles /work/{name}/profiles.yaml report restore-drill --file /work/reports/{name}/malformed-sql-drill >/work/{name}/malformed-sql.out 2>&1
 malformed_sql_status=$?
 set -e
 test "$malformed_sql_status" = 1
-grep -Fq '"overall_status": "fail"' /work/reports/{name}/malformed-sql-drill.json
-            grep -Fq 'signature_verified": false' /work/reports/{name}/malformed-sql-drill.json
+if ! jq -e '
+  .schema_version == "1" and
+  .overall_status == "fail" and
+  (.storage_results | length) == 2 and
+  .storage_results[0].status == "fail" and
+  .storage_results[0].database_verification.signature_verified == false and
+  .storage_results[1].status == "not_applicable"
+' /work/reports/{name}/malformed-sql-drill.json; then
+  jq . /work/reports/{name}/malformed-sql-drill.json
+  exit 1
+fi
 "#,
-            name = name,
-        )
-    } else {
-        String::new()
-    };
+        name = name,
+        dump_program = dump_program,
+    );
     format!(
         r#"mkdir -p /work/{name}
 printf '%s\n' {answers} | BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' TERM=dumb script -qec '/usr/local/bin/backup --profiles /work/{name}/profiles.yaml setup --lang en' /dev/null
@@ -1003,11 +1092,7 @@ backup --profiles /work/{name}/profiles.yaml restore --target /work/{name}-resto
 backup --profiles /work/{name}/profiles.yaml snapshots | grep -q 'Primary snapshots'
 backup --profiles /work/{name}/profiles.yaml status | grep -q 'Profile: {name}'"#,
         malformed_sql_case = malformed_sql_case,
-        valid_database_backup = if database_type == "postgres" {
-            format!("backup --profiles /work/{name}/profiles.yaml database")
-        } else {
-            String::new()
-        },
+        valid_database_backup = format!("backup --profiles /work/{name}/profiles.yaml database"),
     )
 }
 

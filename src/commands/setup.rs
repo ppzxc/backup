@@ -50,6 +50,22 @@ fn prompt_text_with_default(msg: &str, default_val: &str, lang: Language) -> Res
     }
 }
 
+fn test_restore_drill_minutes(name: &str) -> Result<Option<u64>> {
+    let Some(value) = std::env::var_os(name) else {
+        return Ok(None);
+    };
+    let value = value.to_string_lossy();
+    value
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|error| anyhow::anyhow!("{name} must be an unsigned integer: {error}"))
+}
+
+fn test_restore_drill_work_dir() -> Option<String> {
+    std::env::var_os("BACKUP_TEST_RESTORE_DRILL_WORK_DIR")
+        .map(|value| value.to_string_lossy().into_owned())
+}
+
 pub const DEFAULT_BACKUP_TARGET: &str = "/var/log";
 
 impl SetupPrompter for InquirePrompter {
@@ -431,12 +447,18 @@ impl SetupPrompter for InquirePrompter {
         let sys_mgr = prompt_text_with_default(msg.prompt_system_manager, default_sys_mgr, lang)?;
         let sec_off = prompt_text_with_default(msg.prompt_security_officer, default_sec_off, lang)?;
 
+        // These namespaced controls are used only by the isolated Docker acceptance test to
+        // exercise the real timeout path without rewriting the Wizard's generated YAML.
         let audit = AuditConfig {
             system_manager: Some(sys_mgr),
             security_officer: Some(sec_off),
-            restore_drill_rto_minutes: None,
-            restore_drill_timeout_minutes: None,
-            restore_drill_work_dir: None,
+            restore_drill_rto_minutes: test_restore_drill_minutes(
+                "BACKUP_TEST_RESTORE_DRILL_RTO_MINUTES",
+            )?,
+            restore_drill_timeout_minutes: test_restore_drill_minutes(
+                "BACKUP_TEST_RESTORE_DRILL_TIMEOUT_MINUTES",
+            )?,
+            restore_drill_work_dir: test_restore_drill_work_dir(),
         };
 
         Ok(SetupParams {

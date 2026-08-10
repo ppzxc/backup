@@ -686,6 +686,94 @@ fn restore_drill_malformed_snapshot_json_is_not_performed() {
 }
 
 #[test]
+fn restore_drill_rejects_a_non_directory_workspace_before_adapter_calls() {
+    let temp = tempdir().unwrap();
+    let workspace = temp.path().join("restore-work-file");
+    fs::write(&workspace, "not a directory").unwrap();
+    let mut config = config(temp.path());
+    config.restore_drill_work_dir = workspace;
+    let runner = StrictRestoreRunner::new(vec![SnapshotInfo {
+        id: "full-snapshot-001".into(),
+        timestamp: "2026-08-07T09:00:00Z".into(),
+        tags: vec!["backup-profile:daily-files".into()],
+    }]);
+    let clock = FixedClock::new([
+        timestamp("2026-08-07T10:00:00Z", 10_000),
+        timestamp("2026-08-07T10:00:01Z", 11_000),
+        timestamp("2026-08-07T10:00:02Z", 12_000),
+        timestamp("2026-08-07T10:00:03Z", 13_000),
+    ]);
+
+    let evidence = execute_restore_drill_with_runner_and_clock(&config, &runner, &clock).unwrap();
+    let result = &evidence.storage_results[0];
+    assert_eq!(result.status, RestoreDrillStatus::Fail);
+    assert_eq!(result.failure_stage.as_deref(), Some("workspace"));
+    assert!(result.diagnostic.as_deref().unwrap().contains("directory"));
+    assert!(runner.calls().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_drill_rejects_a_symlinked_workspace_before_adapter_calls() {
+    let temp = tempdir().unwrap();
+    let real_workspace = temp.path().join("real-restore-work");
+    let workspace = temp.path().join("restore-work-symlink");
+    fs::create_dir(&real_workspace).unwrap();
+    std::os::unix::fs::symlink(&real_workspace, &workspace).unwrap();
+    let mut config = config(temp.path());
+    config.restore_drill_work_dir = workspace;
+    let runner = StrictRestoreRunner::new(vec![SnapshotInfo {
+        id: "full-snapshot-001".into(),
+        timestamp: "2026-08-07T09:00:00Z".into(),
+        tags: vec!["backup-profile:daily-files".into()],
+    }]);
+    let clock = FixedClock::new([
+        timestamp("2026-08-07T10:00:00Z", 10_000),
+        timestamp("2026-08-07T10:00:01Z", 11_000),
+        timestamp("2026-08-07T10:00:02Z", 12_000),
+        timestamp("2026-08-07T10:00:03Z", 13_000),
+    ]);
+
+    let evidence = execute_restore_drill_with_runner_and_clock(&config, &runner, &clock).unwrap();
+    let result = &evidence.storage_results[0];
+    assert_eq!(result.status, RestoreDrillStatus::Fail);
+    assert_eq!(result.failure_stage.as_deref(), Some("workspace"));
+    assert!(result.diagnostic.as_deref().unwrap().contains("symlink"));
+    assert!(runner.calls().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_drill_hardens_an_existing_workspace_before_restore() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempdir().unwrap();
+    let workspace = temp.path().join("restore-work-insecure");
+    fs::create_dir(&workspace).unwrap();
+    fs::set_permissions(&workspace, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut config = config(temp.path());
+    config.restore_drill_work_dir = workspace.clone();
+    let runner = StrictRestoreRunner::new(vec![SnapshotInfo {
+        id: "full-snapshot-001".into(),
+        timestamp: "2026-08-07T09:00:00Z".into(),
+        tags: vec!["backup-profile:daily-files".into()],
+    }]);
+    let clock = FixedClock::new([
+        timestamp("2026-08-07T10:00:00Z", 10_000),
+        timestamp("2026-08-07T10:00:01Z", 11_000),
+        timestamp("2026-08-07T10:00:04Z", 14_000),
+        timestamp("2026-08-07T10:00:05Z", 15_000),
+    ]);
+
+    let evidence = execute_restore_drill_with_runner_and_clock(&config, &runner, &clock).unwrap();
+    assert_eq!(evidence.overall_status, RestoreDrillStatus::Pass);
+    assert_eq!(
+        fs::metadata(workspace).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+}
+
+#[test]
 fn restore_drill_timeout_failure_records_stage_elapsed_time_and_cleans_target() {
     let temp = tempdir().unwrap();
     let config = config(temp.path());
