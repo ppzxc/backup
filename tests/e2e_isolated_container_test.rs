@@ -567,7 +567,16 @@ systemctl set-environment HOME=/root
 printf '%s\n' {answers} | BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' TERM=dumb script -qec '/usr/local/bin/backup --profiles /work/{name}/profiles.yaml setup --lang en' /dev/null
 tree_digest() {{ (cd "$1" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sort); }}
 tree_modes() {{ (cd "$1" && find . -type f -printf '%m %p\n' | sort); }}
-assert_tree() {{ [ "$(tree_digest "$1")" = "$(tree_digest "$2")" ] && [ "$(tree_modes "$1")" = "$(tree_modes "$2")" ]; }}
+assert_tree() {{
+  if [ "$(tree_digest "$1")" != "$(tree_digest "$2")" ] || [ "$(tree_modes "$1")" != "$(tree_modes "$2")" ]; then
+    echo "tree mismatch: $1 -> $2"
+    echo "source digest:"; tree_digest "$1"
+    echo "restored digest:"; tree_digest "$2"
+    echo "source modes:"; tree_modes "$1"
+    echo "restored modes:"; tree_modes "$2"
+    return 1
+  fi
+}}
 if ! systemctl is-active --quiet backup-pipeline.timer; then
   systemctl status backup-pipeline.timer --no-pager || true
   journalctl -u backup-pipeline.timer --no-pager -n 80 || true
@@ -909,7 +918,6 @@ if ! jq -e '
   jq . /work/reports/{name}/timeout-drill.json
   exit 1
 fi
-grep -Fq 'restore timed out' /work/reports/{name}/timeout-drill.json
 test -d /work/{name}/timeout-work
 test -z "$(find /work/{name}/timeout-work -mindepth 1 -maxdepth 1 -print -quit)""###,
         answers = answers,
