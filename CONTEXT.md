@@ -34,6 +34,10 @@
 * **설명**: 다양한 저장 대상(S3, SFTP 등)에 따라 다르게 요구되는 필드 검증, 환경 변수 렌더링, 공지 사항 생성, 연결 테스트 등의 행위를 추상화한 다형성 모듈.
 * **비고**: `primary`와 `secondary`는 예약된 Backend Profile이며, 일반 Backup Profile이 상속 및 복사 설정으로 이를 참조한다. `backend_${backend}_${action}` 형태로 함수가 명명되며, 1차 및 2차 저장소 여부에 따른 동적 접두사 처리를 내부에서 캡슐화합니다.
 
+### 4-1. SFTP Connection Test (SFTP 연결 테스트)
+* **설명**: Setup Wizard가 SFTP Backend Adapter의 파일 전송 서브시스템에 키 기반으로 접속할 수 있는지 확인하는 사전 검증.
+* **비고**: 원격 백업 경로의 접근 권한, 저장소 초기화, 복원 가능성은 SFTP Connection Test의 범위가 아니며 이후 저장소 초기화 또는 복원 검증에서 판정합니다. 검사를 무시해도 저장소 초기화는 계속 수행하며, 초기화 실패 시 별도의 설정 보존 여부를 묻습니다. _피할 표현_: SSH 셸 접속 테스트, 원격 명령 실행 테스트.
+
 ### 5. Notification Adapter (알림 어댑터)
 * **설명**: Slack, Discord, Custom 등 다양한 알림 채널에 맞추어 페이로드 포맷을 정하고 웹훅 디스패치 및 필수 값 검증을 추상화한 다형성 모듈.
 * **비고**: `notification_${type}_${action}` 형태로 함수가 명명되며, 메인 디스패처 `dispatch_notification`는 각 어댑터의 세부 전송 방식에 의존하지 않고 다형적으로 호출합니다.

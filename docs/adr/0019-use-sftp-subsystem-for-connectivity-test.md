@@ -1,0 +1,3 @@
+# Use the SFTP subsystem for SFTP connectivity tests
+
+**Status: accepted.** The Setup Wizard's SFTP Connection Test invokes the OpenSSH `sftp` client with the project-generated identity file, configured port, batch mode, a five-second connection timeout, `StrictHostKeyChecking=accept-new`, and an empty batch file (`/dev/null`). It must not invoke `ssh <host> exit`, because that requests a remote shell `exec` channel that SFTP-only servers may reject. The test verifies only transport, key authentication, and SFTP subsystem availability; repository initialization remains a separate backend-init step, and choosing to ignore a failed preflight does not skip that step. The existing restic runtime SFTP command remains unchanged.
