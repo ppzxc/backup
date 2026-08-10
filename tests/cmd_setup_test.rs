@@ -952,9 +952,31 @@ fn test_verify_sftp_connection_success_and_failure() {
     use backup::commands::setup::verify_sftp_connection;
     use backup::runner::executor::CommandOutput;
 
+    let expected_args = [
+        "-i",
+        "/etc/backup/id_ed25519",
+        "-P",
+        "49382",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "-b",
+        "/dev/null",
+        "backup_restic@59.25.177.53",
+    ];
+    let expected_call = (
+        "sftp".to_string(),
+        expected_args
+            .iter()
+            .map(|arg| (*arg).to_string())
+            .collect::<Vec<_>>(),
+    );
     let mock_success = MockExecutor::new();
     mock_success.push_output(
-        "ssh",
+        "sftp",
         CommandOutput {
             status_code: 0,
             stdout: "".into(),
@@ -971,10 +993,11 @@ fn test_verify_sftp_connection_success_and_failure() {
         )
         .is_ok()
     );
+    assert_eq!(mock_success.get_calls(), vec![expected_call.clone()]);
 
     let mock_failure = MockExecutor::new();
     mock_failure.push_output(
-        "ssh",
+        "sftp",
         CommandOutput {
             status_code: 255,
             stdout: "".into(),
@@ -990,4 +1013,24 @@ fn test_verify_sftp_connection_success_and_failure() {
     );
     assert!(res.is_err());
     assert!(res.unwrap_err().contains("Permission denied"));
+    assert_eq!(mock_failure.get_calls(), vec![expected_call.clone()]);
+
+    let mock_empty_failure = MockExecutor::new();
+    mock_empty_failure.push_output(
+        "sftp",
+        CommandOutput {
+            status_code: 255,
+            stdout: "".into(),
+            stderr: " \n\t".into(),
+        },
+    );
+    let res = verify_sftp_connection(
+        "backup_restic",
+        "59.25.177.53",
+        49382,
+        "/etc/backup/id_ed25519",
+        &mock_empty_failure,
+    );
+    assert_eq!(res.unwrap_err(), "exit code: 255");
+    assert_eq!(mock_empty_failure.get_calls(), vec![expected_call]);
 }

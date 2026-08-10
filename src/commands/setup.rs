@@ -678,11 +678,11 @@ pub fn verify_sftp_connection<R: crate::runner::executor::CommandRunner>(
     let port_str = port.to_string();
     let remote_target = format!("{}@{}", user, host);
     let test_output = runner.run(
-        "ssh",
+        "sftp",
         &[
             "-i",
             key_path,
-            "-p",
+            "-P",
             &port_str,
             "-o",
             "StrictHostKeyChecking=accept-new",
@@ -690,8 +690,9 @@ pub fn verify_sftp_connection<R: crate::runner::executor::CommandRunner>(
             "BatchMode=yes",
             "-o",
             "ConnectTimeout=5",
+            "-b",
+            "/dev/null",
             &remote_target,
-            "exit",
         ],
     );
 
