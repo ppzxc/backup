@@ -426,16 +426,17 @@ fn database_matrix_uses_setup_wizard_configuration_as_its_only_input() {
 }
 
 #[test]
-fn restore_timeout_script_exercises_process_termination_and_cleanup_contract() {
+fn restore_timeout_script_exercises_rto_and_cleanup_contract() {
     let script = wizard_restore_timeout_script("s3-primary", "'s3-primary'");
 
     assert!(script.contains("setup --lang en"));
-    assert!(script.contains("BACKUP_TEST_RESTORE_DRILL_TIMEOUT_MINUTES='1'"));
+    assert!(script.contains("BACKUP_TEST_RESTORE_DRILL_TIMEOUT_MINUTES='2'"));
     assert!(!script.contains("sed -i"));
     assert!(script.contains("BACKUP_TEST_RESTORE_DRILL_RTO_MINUTES='1'"));
     assert!(script.contains("sleep 65"));
-    assert!(script.contains("restore timed out"));
-    assert!(script.contains("timed_out == true"));
+    assert!(script.contains("mkdir -p \"\\$target\""));
+    assert!(script.contains("timed_out == false"));
+    assert!(script.contains("failure_stage == \"rto\""));
     assert!(script.contains("test -z \"$(find /work/s3-primary/timeout-work"));
 }
 
@@ -713,6 +714,15 @@ test "$(grep -c '"status": "pass"' "$multi_drill.json")" -ge 2
 test "$(grep -c ' restore ' /work/{name}/multi-restic-trace.log)" = 3
 grep -Fq 'wizard-s3-primary' /work/{name}/multi-restic-trace.log
 grep -Fq 'wizard-s3-secondary' /work/{name}/multi-restic-trace.log
+for pair in 's3-primary:primary' 'secondary-files:primary' 'secondary-files:secondary'; do
+  profile="${{pair%%:*}}"
+  backend="${{pair##*:}}"
+  snapshot_id=$(jq -r --arg profile "$profile" --arg backend "$backend" '
+    .storage_results[] | select(.profile == $profile and .backend == $backend and .status == "pass") | .snapshot_id
+  ' "$multi_drill.json")
+  test -n "$snapshot_id" && test "$snapshot_id" != "null"
+  test "$(grep -F -c " restore $snapshot_id --target " /work/{name}/multi-restic-trace.log)" = 1
+done
 if ! jq -e '
   .schema_version == "1" and
   .overall_status == "pass" and
@@ -856,14 +866,24 @@ fi"#
 
 fn wizard_restore_timeout_script(name: &str, answers: &str) -> String {
     format!(
-        r###"printf '%s\n' {answers} | BACKUP_TEST_RESTORE_DRILL_RTO_MINUTES='1' BACKUP_TEST_RESTORE_DRILL_TIMEOUT_MINUTES='1' BACKUP_TEST_RESTORE_DRILL_WORK_DIR='/work/{name}/timeout-work' BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' TERM=dumb script -qec '/usr/local/bin/backup --profiles /work/{name}/timeout.yaml setup --lang en' /dev/null
+        r###"printf '%s\n' {answers} | BACKUP_TEST_RESTORE_DRILL_RTO_MINUTES='1' BACKUP_TEST_RESTORE_DRILL_TIMEOUT_MINUTES='2' BACKUP_TEST_RESTORE_DRILL_WORK_DIR='/work/{name}/timeout-work' BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' TERM=dumb script -qec '/usr/local/bin/backup --profiles /work/{name}/timeout.yaml setup --lang en' /dev/null
 backup --profiles /work/{name}/timeout.yaml schedule disable
 real_restic=$(command -v restic)
 mkdir -p /work/{name}/timeout-bin
 cat > /work/{name}/timeout-bin/restic <<EOF
 #!/bin/sh
 case "\$*" in
-  *" restore "*) sleep 65 ;;
+  *" restore "*)
+    sleep 65
+    target=''
+    previous=''
+    for argument in "\$@"; do
+      if [ "\$previous" = '--target' ]; then target="\$argument"; break; fi
+      previous="\$argument"
+    done
+    mkdir -p "\$target"
+    printf 'restored output\n' >"\$target/restored.txt"
+    ;;
   *) exec "$real_restic" "\$@" ;;
 esac
 EOF
@@ -878,8 +898,11 @@ if ! jq -e '
   .overall_status == "fail" and
   (.storage_results | length) == 2 and
   .storage_results[0].status == "fail" and
-  .storage_results[0].timed_out == true and
-  .storage_results[0].failure_stage == "restore" and
+  .storage_results[0].timed_out == false and
+  .storage_results[0].failure_stage == "rto" and
+  .storage_results[0].rto_satisfied == false and
+  (.storage_results[0].file_count | type) == "number" and
+  .storage_results[0].file_count > 0 and
   .storage_results[1].status == "not_applicable" and
   all(.storage_results[]; .snapshot_id == null or (.snapshot_id | type) == "string")
 ' /work/reports/{name}/timeout-drill.json; then

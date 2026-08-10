@@ -4,7 +4,9 @@ use backup::commands::report::restore_drill::{
     RestoreDrillStorageResult, render_restore_drill_evidence_html,
     render_restore_drill_evidence_json,
 };
-use backup::commands::report::{AuditReportMeta, RealReportData, ReportConfig, ReportType};
+use backup::commands::report::{
+    AuditReport, AuditReportMeta, RealReportData, ReportConfig, ReportType,
+};
 use backup::commands::report::{html_template, json_schema};
 use backup::config::model::DatabaseType;
 
@@ -126,6 +128,27 @@ fn public_report_renderers_use_the_injected_restore_drill_evidence() {
     assert!(!html.contains("측정 로그 확인 필요"));
     assert_eq!(value["execution_id"], evidence.execution_id);
     assert_eq!(value["target_snapshot_id"], serde_json::Value::Null);
+    assert_eq!(value["overall_status"], "pass");
+}
+
+#[test]
+fn legacy_audit_report_renderers_can_consume_the_same_restore_drill_evidence() {
+    let evidence = passing_evidence();
+    let report = AuditReport::generate(
+        ReportType::RestoreDrill,
+        "test-host",
+        "2026-08-07T10:00:00+09:00",
+    );
+
+    let html = report.render_html_with_restore_drill_evidence(Some(&evidence));
+    let json = report
+        .render_json_with_restore_drill_evidence(Some(&evidence))
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    assert!(html.contains("drill-2026-08-07-001"));
+    assert!(html.contains("snapshot-full-001"));
+    assert_eq!(value["execution_id"], evidence.execution_id);
     assert_eq!(value["overall_status"], "pass");
 }
 

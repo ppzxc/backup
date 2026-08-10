@@ -909,6 +909,28 @@ fn strict_command_runner_rejects_unexpected_calls_and_requires_exhaustion() {
     assert!(!error.contains("other-secret"));
     assert!(!error.contains("private.example"));
     assert!(error.contains("<redacted>"));
+
+    let mysql_runner = StrictCommandRunner::new([StrictCommandRunner::expectation(
+        "mysqldump",
+        ["--host=db"],
+        &[("MYSQL_PWD", "expected-db-secret")],
+        CommandOutput {
+            status_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        },
+    )]);
+    let mysql_error = mysql_runner
+        .run_with_env(
+            "mysqldump",
+            &["--host=db"],
+            &[("MYSQL_PWD", "actual-db-secret")],
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(!mysql_error.contains("expected-db-secret"));
+    assert!(!mysql_error.contains("actual-db-secret"));
+    assert!(mysql_error.contains("MYSQL_PWD=<redacted>"));
 }
 
 #[test]

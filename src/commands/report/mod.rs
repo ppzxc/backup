@@ -689,16 +689,39 @@ impl AuditReport {
     }
 
     pub fn render_html(&self) -> String {
+        self.render_html_with_restore_drill_evidence(None)
+    }
+
+    /// Renders this legacy report shape with already-collected Restore Drill Evidence.
+    /// Collection stays outside the renderer so HTML and JSON consume the same value.
+    pub fn render_html_with_restore_drill_evidence(
+        &self,
+        evidence: Option<&RestoreDrillEvidence>,
+    ) -> String {
         let config = ReportConfig::default();
         let meta = AuditReportMeta::new(&self.results.host_name, &self.results.timestamp);
-        let data = RealReportData::collect_with_meta(&config, &meta);
+        let mut data = RealReportData::collect_with_meta(&config, &meta);
+        if let Some(evidence) = evidence {
+            data = data.with_restore_drill_evidence(evidence.clone());
+        }
         html_template::render_html_real(self.report_type, &data)
     }
 
     pub fn render_json(&self) -> Result<String> {
+        self.render_json_with_restore_drill_evidence(None)
+    }
+
+    /// JSON counterpart of `render_html_with_restore_drill_evidence`.
+    pub fn render_json_with_restore_drill_evidence(
+        &self,
+        evidence: Option<&RestoreDrillEvidence>,
+    ) -> Result<String> {
         let config = ReportConfig::default();
         let meta = AuditReportMeta::new(&self.results.host_name, &self.results.timestamp);
-        let data = RealReportData::collect_with_meta(&config, &meta);
+        let mut data = RealReportData::collect_with_meta(&config, &meta);
+        if let Some(evidence) = evidence {
+            data = data.with_restore_drill_evidence(evidence.clone());
+        }
         json_schema::render_json_real(self.report_type, &data)
     }
 }

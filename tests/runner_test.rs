@@ -152,6 +152,77 @@ fn test_restic_tool_with_mock_executor() {
 }
 
 #[test]
+fn restic_tool_restore_forwards_concrete_snapshot_target_and_environment() {
+    let mock = MockExecutor::new();
+    mock.push_output(
+        "restic",
+        CommandOutput {
+            status_code: 0,
+            stdout: "restore complete".into(),
+            stderr: String::new(),
+        },
+    );
+
+    let restic_tool = ResticTool::new(&mock);
+    let output = restic_tool
+        .restore_with_env_and_timeout(
+            "s3:bucket",
+            "secret123",
+            "full-snapshot-001",
+            "/tmp/restore-target",
+            &[("AWS_ACCESS_KEY_ID", "access")],
+            std::time::Duration::from_secs(14_400),
+        )
+        .unwrap();
+
+    assert_eq!(output, "restore complete");
+    let calls = mock.get_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        &calls[0].1[4..],
+        &[
+            "restore".to_string(),
+            "full-snapshot-001".to_string(),
+            "--target".to_string(),
+            "/tmp/restore-target".to_string(),
+        ]
+    );
+    assert_eq!(
+        mock.get_environment_calls(),
+        vec![vec![("AWS_ACCESS_KEY_ID".into(), "access".into())]]
+    );
+}
+
+#[test]
+fn restic_tool_restore_propagates_nonzero_exit_and_stderr() {
+    let mock = MockExecutor::new();
+    mock.push_output(
+        "restic",
+        CommandOutput {
+            status_code: 3,
+            stdout: String::new(),
+            stderr: "repository unavailable".into(),
+        },
+    );
+
+    let restic_tool = ResticTool::new(&mock);
+    let error = restic_tool
+        .restore_with_env_and_timeout(
+            "s3:bucket",
+            "secret123",
+            "full-snapshot-001",
+            "/tmp/restore-target",
+            &[],
+            std::time::Duration::from_secs(14_400),
+        )
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("restic failed with exit code 3"));
+    assert!(error.contains("repository unavailable"));
+}
+
+#[test]
 fn restic_tool_requests_snapshot_json_for_concrete_selection() {
     let mock = MockExecutor::new();
     mock.push_output(

@@ -280,6 +280,7 @@ fn is_sensitive_name(value: &str) -> bool {
         "repository",
         "aws_secret_access_key",
         "aws_access_key_id",
+        "mysql_pwd",
     ]
     .iter()
     .any(|marker| normalized.contains(marker))
