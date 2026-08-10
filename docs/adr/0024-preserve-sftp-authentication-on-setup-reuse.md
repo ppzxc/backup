@@ -1,0 +1,3 @@
+# Preserve SFTP authentication when reusing setup storage
+
+**Status: accepted.** Re-running Setup Wizard with existing SFTP storage must preserve and validate the configured SSH identity and key-only policy. Existing `sftp.args` is restored as the source for reuse; legacy `sftp.command` configurations are migrated to the native `sftp.args` form only when they match the standard wizard-generated shape and its identity can be recovered. Non-standard commands are not guessed or partially preserved; setup requires explicit SFTP reconfiguration instead of silently dropping the key or falling back to password/agent authentication.

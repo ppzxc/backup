@@ -15,7 +15,7 @@
 
 ### 2-1. Setup Wizard (설정 위자드)
 * **설명**: 사용자가 Backup Profile과 Unified Backup Configuration을 대화형으로 생성하는 `backup setup` 진입점.
-* **비고**: Setup Wizard는 1차·2차 Backend Adapter의 연결을 검증하고 비어 있는 저장소를 초기화하며, 서버 로컬 시간 기준 기본 03:00의 일별 스케줄러와 백업 실행 리포트의 파일 보관을 자동 설정합니다. 백엔드 연결 및 초기화 실행 시 사용자에게 명확한 상태 안내(Progress UX)를 제공하고 타임아웃(기본 15초)을 강제하여 무한 대기를 방지합니다. 초기화 실패 시 자격 증명을 마스킹하여 사유를 보고하고, 사용자의 선택에 따라 설정을 보존하거나 롤백합니다. 재실행 시 새 구성이 완전히 준비되기 전에는 기존 설정과 스케줄을 유지합니다. `--non-interactive`도 prompt만 생략한 전체 Setup Wizard 실행으로서 기존 Unified Backup Configuration 검증, staging, Backend Adapter 초기화, scheduler 등록과 atomic 교체를 수행합니다. `backend-init`은 `primary`를 먼저, 일반 Backup Profile을 정규화된 사전순으로, 활성화된 `secondary`를 마지막에 정확히 한 번 초기화합니다. `secondary`가 일반 profile 목록에 포함되어도 중복 호출하지 않습니다. 선언된 모든 대상이 시도되며 하나라도 실패하면 종료 코드 `1`과 실패한 profile/backend를 보고합니다. 이 명령은 설정 파일을 변경하지 않고, 외부 저장소 초기화는 되돌릴 수 없으므로 이미 성공한 초기화를 롤백하지 않습니다. 재실행은 멱등적이어야 합니다. Container E2E Matrix의 저장소 조합은 Setup Wizard가 생성한 설정을 유일한 입력으로 사용하며, 테스트가 설정 파일을 직접 작성해 이를 대체하지 않습니다.
+* **비고**: Setup Wizard는 1차·2차 Backend Adapter의 연결을 검증하고 비어 있는 저장소를 초기화하며, 서버 로컬 시간 기준 기본 03:00의 일별 스케줄러와 백업 실행 리포트의 파일 보관을 자동 설정합니다. 백엔드 연결 및 초기화 실행 시 사용자에게 명확한 상태 안내(Progress UX)를 제공하고 타임아웃(기본 15초)을 강제하여 무한 대기를 방지합니다. 초기화 실패 시 자격 증명을 마스킹하여 사유를 보고하고, 사용자의 선택에 따라 설정을 보존하거나 롤백합니다. 설정을 보존하더라도 초기화되지 않은 저장소를 포함한 새 스케줄은 활성화하지 않으며, 재시도 성공 후에만 활성화합니다. 재실행 시 새 구성이 완전히 준비되기 전에는 기존 설정과 스케줄을 유지합니다. `--non-interactive`도 prompt만 생략한 전체 Setup Wizard 실행으로서 기존 Unified Backup Configuration 검증, staging, Backend Adapter 초기화, scheduler 등록과 atomic 교체를 수행합니다. `backend-init`은 `primary`를 먼저, 일반 Backup Profile을 정규화된 사전순으로, 활성화된 `secondary`를 마지막에 정확히 한 번 초기화합니다. `secondary`가 일반 profile 목록에 포함되어도 중복 호출하지 않습니다. 선언된 모든 대상이 시도되며 하나라도 실패하면 종료 코드 `1`과 실패한 profile/backend를 보고합니다. 이 명령은 설정 파일을 변경하지 않고, 외부 저장소 초기화는 되돌릴 수 없으므로 이미 성공한 초기화를 롤백하지 않습니다. 재실행은 멱등적이어야 합니다. Container E2E Matrix의 저장소 조합은 Setup Wizard가 생성한 설정을 유일한 입력으로 사용하며, 테스트가 설정 파일을 직접 작성해 이를 대체하지 않습니다.
 
 ### 2-2. Application Configuration (애플리케이션 메타데이터 설정)
 * **설명**: Unified Backup Configuration의 `application` 아래에 있는 backup CLI 전용 메타데이터이다.
@@ -37,6 +37,14 @@
 ### 4-1. SFTP Connection Test (SFTP 연결 테스트)
 * **설명**: Setup Wizard가 SFTP Backend Adapter의 파일 전송 서브시스템에 키 기반으로 접속할 수 있는지 확인하는 사전 검증.
 * **비고**: 원격 백업 경로의 접근 권한, 저장소 초기화, 복원 가능성은 SFTP Connection Test의 범위가 아니며 이후 저장소 초기화 또는 복원 검증에서 판정합니다. 검사를 무시해도 저장소 초기화는 계속 수행하며, 초기화 실패 시 별도의 설정 보존 여부를 묻습니다. _피할 표현_: SSH 셸 접속 테스트, 원격 명령 실행 테스트.
+
+### 4-2. SFTP Key-Only Authentication (SFTP 키 전용 인증)
+* **설명**: SFTP Backend Adapter가 저장소 접근과 저장소 초기화에 사용하는 인증 정책으로, 운영자가 승인한 SSH 개인키만 자격 증명으로 인정한다.
+* **비고**: 비밀번호 인증이나 SSH agent 자격 증명으로 자동 전환하지 않으며, 동일한 키 기반 인증이 사전 연결 검증과 저장소 초기화에 일관되게 적용되어야 한다. Setup Wizard의 “기존 SSH Key”는 wizard가 관리하는 설정 디렉터리의 키를 뜻하며, 임의의 사용자 SSH 키를 암묵적으로 선택하지 않는다.
+
+### 4-3. SFTP Host Key Trust (SFTP 호스트 키 신뢰)
+* **설명**: SFTP Backend Adapter가 원격 서버의 SSH 호스트 키를 식별하고 이후 변경을 감지하는 신뢰 상태.
+* **비고**: Setup Wizard와 예약 백업은 호스트별 실행 사용자에 의존하지 않는 중앙 신뢰 상태를 공유하며, 최초 등록 이후 호스트 키 변경은 연결 실패로 처리한다.
 
 ### 5. Notification Adapter (알림 어댑터)
 * **설명**: Slack, Discord, Custom 등 다양한 알림 채널에 맞추어 페이로드 포맷을 정하고 웹훅 디스패치 및 필수 값 검증을 추상화한 다형성 모듈.

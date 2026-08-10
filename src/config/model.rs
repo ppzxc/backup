@@ -2,15 +2,24 @@ use anyhow::Result;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 pub const DEFAULT_PROFILES_FILENAME: &str = "profiles.yaml";
 pub const DEFAULT_PROFILES_PATH: &str = "/etc/backup/profiles.yaml";
 pub const BACKUP_PROFILE_TAG_PREFIX: &str = "backup-profile:";
+pub const SFTP_KNOWN_HOSTS_FILENAME: &str = "known_hosts";
 
 /// Secret values intended for a child-process environment. Values are exposed only when
 /// borrowed at the external command boundary.
 pub type SecretEnvironment = Vec<(String, SecretString)>;
+
+pub fn profiles_config_dir(profiles_path: &Path) -> PathBuf {
+    profiles_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
+}
 
 pub fn borrowed_environment(environment: &SecretEnvironment) -> Vec<(&str, &str)> {
     environment
@@ -262,10 +271,22 @@ impl BackupConfig {
     }
 
     pub fn save_to_profiles_path(&self, profiles_yaml_path: &Path) -> Result<()> {
+        let config_dir = profiles_config_dir(profiles_yaml_path);
+        self.save_to_profiles_path_with_config_dir(profiles_yaml_path, &config_dir)
+    }
+
+    /// Saves staged profiles while keeping SFTP authentication state beside
+    /// the selected live profiles path. This prevents a temporary staging
+    /// directory from owning the host-key trust database used by init.
+    pub fn save_to_profiles_path_with_config_dir(
+        &self,
+        profiles_yaml_path: &Path,
+        sftp_config_dir: &Path,
+    ) -> Result<()> {
         self.validate()?;
-        let config_dir = profiles_yaml_path.parent().unwrap_or(Path::new("."));
+        let config_dir = profiles_config_dir(profiles_yaml_path);
         if !config_dir.exists() {
-            create_secure_dir(config_dir)?;
+            create_secure_dir(&config_dir)?;
         }
 
         let mut restic_config = if profiles_yaml_path.exists() {
@@ -298,7 +319,7 @@ impl BackupConfig {
 
         restic_config.version = "2".into();
         restic_config.application =
-            Some(self.application_metadata_with_secret_references(config_dir)?);
+            Some(self.application_metadata_with_secret_references(&config_dir)?);
 
         // 1. Populate default profile (truly global options only)
         let mut default_profile = restic_config.profiles.remove("default").unwrap_or_default();
@@ -320,7 +341,7 @@ impl BackupConfig {
             primary_profile.insecure_tls = Some(true);
         }
         primary_profile.repository = Some(self.storage.primary.repository.clone());
-        primary_profile.password_file = Some(self.profile_password_file(config_dir, false)?);
+        primary_profile.password_file = Some(self.profile_password_file(&config_dir, false)?);
         primary_profile.password = None;
         if let Some(s3) = &self.storage.primary.s3 {
             save_secure_file(
@@ -350,11 +371,14 @@ impl BackupConfig {
             primary_profile.env = None;
         }
         if let Some(ref sftp) = self.storage.primary.sftp {
-            if let Some(sftp_cmd) = sftp.sftp_command() {
-                let mut opt_map = primary_profile.option.unwrap_or_default();
-                opt_map.insert("sftp.command".into(), sftp_cmd);
-                primary_profile.option = Some(opt_map);
-            }
+            ensure_sftp_known_hosts_file(sftp_config_dir)?;
+            let mut opt_map = primary_profile.option.unwrap_or_default();
+            opt_map.remove("sftp.command");
+            opt_map.insert(
+                "sftp.args".into(),
+                sftp.sftp_args_for_config_dir(sftp_config_dir)?,
+            );
+            primary_profile.option = Some(opt_map);
         }
         restic_config
             .profiles
@@ -373,7 +397,7 @@ impl BackupConfig {
                 secondary_profile.inherit = Some("default".into());
                 secondary_profile.repository = Some(sec.repository.clone());
                 secondary_profile.password_file =
-                    Some(self.profile_password_file(config_dir, true)?);
+                    Some(self.profile_password_file(&config_dir, true)?);
                 secondary_profile.password = None;
                 if let Some(s3) = &sec.s3 {
                     save_secure_file(
@@ -403,11 +427,14 @@ impl BackupConfig {
                     secondary_profile.env = None;
                 }
                 if let Some(ref sftp) = sec.sftp {
-                    if let Some(sftp_cmd) = sftp.sftp_command() {
-                        let mut opt_map = secondary_profile.option.unwrap_or_default();
-                        opt_map.insert("sftp.command".into(), sftp_cmd);
-                        secondary_profile.option = Some(opt_map);
-                    }
+                    ensure_sftp_known_hosts_file(sftp_config_dir)?;
+                    let mut opt_map = secondary_profile.option.unwrap_or_default();
+                    opt_map.remove("sftp.command");
+                    opt_map.insert(
+                        "sftp.args".into(),
+                        sftp.sftp_args_for_config_dir(sftp_config_dir)?,
+                    );
+                    secondary_profile.option = Some(opt_map);
                 }
                 restic_config
                     .profiles
@@ -418,13 +445,23 @@ impl BackupConfig {
         // 4. Build target profile section
         let copy_section = if self.storage.secondary.as_ref().map_or(false, |s| s.enabled) {
             let sec = self.storage.secondary.as_ref().unwrap();
+            let copy_option = if let Some(sftp) = &sec.sftp {
+                ensure_sftp_known_hosts_file(sftp_config_dir)?;
+                Some(std::collections::BTreeMap::from([(
+                    "sftp.args".into(),
+                    sftp.sftp_args_for_config_dir(sftp_config_dir)?,
+                )]))
+            } else {
+                None
+            };
             Some(CopyCommandSection {
                 profile: Some("secondary".into()),
                 repository: Some(sec.repository.clone()),
-                password_file: Some(self.profile_password_file(config_dir, true)?),
+                password_file: Some(self.profile_password_file(&config_dir, true)?),
                 password: None,
                 initialize: Some(true),
                 schedule: None,
+                option: copy_option,
                 ..Default::default()
             })
         } else {
@@ -533,7 +570,7 @@ impl BackupConfig {
             .map(fs::read_to_string)
             .transpose()?
             .unwrap_or_default();
-        let config_dir = path.parent().unwrap_or(Path::new("."));
+        let config_dir = profiles_config_dir(path);
         let s3 = match (
             fs::read_to_string(config_dir.join("primary-aws-access-key-id")),
             fs::read_to_string(config_dir.join("primary-aws-secret-access-key")),
@@ -557,9 +594,7 @@ impl BackupConfig {
                             .starts_with(APPLICATION_SECRET_PREFIX)
                         {
                             fs::read_to_string(
-                                path.parent()
-                                    .unwrap_or(Path::new("."))
-                                    .join("database-connection-url"),
+                                profiles_config_dir(path).join("database-connection-url"),
                             )?
                         } else {
                             database.connection_url.clone()
@@ -802,18 +837,256 @@ pub struct SftpConfig {
     pub port: u16,
     pub user: String,
     pub key_file: Option<String>,
+    /// Extra non-conflicting native SSH arguments recovered during setup reuse.
+    /// This is runtime state rather than part of the legacy compatibility model.
+    #[serde(skip)]
+    pub additional_args: Vec<String>,
+}
+
+/// The authentication-only portion of an SFTP SSH invocation.
+///
+/// Restic owns the repository URI and therefore the host, port, and user. This
+/// policy carries only the managed identity and the configuration-directory
+/// trust file so the preflight and restic paths cannot drift apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SftpAuthPolicy {
+    identity_file: PathBuf,
+    known_hosts_file: PathBuf,
+}
+
+impl SftpAuthPolicy {
+    pub fn for_profiles_path(identity_file: &Path, profiles_path: &Path) -> Result<Self> {
+        let config_dir = profiles_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        Self::for_config_dir(identity_file, config_dir)
+    }
+
+    pub fn for_config_dir(identity_file: &Path, config_dir: &Path) -> Result<Self> {
+        if identity_file.as_os_str().is_empty() {
+            anyhow::bail!("SFTP identity path cannot be empty");
+        }
+        if config_dir.as_os_str().is_empty() {
+            anyhow::bail!("SFTP configuration directory cannot be empty");
+        }
+        if identity_file.to_str().is_none() || config_dir.to_str().is_none() {
+            anyhow::bail!("SFTP paths must be valid UTF-8 for SSH argument rendering");
+        }
+        if !is_managed_sftp_key_path(identity_file, config_dir) {
+            anyhow::bail!(
+                "SFTP identity must be one of the managed keys below {}",
+                config_dir.display()
+            );
+        }
+
+        Ok(Self {
+            identity_file: identity_file.to_path_buf(),
+            known_hosts_file: config_dir.join(SFTP_KNOWN_HOSTS_FILENAME),
+        })
+    }
+
+    pub fn identity_file(&self) -> &Path {
+        &self.identity_file
+    }
+
+    pub fn known_hosts_file(&self) -> &Path {
+        &self.known_hosts_file
+    }
+
+    /// Returns the argument tokens shared by the OpenSSH sftp client and
+    /// restic's native `sftp.args` option.
+    pub fn argument_tokens(&self) -> Result<Vec<String>> {
+        let identity = self
+            .identity_file
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("SFTP identity path must be valid UTF-8"))?;
+        let known_hosts = self
+            .known_hosts_file
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("SFTP known_hosts path must be valid UTF-8"))?;
+        Ok(vec![
+            "-i".into(),
+            identity.into(),
+            "-o".into(),
+            "IdentitiesOnly=yes".into(),
+            "-o".into(),
+            "BatchMode=yes".into(),
+            "-o".into(),
+            "StrictHostKeyChecking=accept-new".into(),
+            "-o".into(),
+            format!("UserKnownHostsFile={known_hosts}"),
+        ])
+    }
+
+    /// Renders the value consumed by restic's shell-string argument splitter.
+    pub fn render_restic_args(&self) -> Result<String> {
+        Ok(self
+            .argument_tokens()?
+            .iter()
+            .map(|token| quote_sftp_argument(token))
+            .collect::<Vec<_>>()
+            .join(" "))
+    }
+}
+
+fn quote_sftp_argument(value: &str) -> String {
+    if value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "-_.:/=@+".contains(character))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+/// Tokenizes the small shell-string grammar used by restic's SFTP options.
+/// It intentionally does not execute shell syntax or expand variables.
+pub fn tokenize_sftp_arguments(value: &str) -> Result<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+
+    for character in value.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            continue;
+        }
+
+        match quote {
+            Some('\'') => {
+                if character == '\'' {
+                    quote = None;
+                } else {
+                    current.push(character);
+                }
+            }
+            Some('"') => match character {
+                '"' => quote = None,
+                '\\' => escaped = true,
+                _ => current.push(character),
+            },
+            None => match character {
+                '\'' | '"' => quote = Some(character),
+                '\\' => escaped = true,
+                character if character.is_whitespace() => {
+                    if !current.is_empty() {
+                        tokens.push(std::mem::take(&mut current));
+                    }
+                }
+                _ => current.push(character),
+            },
+            Some(_) => unreachable!(),
+        }
+    }
+
+    if escaped || quote.is_some() {
+        anyhow::bail!("unterminated escape or quote in SFTP arguments");
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Ok(tokens)
+}
+
+fn normalized_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::RootDir => normalized.push(Path::new("/")),
+            Component::Normal(value) => normalized.push(value),
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+        }
+    }
+    normalized
+}
+
+/// Returns whether a key is one of the two identities managed by Setup Wizard.
+pub fn is_managed_sftp_key_path(identity_file: &Path, config_dir: &Path) -> bool {
+    let identity_file = normalized_path(&config_relative_path(identity_file, config_dir));
+    ["id_ed25519", "id_ed25519_secondary"]
+        .iter()
+        .map(|name| normalized_path(&config_dir.join(name)))
+        .any(|expected| expected == identity_file)
+}
+
+fn config_relative_path(path: &Path, config_dir: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        config_dir.join(path)
+    }
+}
+
+/// Creates or secures the central host-key trust file without overwriting a
+/// previously trusted host key database.
+pub fn ensure_sftp_known_hosts_file(config_dir: &Path) -> Result<PathBuf> {
+    create_secure_dir(config_dir)?;
+    let path = config_dir.join(SFTP_KNOWN_HOSTS_FILENAME);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!(
+                "SFTP known_hosts path must not be a symbolic link: {}",
+                path.display()
+            );
+        }
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            anyhow::bail!(
+                "SFTP known_hosts path is not a regular file: {}",
+                path.display()
+            );
+        }
+        Ok(_) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            save_secure_file(&path, "")?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(path)
 }
 
 impl SftpConfig {
-    pub fn sftp_command(&self) -> Option<String> {
-        let key_file = self.key_file.as_ref()?;
-        if key_file.trim().is_empty() {
-            return None;
+    pub fn sftp_args(&self, profiles_path: &Path) -> Result<String> {
+        let config_dir = profiles_path.parent().unwrap_or(Path::new("."));
+        self.sftp_args_for_config_dir(config_dir)
+    }
+
+    pub fn sftp_args_for_config_dir(&self, config_dir: &Path) -> Result<String> {
+        let key_file = self
+            .key_file
+            .as_deref()
+            .filter(|key| !key.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("SFTP requires a managed SSH identity"))?;
+        let key_path = config_relative_path(Path::new(key_file), config_dir);
+        let policy = SftpAuthPolicy::for_config_dir(&key_path, config_dir)?;
+        if let Ok(metadata) = fs::symlink_metadata(&key_path) {
+            if metadata.file_type().is_symlink() {
+                anyhow::bail!("SFTP managed identity must not be a symbolic link");
+            }
+            if !metadata.file_type().is_file() {
+                anyhow::bail!("SFTP managed identity must be a regular file");
+            }
         }
-        Some(format!(
-            "ssh -o StrictHostKeyChecking=no -i {} -p {} {}@{} -s sftp",
-            key_file, self.port, self.user, self.host
-        ))
+        let mut tokens = policy.argument_tokens()?;
+        tokens.extend(self.additional_args.iter().cloned());
+        Ok(tokens
+            .iter()
+            .map(|token| quote_sftp_argument(token))
+            .collect::<Vec<_>>()
+            .join(" "))
     }
 }
 
@@ -1479,6 +1752,58 @@ pub struct GlobalSection {
     pub scheduler: Option<String>,
 }
 
+fn serialize_profile_options<S>(
+    options: &Option<std::collections::BTreeMap<String, String>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match options {
+        Some(options) => options
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .serialize(serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_profile_options<'de, D>(
+    deserializer: D,
+) -> Result<Option<std::collections::BTreeMap<String, String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ProfileOptions {
+        Map(std::collections::BTreeMap<String, String>),
+        List(Vec<String>),
+        String(String),
+    }
+
+    let options = Option::<ProfileOptions>::deserialize(deserializer)?;
+    let Some(options) = options else {
+        return Ok(None);
+    };
+    let values = match options {
+        ProfileOptions::Map(options) => return Ok(Some(options)),
+        ProfileOptions::List(options) => options,
+        ProfileOptions::String(option) => vec![option],
+    };
+    let mut parsed = std::collections::BTreeMap::new();
+    for option in values {
+        let (key, value) = option.split_once('=').ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "resticprofile option must use key=value syntax: {option}"
+            ))
+        })?;
+        parsed.insert(key.to_owned(), value.to_owned());
+    }
+    Ok(Some(parsed))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct GroupSection {
@@ -1520,6 +1845,11 @@ pub struct ProfileSection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub check: Option<CheckCommandSection>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        serialize_with = "serialize_profile_options",
+        deserialize_with = "deserialize_profile_options"
+    )]
     pub option: Option<std::collections::BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub copy: Option<CopyCommandSection>,
@@ -1540,6 +1870,13 @@ pub struct CopyCommandSection {
     pub initialize: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schedule: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_profile_options",
+        deserialize_with = "deserialize_profile_options"
+    )]
+    pub option: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

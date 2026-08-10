@@ -1389,7 +1389,7 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
     );
     runner(
         &resources,
-        "mkdir -p /root/.ssh; cp /work/e2e-key/id_ed25519 /root/.ssh/id_ed25519; chmod 600 /root/.ssh/id_ed25519; printf 'Host *\\n  StrictHostKeyChecking no\\n  UserKnownHostsFile /dev/null\\n  IdentitiesOnly yes\\n' >/root/.ssh/config",
+        "mkdir -p /root/.ssh; cp /work/e2e-key/id_ed25519 /root/.ssh/id_ed25519; chmod 600 /root/.ssh/id_ed25519; rm -f /root/.ssh/config",
     );
     // Every storage case is configured through the real pseudo-TTY Setup Wizard.
     // The six cases cover both standalone backends and every S3/SFTP replication direction.
@@ -1439,7 +1439,6 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
             "",
             "backupuser",
             "/upload/wizard-sftp-primary",
-            "\x1b[B\x1b[B]",
             "",
             "",
             "",
@@ -1513,7 +1512,6 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
             "",
             "backupuser",
             "/upload/wizard-s3-to-sftp",
-            "\x1b[B\x1b[B]",
             "",
             "/work/reports/s3-to-sftp",
             "",
@@ -1539,7 +1537,6 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
             "",
             "backupuser",
             "/upload/wizard-sftp-to-s3",
-            "\x1b[B\x1b[B]",
             "",
             "y",
             "\x1b[B",
@@ -1575,7 +1572,6 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
             "",
             "backupuser",
             "/upload/wizard-sftp-to-sftp-primary",
-            "\x1b[B\x1b[B]",
             "",
             "y",
             "",
@@ -1585,7 +1581,6 @@ fn isolated_container_matrix_exercises_storage_database_and_systemd() {
             "",
             "backupuser",
             "/upload/wizard-sftp-to-sftp-secondary",
-            "\x1b[B\x1b[B]",
             "",
             "/work/reports/sftp-to-sftp",
             "",

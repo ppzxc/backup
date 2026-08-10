@@ -97,6 +97,8 @@ fn purge_removes_only_the_selected_configuration_scope() {
     std::fs::write(systemd.join("other.timer"), "unrelated").unwrap();
     let password = scope.join("primary-password");
     std::fs::write(&password, "uninstall-password").unwrap();
+    let known_hosts = scope.join("known_hosts");
+    std::fs::write(&known_hosts, "host-key").unwrap();
     let profiles = scope.join("profiles.yaml");
     std::fs::write(
         &profiles,
@@ -111,6 +113,7 @@ fn purge_removes_only_the_selected_configuration_scope() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&profiles, std::fs::Permissions::from_mode(0o600)).unwrap();
         std::fs::set_permissions(&password, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&known_hosts, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
     let binary = temp.path().join("bin/backup");
     std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
@@ -131,6 +134,7 @@ fn purge_removes_only_the_selected_configuration_scope() {
     assert!(!binary.exists());
     assert!(!profiles.exists());
     assert!(!password.exists());
+    assert!(!known_hosts.exists());
     assert!(!reports.exists());
     assert!(!cache.exists());
     assert!(scope.exists());

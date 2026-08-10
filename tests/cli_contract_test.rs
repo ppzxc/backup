@@ -1851,6 +1851,36 @@ fn setup_backend_init_contract_attempts_every_target_in_deterministic_order() {
 }
 
 #[test]
+fn setup_backend_init_promotes_a_retryable_pending_configuration_after_success() {
+    let fixture = setup_contract_fixture();
+    let pending_dir = backup::commands::setup::pending_setup_dir(&fixture.profiles);
+    backup::config::model::create_secure_dir(&pending_dir).unwrap();
+    let pending_password = pending_dir.join("primary-password");
+    write_mode_600(&pending_password, "pending-secret");
+    write_mode_600(
+        &pending_dir.join("profiles.yaml"),
+        &format!(
+            "version: '2'\nprofiles:\n  primary:\n    repository: /pending-repository\n    password-file: {}\n  default: {{}}\n",
+            pending_password.display()
+        ),
+    );
+
+    let runner = SetupTraceAdapter::new(None);
+    let outcome = dispatch_setup(&fixture.profiles, ["setup", "backend-init"], &runner);
+
+    assert!(outcome.is_success(), "{}", outcome.stderr);
+    assert_eq!(runner.calls(), vec!["primary"]);
+    assert!(!pending_dir.exists());
+    let promoted = std::fs::read_to_string(&fixture.profiles).unwrap();
+    assert!(promoted.contains("/pending-repository"));
+    assert_eq!(
+        std::fs::read_to_string(fixture.profiles.parent().unwrap().join("primary-password"))
+            .unwrap(),
+        "pending-secret"
+    );
+}
+
+#[test]
 fn setup_non_interactive_contract_initializes_existing_targets_without_prompts() {
     let fixture = setup_contract_fixture();
     let runner = SetupTraceAdapter::new(None);

@@ -2,7 +2,7 @@ use crate::config::model::*;
 use crate::i18n::{I18nMessages, Language};
 use anyhow::Result;
 use secrecy::{ExposeSecret, SecretString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
 pub struct SetupParams {
@@ -53,6 +53,7 @@ fn prompt_text_with_default(msg: &str, default_val: &str, lang: Language) -> Res
 }
 
 pub const DEFAULT_BACKUP_TARGET: &str = "/var/log";
+pub const PENDING_SETUP_DIRNAME: &str = ".setup-pending";
 
 impl InquirePrompter {
     pub fn with_restore_drill_overrides(
@@ -190,18 +191,27 @@ impl SetupPrompter for InquirePrompter {
             };
 
             let pwd = p.password.clone().unwrap_or_else(generate_secure_password);
+            let sftp = if backend == "sftp" {
+                Some(resolve_reused_sftp_config(
+                    &repo,
+                    p.option.as_ref(),
+                    config_dir,
+                )?)
+            } else {
+                None
+            };
             let primary = StorageTarget {
                 backend: backend.to_string(),
                 repository: repo,
                 password: SecretString::new(pwd),
-                sftp: None,
+                sftp,
                 s3: None,
             };
 
             let secondary = existing_restic
                 .as_ref()
                 .and_then(|c| c.profiles.get("secondary"))
-                .map(|sec_prof| {
+                .map(|sec_prof| -> Result<SecondaryStorageTarget> {
                     let sec_repo = sec_prof.repository.clone().unwrap_or_default();
                     let sec_backend = if sec_repo.starts_with("s3:") {
                         "s3"
@@ -211,15 +221,25 @@ impl SetupPrompter for InquirePrompter {
                         "local"
                     };
                     let sec_pwd = sec_prof.password.clone().unwrap_or_default();
-                    SecondaryStorageTarget {
+                    let sftp = if sec_backend == "sftp" {
+                        Some(resolve_reused_sftp_config(
+                            &sec_repo,
+                            sec_prof.option.as_ref(),
+                            config_dir,
+                        )?)
+                    } else {
+                        None
+                    };
+                    Ok(SecondaryStorageTarget {
                         enabled: true,
                         backend: sec_backend.to_string(),
                         repository: sec_repo,
                         password: SecretString::new(sec_pwd),
-                        sftp: None,
+                        sftp,
                         s3: None,
-                    }
-                });
+                    })
+                })
+                .transpose()?;
 
             (primary, secondary)
         } else {
@@ -488,7 +508,11 @@ pub fn create_default_profiles_file(
     repo: &str,
     pwd: &str,
 ) -> Result<()> {
-    let config = default_application_config(profile, target, repo, pwd);
+    let mut config = default_application_config(profile, target, repo, pwd);
+    if let Some(sftp) = config.storage.primary.sftp.as_mut() {
+        let config_dir = profiles_path.parent().unwrap_or_else(|| Path::new("."));
+        sftp.key_file = Some(config_dir.join("id_ed25519").to_string_lossy().into_owned());
+    }
     config.save_to_profiles_path(profiles_path)
 }
 
@@ -516,6 +540,7 @@ fn default_application_config(profile: &str, target: &str, repo: &str, pwd: &str
                     port: 22,
                     user: "backup".into(),
                     key_file: Some("/etc/backup/id_ed25519".into()),
+                    additional_args: Vec::new(),
                 }),
                 s3: None,
             },
@@ -565,19 +590,7 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
     };
 
     if generate_key {
-        if key_path.exists() {
-            std::fs::remove_file(&key_path)?;
-        }
-        if pub_path.exists() {
-            std::fs::remove_file(&pub_path)?;
-        }
-        let output = runner.run(
-            "ssh-keygen",
-            &["-t", "ed25519", "-N", "", "-f", &key_path_str],
-        )?;
-        if output.status_code != 0 {
-            anyhow::bail!("ssh-keygen failed: {}", output.stderr);
-        }
+        generate_sftp_keypair(&key_path, &pub_path, &key_path_str, runner)?;
     }
 
     #[cfg(unix)]
@@ -590,6 +603,8 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
             std::fs::set_permissions(&pub_path, std::fs::Permissions::from_mode(0o600))?;
         }
     }
+
+    crate::config::model::ensure_sftp_known_hosts_file(config_dir)?;
 
     if let Ok(pub_key) = std::fs::read_to_string(&pub_path) {
         crate::logger::interactive_notice(format!(
@@ -613,7 +628,14 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
     loop {
         // Perform SFTP connection test
         crate::logger::interactive_notice(msg.sftp_testing_connection);
-        let test_result = verify_sftp_connection(&user, &host, port, &key_path_str, runner);
+        let test_result = verify_sftp_connection_with_config_dir(
+            &user,
+            &host,
+            port,
+            &key_path_str,
+            config_dir,
+            runner,
+        );
 
         let success = match test_result {
             Ok(()) => {
@@ -633,6 +655,7 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
         let options = vec![
             msg.sftp_action_retry,
             msg.sftp_action_reenter,
+            msg.sftp_action_change_key,
             msg.sftp_action_ignore,
             msg.sftp_action_cancel,
         ];
@@ -651,7 +674,45 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
                 user = prompt_text_with_default(msg.sftp_user, &user, lang)?;
                 path = prompt_text_with_default(msg.sftp_path, &path, lang)?;
             }
-            2 => break, // Ignore warning and proceed
+            2 => {
+                let key_options = vec![
+                    msg.sftp_key_choice_use_existing,
+                    msg.sftp_key_choice_generate_new,
+                ];
+                let selection_idx = inquire::Select::new(msg.sftp_key_choice_prompt, key_options)
+                    .raw_prompt()?
+                    .index;
+                if selection_idx == 1 {
+                    generate_sftp_keypair(&key_path, &pub_path, &key_path_str, runner)?;
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if key_path.exists() {
+                        std::fs::set_permissions(
+                            &key_path,
+                            std::fs::Permissions::from_mode(0o600),
+                        )?;
+                    }
+                    if pub_path.exists() {
+                        std::fs::set_permissions(
+                            &pub_path,
+                            std::fs::Permissions::from_mode(0o600),
+                        )?;
+                    }
+                }
+                if let Ok(pub_key) = std::fs::read_to_string(&pub_path) {
+                    crate::logger::interactive_notice(format!(
+                        "{}\n{}\n{}\n{}",
+                        "================================================================================",
+                        msg.sftp_pubkey_notice,
+                        "================================================================================",
+                        pub_key.trim()
+                    ));
+                }
+                let _ = inquire::Text::new(msg.sftp_press_enter).prompt_skippable()?;
+            }
+            3 => break, // Ignore warning and proceed
             _ => anyhow::bail!("SFTP setup cancelled by user due to connection failure."),
         }
     }
@@ -664,8 +725,395 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
             port,
             user,
             key_file: Some(key_path_str),
+            additional_args: Vec::new(),
         },
     ))
+}
+
+fn generate_sftp_keypair<R: crate::runner::executor::CommandRunner>(
+    key_path: &Path,
+    pub_path: &Path,
+    key_path_str: &str,
+    runner: &R,
+) -> Result<()> {
+    if key_path.exists() {
+        std::fs::remove_file(key_path)?;
+    }
+    if pub_path.exists() {
+        std::fs::remove_file(pub_path)?;
+    }
+    let output = runner.run(
+        "ssh-keygen",
+        &["-t", "ed25519", "-N", "", "-f", key_path_str],
+    )?;
+    if output.status_code != 0 {
+        anyhow::bail!("ssh-keygen failed: {}", output.stderr);
+    }
+    Ok(())
+}
+
+/// Reconstructs the wizard-owned SFTP authentication configuration when an
+/// operator elects to reuse an existing Backend Profile. Native `sftp.args`
+/// is preferred; the old full command is accepted only in the exact shape
+/// emitted by the former wizard.
+pub fn resolve_reused_sftp_config(
+    repository: &str,
+    options: Option<&std::collections::BTreeMap<String, String>>,
+    config_dir: &Path,
+) -> Result<SftpConfig> {
+    let (user, host, port) = parse_sftp_repository(repository)?;
+    let options = options.ok_or_else(|| {
+        anyhow::anyhow!(
+            "existing SFTP authentication is unavailable; explicit SFTP reconfiguration is required"
+        )
+    })?;
+
+    if let Some(args) = options.get("sftp.args") {
+        if options.contains_key("sftp.command") {
+            anyhow::bail!(
+                "existing SFTP configuration contains both sftp.args and sftp.command; explicit SFTP reconfiguration is required"
+            );
+        }
+        let tokens = tokenize_sftp_arguments(args)?;
+        let key_file = identity_from_sftp_tokens(&tokens).ok_or_else(|| {
+            anyhow::anyhow!(
+                "existing sftp.args has no managed identity; explicit SFTP reconfiguration is required"
+            )
+        })?;
+        let additional_args = validate_reused_sftp_args(&tokens, Path::new(key_file), config_dir)?;
+        return Ok(SftpConfig {
+            host,
+            port,
+            user,
+            key_file: Some(key_file.to_string()),
+            additional_args,
+        });
+    }
+
+    let command = options.get("sftp.command").ok_or_else(|| {
+        anyhow::anyhow!(
+            "existing SFTP authentication is unavailable; explicit SFTP reconfiguration is required"
+        )
+    })?;
+    let tokens = tokenize_sftp_arguments(command)?;
+    if tokens.len() != 10
+        || tokens[0] != "ssh"
+        || tokens[1] != "-o"
+        || tokens[2] != "StrictHostKeyChecking=no"
+        || tokens[3] != "-i"
+        || tokens[5] != "-p"
+        || tokens[8] != "-s"
+        || tokens[9] != "sftp"
+    {
+        anyhow::bail!(
+            "existing sftp.command is nonstandard; explicit SFTP reconfiguration is required"
+        );
+    }
+    let key_file = Path::new(&tokens[4]);
+    let command_port = tokens[6].parse::<u16>().map_err(|_| {
+        anyhow::anyhow!(
+            "existing sftp.command has an invalid port; explicit SFTP reconfiguration is required"
+        )
+    })?;
+    if command_port != port || tokens[7] != format!("{user}@{host}") {
+        anyhow::bail!(
+            "existing sftp.command does not match its repository URI; explicit SFTP reconfiguration is required"
+        );
+    }
+    if !is_managed_sftp_key_path(key_file, config_dir) {
+        anyhow::bail!(
+            "existing SFTP identity is outside the managed configuration directory; explicit SFTP reconfiguration is required"
+        );
+    }
+    if !is_regular_sftp_key_file(&resolve_sftp_key_path(key_file, config_dir)) {
+        anyhow::bail!(
+            "existing managed SFTP identity is missing; explicit SFTP reconfiguration is required"
+        );
+    }
+
+    Ok(SftpConfig {
+        host,
+        port,
+        user,
+        key_file: Some(tokens[4].clone()),
+        additional_args: Vec::new(),
+    })
+}
+
+fn is_regular_sftp_key_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false)
+}
+
+fn resolve_sftp_key_path(path: &Path, config_dir: &Path) -> std::path::PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        config_dir.join(path)
+    }
+}
+
+fn validate_reused_sftp_args(
+    tokens: &[String],
+    key_file: &Path,
+    config_dir: &Path,
+) -> Result<Vec<String>> {
+    if !is_managed_sftp_key_path(key_file, config_dir) {
+        anyhow::bail!(
+            "existing SFTP identity is outside the managed configuration directory; explicit SFTP reconfiguration is required"
+        );
+    }
+    if !is_regular_sftp_key_file(&resolve_sftp_key_path(key_file, config_dir)) {
+        anyhow::bail!(
+            "existing managed SFTP identity is missing; explicit SFTP reconfiguration is required"
+        );
+    }
+    let policy = SftpAuthPolicy::for_config_dir(key_file, config_dir)?;
+    let known_hosts = policy
+        .known_hosts_file()
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("SFTP known_hosts path must be valid UTF-8"))?;
+    let identity_indices = tokens
+        .windows(2)
+        .enumerate()
+        .filter_map(|(index, window)| (window[0] == "-i").then_some(index))
+        .collect::<Vec<_>>();
+    if identity_indices.len() != 1
+        || tokens.get(identity_indices[0] + 1).map(String::as_str)
+            != Some(key_file.to_string_lossy().as_ref())
+    {
+        anyhow::bail!(
+            "existing sftp.args must contain exactly one -i option for the managed identity; explicit SFTP reconfiguration is required"
+        );
+    }
+
+    let options = parse_sftp_option_values(tokens)?;
+    let required = [
+        ("IdentitiesOnly", "yes"),
+        ("BatchMode", "yes"),
+        ("StrictHostKeyChecking", "accept-new"),
+        ("UserKnownHostsFile", known_hosts),
+    ];
+    for (key, expected_value) in required {
+        let matches = options
+            .iter()
+            .filter(|(option_key, _)| sftp_option_key_is(option_key, key))
+            .collect::<Vec<_>>();
+        if matches.len() != 1 || matches[0].1 != expected_value {
+            anyhow::bail!(
+                "existing sftp.args does not enforce one unambiguous managed key-only policy; explicit SFTP reconfiguration is required"
+            );
+        }
+    }
+
+    let mut additional_args = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        if token == "-i" {
+            index += 2;
+            continue;
+        }
+        if token == "-o" {
+            let value = tokens.get(index + 1).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "existing sftp.args has an incomplete -o option; explicit SFTP reconfiguration is required"
+                )
+            })?;
+            let (key, _) = split_sftp_option(value)?;
+            if sftp_option_key_is(key, "IdentityFile") {
+                anyhow::bail!(
+                    "existing sftp.args contains an additional IdentityFile; explicit SFTP reconfiguration is required"
+                );
+            }
+            if required
+                .iter()
+                .any(|(required_key, _)| sftp_option_key_is(required_key, key))
+            {
+                index += 2;
+                continue;
+            }
+            validate_safe_sftp_option(key)?;
+            additional_args.extend([token.clone(), value.clone()]);
+            index += 2;
+            continue;
+        }
+        if let Some(value) = token.strip_prefix("-o") {
+            let (key, _) = split_sftp_option(value)?;
+            if sftp_option_key_is(key, "IdentityFile") {
+                anyhow::bail!(
+                    "existing sftp.args contains an additional IdentityFile; explicit SFTP reconfiguration is required"
+                );
+            }
+            if required
+                .iter()
+                .any(|(required_key, _)| sftp_option_key_is(required_key, key))
+            {
+                index += 1;
+                continue;
+            }
+            validate_safe_sftp_option(key)?;
+            additional_args.push(token.clone());
+            index += 1;
+            continue;
+        }
+        if token.starts_with('-') {
+            if [
+                "-i", "-p", "-l", "-F", "-S", "-A", "-a", "-J", "-D", "-P", "-W", "-w", "-R", "-L",
+                "-O",
+            ]
+            .iter()
+            .any(|prefix| token == prefix || token.starts_with(prefix))
+                || token == "--"
+            {
+                anyhow::bail!(
+                    "existing sftp.args contains a host or authentication override; explicit SFTP reconfiguration is required"
+                );
+            }
+            if !matches!(token.as_str(), "-4" | "-6" | "-C" | "-q" | "-T") {
+                anyhow::bail!(
+                    "existing sftp.args contains an unsupported SSH flag; explicit SFTP reconfiguration is required"
+                );
+            }
+            additional_args.push(token.clone());
+            index += 1;
+            continue;
+        }
+        anyhow::bail!(
+            "existing sftp.args contains a positional argument; explicit SFTP reconfiguration is required"
+        );
+    }
+    Ok(additional_args)
+}
+
+fn identity_from_sftp_tokens(tokens: &[String]) -> Option<&str> {
+    tokens
+        .windows(2)
+        .find_map(|window| (window[0] == "-i").then_some(window[1].as_str()))
+        .or_else(|| {
+            tokens.iter().find_map(|token| {
+                token
+                    .strip_prefix("IdentityFile=")
+                    .or_else(|| token.strip_prefix("-oIdentityFile="))
+            })
+        })
+}
+
+fn split_sftp_option(value: &str) -> Result<(&str, &str)> {
+    value.split_once('=').ok_or_else(|| {
+        anyhow::anyhow!(
+            "existing sftp.args contains an invalid -o option; explicit SFTP reconfiguration is required"
+        )
+    })
+}
+
+fn parse_sftp_option_values(tokens: &[String]) -> Result<Vec<(&str, &str)>> {
+    let mut values = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if tokens[index] == "-o" {
+            let value = tokens.get(index + 1).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "existing sftp.args has an incomplete -o option; explicit SFTP reconfiguration is required"
+                )
+            })?;
+            values.push(split_sftp_option(value)?);
+            index += 2;
+        } else if let Some(value) = tokens[index].strip_prefix("-o") {
+            values.push(split_sftp_option(value)?);
+            index += 1;
+        } else {
+            index += 1;
+        }
+    }
+    Ok(values)
+}
+
+fn validate_safe_sftp_option(key: &str) -> Result<()> {
+    if ![
+        "ConnectTimeout",
+        "ConnectionAttempts",
+        "ServerAliveInterval",
+        "ServerAliveCountMax",
+        "TCPKeepAlive",
+        "Compression",
+        "CompressionLevel",
+        "IPQoS",
+        "AddressFamily",
+        "KexAlgorithms",
+        "HostKeyAlgorithms",
+        "Ciphers",
+        "MACs",
+        "RekeyLimit",
+    ]
+    .iter()
+    .any(|safe_key| sftp_option_key_is(key, safe_key))
+    {
+        anyhow::bail!(
+            "existing sftp.args contains an unsupported SSH option ({key}); explicit SFTP reconfiguration is required"
+        );
+    }
+    Ok(())
+}
+
+fn sftp_option_key_is(actual: &str, expected: &str) -> bool {
+    actual.eq_ignore_ascii_case(expected)
+}
+
+fn parse_sftp_repository(repository: &str) -> Result<(String, String, u16)> {
+    if !repository.starts_with("sftp:") {
+        anyhow::bail!("not an SFTP repository URI: {repository}");
+    }
+
+    if repository.starts_with("sftp://") {
+        let parsed = url::Url::parse(repository)?;
+        let user = parsed.username().to_string();
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("SFTP repository URI has no host"))?
+            .to_string();
+        let port = parsed.port().unwrap_or(22);
+        if user.is_empty() {
+            anyhow::bail!("SFTP repository URI has no user");
+        }
+        return Ok((user, host, port));
+    }
+
+    let authority = repository["sftp:".len()..]
+        .split_once('/')
+        .map(|(authority, _)| authority)
+        .unwrap_or(&repository["sftp:".len()..]);
+    let (user, host_port) = authority
+        .split_once('@')
+        .ok_or_else(|| anyhow::anyhow!("SFTP repository URI has no user"))?;
+    let (host, port) = if host_port.starts_with('[') {
+        let end = host_port
+            .find(']')
+            .ok_or_else(|| anyhow::anyhow!("invalid bracketed SFTP host"))?;
+        let host = &host_port[1..end];
+        let port = host_port
+            .get(end + 1..)
+            .and_then(|value| value.strip_prefix(':'))
+            .map(str::parse)
+            .transpose()?
+            .unwrap_or(22);
+        (host.to_string(), port)
+    } else if let Some((host, port)) = host_port.rsplit_once(':') {
+        if port.is_empty() {
+            (host.to_string(), 22)
+        } else if let Ok(port) = port.parse::<u16>() {
+            (host.to_string(), port)
+        } else {
+            (host_port.to_string(), 22)
+        }
+    } else {
+        (host_port.to_string(), 22)
+    };
+    if host.is_empty() {
+        anyhow::bail!("SFTP repository URI has no host");
+    }
+    Ok((user.to_string(), host, port))
 }
 
 pub fn verify_sftp_connection<R: crate::runner::executor::CommandRunner>(
@@ -675,26 +1123,40 @@ pub fn verify_sftp_connection<R: crate::runner::executor::CommandRunner>(
     key_path: &str,
     runner: &R,
 ) -> Result<(), String> {
+    let config_dir = Path::new(key_path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    verify_sftp_connection_with_config_dir(user, host, port, key_path, config_dir, runner)
+}
+
+pub fn verify_sftp_connection_with_config_dir<R: crate::runner::executor::CommandRunner>(
+    user: &str,
+    host: &str,
+    port: u16,
+    key_path: &str,
+    config_dir: &Path,
+    runner: &R,
+) -> Result<(), String> {
     let port_str = port.to_string();
     let remote_target = format!("{}@{}", user, host);
-    let test_output = runner.run(
-        "sftp",
-        &[
-            "-i",
-            key_path,
-            "-P",
-            &port_str,
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=5",
-            "-b",
-            "/dev/null",
-            &remote_target,
-        ],
-    );
+    let policy = SftpAuthPolicy::for_config_dir(Path::new(key_path), config_dir)
+        .map_err(|error| error.to_string())?;
+    let auth_args = policy
+        .argument_tokens()
+        .map_err(|error| error.to_string())?;
+    let mut args = auth_args;
+    args.extend([
+        "-P".into(),
+        port_str,
+        "-o".into(),
+        "ConnectTimeout=5".into(),
+        "-b".into(),
+        "/dev/null".into(),
+        remote_target,
+    ]);
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let test_output = runner.run("sftp", &arg_refs);
 
     match test_output {
         Ok(out) if out.status_code == 0 => Ok(()),
@@ -847,18 +1309,49 @@ impl SetupEngine {
             );
         }
 
-        let params = prompter.prompt_setup_params(lang_opt, config_dir, profiles_path)?;
-        let config = Self::validate_and_build(params)?;
+        // Capture the live state before prompting. Key generation, encryption
+        // sidecars, and host-key trust may all happen during prompting.
+        let previous = LiveConfigSnapshot::capture(profiles_path)?;
+        let params = match prompter.prompt_setup_params(lang_opt, config_dir, profiles_path) {
+            Ok(params) => params,
+            Err(error) => {
+                previous.restore()?;
+                return Err(error);
+            }
+        };
+        let config = match Self::validate_and_build(params) {
+            Ok(config) => config,
+            Err(error) => {
+                previous.restore()?;
+                return Err(error);
+            }
+        };
 
-        std::fs::create_dir_all(&config.reports.output_dir)?;
+        if let Err(error) = std::fs::create_dir_all(&config.reports.output_dir) {
+            previous.restore()?;
+            return Err(error.into());
+        }
         let staged_dir = tempfile::Builder::new()
             .prefix(".setup-")
-            .tempdir_in(config_dir)?;
+            .tempdir_in(config_dir)
+            .map_err(anyhow::Error::from)?;
         let staged_profiles = staged_dir
             .path()
             .join(crate::config::model::DEFAULT_PROFILES_FILENAME);
-        config.save_to_profiles_path(&staged_profiles)?;
-        let staged = crate::config::model::ResticProfileConfig::load_from_path(&staged_profiles)?;
+        if let Err(error) =
+            config.save_to_profiles_path_with_config_dir(&staged_profiles, config_dir)
+        {
+            previous.restore()?;
+            return Err(error);
+        }
+        let staged =
+            match crate::config::model::ResticProfileConfig::load_from_path(&staged_profiles) {
+                Ok(staged) => staged,
+                Err(error) => {
+                    previous.restore()?;
+                    return Err(error);
+                }
+            };
         let msg = crate::i18n::I18nMessages::get(language);
 
         crate::logger::interactive_notice(msg.initializing_backend_repo);
@@ -869,7 +1362,9 @@ impl SetupEngine {
             runner,
         );
 
+        let mut initialization_failed = false;
         if let Err(error) = init_result {
+            initialization_failed = true;
             let mut err_msg = error.to_string();
             let mut secrets = vec![config.storage.primary.password.expose_secret()];
             if let Some(s3) = &config.storage.primary.s3 {
@@ -889,12 +1384,14 @@ impl SetupEngine {
                     err_msg = err_msg.replace(trimmed, "******");
                 }
             }
+            err_msg = append_sftp_diagnostics(err_msg, &staged, profiles_path);
             tracing::error!("{}", err_msg);
 
             if !non_interactive {
                 let save_anyway = prompter
                     .prompt_confirm_save_on_init_failure(msg.backend_init_failed_save_prompt)?;
                 if !save_anyway {
+                    previous.restore()?;
                     let prefix = match language {
                         Language::Ko => "저장소 초기화 실패로 설정을 취소했습니다",
                         Language::En => "Setup cancelled due to repository initialization failure",
@@ -909,7 +1406,19 @@ impl SetupEngine {
                 return Err(anyhow::anyhow!("{prefix}: {err_msg}"));
             }
         }
-        let previous = LiveConfigSnapshot::capture(profiles_path)?;
+
+        if initialization_failed {
+            if let Err(error) = save_pending_setup(&config, profiles_path) {
+                previous.restore()?;
+                discard_pending_setup(profiles_path)?;
+                return Err(error);
+            }
+            // Keep retryable configuration and authentication artifacts, but
+            // never activate a scheduler that can reach an uninitialized
+            // Backend Adapter. The live configuration remains untouched.
+            return Ok(());
+        }
+
         if let Err(error) =
             crate::config::registry::ConfigurationRegistry::save_profile_config_to_path(
                 &config,
@@ -919,6 +1428,7 @@ impl SetupEngine {
             previous.restore()?;
             return Err(error);
         }
+        discard_pending_setup(profiles_path)?;
         if let Err(error) = scheduler.enable_preserving_state(profiles_path, scheduler_settings) {
             previous.restore()?;
             return Err(error);
@@ -961,10 +1471,14 @@ impl SetupEngine {
         let targets = profiles.backend_initialization_targets()?;
         let init_result = initialize_backend_targets(profiles_path, &targets, runner);
         if let Err(error) = init_result {
-            let message = redact_existing_profile_error(
-                error.to_string(),
+            let message = append_sftp_diagnostics(
+                redact_existing_profile_error(
+                    error.to_string(),
+                    &profiles,
+                    profiles_path.parent().unwrap_or_else(|| Path::new(".")),
+                ),
                 &profiles,
-                profiles_path.parent().unwrap_or_else(|| Path::new(".")),
+                profiles_path,
             );
             let prefix = match language {
                 Language::Ko => "비대화형 설정의 저장소 초기화에 실패했습니다",
@@ -997,6 +1511,212 @@ fn initialize_backend_targets<R: crate::runner::resticprofile::ResticProfileRunn
             failures.join("; ")
         )
     }
+}
+
+/// Returns the retryable setup transaction directory beside the live profiles file.
+pub fn pending_setup_dir(profiles_path: &Path) -> PathBuf {
+    profiles_config_dir(profiles_path).join(PENDING_SETUP_DIRNAME)
+}
+
+pub fn pending_setup_profiles_path(profiles_path: &Path) -> PathBuf {
+    pending_setup_dir(profiles_path).join(crate::config::model::DEFAULT_PROFILES_FILENAME)
+}
+
+pub fn pending_setup_exists(profiles_path: &Path) -> Result<bool> {
+    let pending_dir = pending_setup_dir(profiles_path);
+    match std::fs::symlink_metadata(&pending_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!("pending setup path must not be a symbolic link")
+        }
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            anyhow::bail!("pending setup path is not a directory")
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    }
+    match std::fs::symlink_metadata(pending_setup_profiles_path(profiles_path)) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!("pending setup profiles file must not be a symbolic link")
+        }
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            anyhow::bail!("pending setup profiles file is not a regular file")
+        }
+        Ok(_) => {
+            validate_pending_permissions(
+                &pending_dir,
+                &pending_setup_profiles_path(profiles_path),
+            )?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!("pending setup directory has no profiles.yaml")
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn validate_pending_permissions(pending_dir: &Path, pending_profiles: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let directory_mode = std::fs::metadata(pending_dir)?.permissions().mode() & 0o777;
+        if directory_mode != 0o700 {
+            anyhow::bail!("pending setup directory must have mode 700, found {directory_mode:03o}");
+        }
+        let file_mode = std::fs::metadata(pending_profiles)?.permissions().mode() & 0o777;
+        if file_mode != 0o600 {
+            anyhow::bail!("pending setup profiles file must have mode 600, found {file_mode:03o}");
+        }
+    }
+    Ok(())
+}
+
+fn save_pending_setup(config: &BackupConfig, profiles_path: &Path) -> Result<()> {
+    let pending_profiles = pending_setup_profiles_path(profiles_path);
+    let pending_dir = pending_profiles
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("pending setup path has no parent directory"))?;
+    // A new wizard run replaces, rather than merges with, an older retryable
+    // transaction. This prevents obsolete sidecars from being promoted later.
+    discard_pending_setup(profiles_path)?;
+    crate::config::model::create_secure_dir(pending_dir)?;
+    match std::fs::symlink_metadata(&pending_profiles) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!("pending setup profiles file must not be a symbolic link")
+        }
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            anyhow::bail!("pending setup profiles file is not a regular file")
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let live_config_dir = profiles_config_dir(profiles_path);
+    config.save_to_profiles_path_with_config_dir(&pending_profiles, &live_config_dir)
+}
+
+/// Removes only the setup-owned retry directory.
+pub fn discard_pending_setup(profiles_path: &Path) -> Result<()> {
+    let pending_dir = pending_setup_dir(profiles_path);
+    match std::fs::symlink_metadata(&pending_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!("pending setup path must not be a symbolic link")
+        }
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            anyhow::bail!("pending setup path is not a directory")
+        }
+        Ok(_) => std::fs::remove_dir_all(pending_dir)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+/// Promotes a successfully initialized retryable setup into the live profiles path.
+/// Sidecars are moved first and generated absolute/relative references are rewritten
+/// from the pending directory to the live configuration directory.
+pub fn promote_pending_setup(profiles_path: &Path) -> Result<bool> {
+    let pending_dir = pending_setup_dir(profiles_path);
+    let pending_profiles = pending_setup_profiles_path(profiles_path);
+    if !pending_setup_exists(profiles_path)? {
+        return Ok(false);
+    }
+    let live_dir = profiles_config_dir(profiles_path);
+    let pending_prefix = pending_dir.to_string_lossy();
+    let live_prefix = live_dir.to_string_lossy();
+    let profiles_content = std::fs::read_to_string(&pending_profiles)?
+        .replace(pending_prefix.as_ref(), live_prefix.as_ref());
+
+    let mut pending_sidecars = Vec::new();
+    for entry in std::fs::read_dir(&pending_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path == pending_profiles {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file() {
+            anyhow::bail!(
+                "pending setup sidecar is not a regular file: {}",
+                path.display()
+            );
+        }
+        let target = live_dir.join(entry.file_name());
+        let content = std::fs::read_to_string(&path)?;
+        pending_sidecars.push((target, content));
+    }
+
+    let mut live_files = Vec::with_capacity(pending_sidecars.len() + 1);
+    live_files.push((
+        profiles_path.to_path_buf(),
+        secure_file_state(profiles_path)?,
+    ));
+    for (target, _) in &pending_sidecars {
+        live_files.push((target.clone(), secure_file_state(target)?));
+    }
+    let write_result = (|| -> Result<()> {
+        for (target, content) in &pending_sidecars {
+            crate::config::model::save_secure_file(target, content)?;
+        }
+        crate::config::model::save_secure_file(profiles_path, &profiles_content)?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        restore_secure_file_state(&live_files)?;
+        return Err(error);
+    }
+    if let Err(error) = discard_pending_setup(profiles_path) {
+        restore_secure_file_state(&live_files)?;
+        return Err(error);
+    }
+    Ok(true)
+}
+
+fn secure_file_state(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!(
+                "secure configuration file must not be a symbolic link: {}",
+                path.display()
+            )
+        }
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            anyhow::bail!(
+                "secure configuration path is not a regular file: {}",
+                path.display()
+            )
+        }
+        Ok(_) => Ok(Some(std::fs::read(path)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn restore_secure_file_state(files: &[(PathBuf, Option<Vec<u8>>)]) -> Result<()> {
+    for (path, content) in files {
+        match content {
+            Some(content) => {
+                crate::config::model::save_secure_file(path, &String::from_utf8_lossy(content))?
+            }
+            None => match std::fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    anyhow::bail!(
+                        "secure configuration file must not be a symbolic link: {}",
+                        path.display()
+                    )
+                }
+                Ok(metadata) if metadata.file_type().is_file() => std::fs::remove_file(path)?,
+                Ok(_) => anyhow::bail!(
+                    "secure configuration path is not a regular file: {}",
+                    path.display()
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            },
+        }
+    }
+    Ok(())
 }
 
 const APPLICATION_SECRET_FILENAMES: [&str; 6] = [
@@ -1036,13 +1756,104 @@ fn redact_existing_profile_error(
     message
 }
 
+/// Renders only nonsecret connection context for an SFTP initialization error.
+/// The reason is supplied after credential redaction by the caller.
+pub fn render_sftp_diagnostic_summary(
+    backend: &str,
+    repository: &str,
+    options: Option<&std::collections::BTreeMap<String, String>>,
+    profiles_path: &Path,
+    reason: &str,
+) -> Option<String> {
+    let (user, host, port) = parse_sftp_repository(repository).ok()?;
+    let config_dir = profiles_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let identity = options
+        .and_then(|options| {
+            options
+                .get("sftp.args")
+                .or_else(|| options.get("sftp.command"))
+        })
+        .and_then(|value| tokenize_sftp_arguments(value).ok())
+        .and_then(|tokens| identity_from_sftp_tokens(&tokens).map(str::to_string))
+        .unwrap_or_else(|| "<unavailable>".into());
+    let known_hosts = config_dir.join(SFTP_KNOWN_HOSTS_FILENAME);
+    let reason = reason
+        .split_whitespace()
+        .map(|word| {
+            let lower = word.to_ascii_lowercase();
+            if ["password", "secret", "access_key", "secret_key", "token"]
+                .iter()
+                .any(|marker| lower.contains(marker))
+            {
+                "***MASKED***"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(format!(
+        "SFTP backend={backend} host={host} port={port} user={user} identity={identity} authentication=managed-key-only known_hosts={} reason={reason}",
+        known_hosts.display()
+    ))
+}
+
+fn append_sftp_diagnostics(
+    mut message: String,
+    profiles: &crate::config::model::ResticProfileConfig,
+    profiles_path: &Path,
+) -> String {
+    for backend in ["primary", "secondary"] {
+        let Some(profile) = profiles.profiles.get(backend) else {
+            continue;
+        };
+        let Some(repository) = profile.repository.as_deref() else {
+            continue;
+        };
+        if !repository.starts_with("sftp:") {
+            continue;
+        }
+        if let Some(summary) = render_sftp_diagnostic_summary(
+            backend,
+            repository,
+            profile.option.as_ref(),
+            profiles_path,
+            &message,
+        ) {
+            message.push_str("; ");
+            message.push_str(&summary);
+        }
+    }
+    message
+}
+
+/// Redacts a backend-init failure using the pending config's sidecars while
+/// rendering SFTP context from the live profiles path. Pending SFTP args point
+/// their trust file at the live configuration directory.
+pub fn redact_backend_initialization_error(
+    message: String,
+    profiles: &crate::config::model::ResticProfileConfig,
+    credentials_profiles_path: &Path,
+    diagnostics_profiles_path: &Path,
+) -> String {
+    let credentials_dir = profiles_config_dir(credentials_profiles_path);
+    append_sftp_diagnostics(
+        redact_existing_profile_error(message, profiles, &credentials_dir),
+        profiles,
+        diagnostics_profiles_path,
+    )
+}
+
 struct LiveConfigSnapshot {
     files: Vec<(std::path::PathBuf, Option<Vec<u8>>)>,
 }
 
 impl LiveConfigSnapshot {
     fn capture(profiles_path: &Path) -> Result<Self> {
-        let config_dir = profiles_path.parent().unwrap_or_else(|| Path::new("."));
+        let config_dir = profiles_config_dir(profiles_path);
         let mut paths = vec![
             profiles_path.to_path_buf(),
             config_dir.join("database-connection-url"),
@@ -1051,36 +1862,23 @@ impl LiveConfigSnapshot {
         paths.extend(WIZARD_STATE_FILENAMES.map(|filename| config_dir.join(filename)));
         let files = paths
             .into_iter()
-            .map(|path| {
-                Ok((
-                    path.clone(),
-                    path.is_file().then(|| std::fs::read(&path)).transpose()?,
-                ))
-            })
+            .map(|path| Ok((path.clone(), secure_file_state(&path)?)))
             .collect::<Result<Vec<_>>>()?;
         Ok(Self { files })
     }
 
     fn restore(&self) -> Result<()> {
-        for (path, content) in &self.files {
-            match content {
-                Some(content) => {
-                    crate::config::model::save_secure_file(path, &String::from_utf8_lossy(content))?
-                }
-                None if path.exists() => std::fs::remove_file(path)?,
-                None => {}
-            }
-        }
-        Ok(())
+        restore_secure_file_state(&self.files)
     }
 }
 
-const WIZARD_STATE_FILENAMES: [&str; 5] = [
+const WIZARD_STATE_FILENAMES: [&str; 6] = [
     "enc",
     "id_ed25519",
     "id_ed25519.pub",
     "id_ed25519_secondary",
     "id_ed25519_secondary.pub",
+    SFTP_KNOWN_HOSTS_FILENAME,
 ];
 
 pub fn run_setup_with_prompter_and_runners<

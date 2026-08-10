@@ -466,11 +466,12 @@ storage:
 }
 
 #[test]
-fn test_sftp_option_command_generation() {
+fn test_sftp_option_args_generation_uses_key_only_policy() {
     let dir = tempdir().unwrap();
     let config_dir = dir.path().join("etc_backup");
 
-    let yaml = r#"
+    let yaml = format!(
+        r#"
 version: "1.0"
 profile: "sftp-test"
 backup:
@@ -489,7 +490,7 @@ storage:
       host: "59.25.177.53"
       port: 49382
       user: "backup_restic"
-      keyFile: "/etc/backup/id_ed25519"
+      keyFile: "{}"
   secondary:
     enabled: true
     backend: "sftp"
@@ -499,9 +500,12 @@ storage:
       host: "59.25.177.53"
       port: 49382
       user: "backup_restic"
-      keyFile: "/etc/backup/id_ed25519_secondary"
-"#;
-    let config: BackupConfig = serde_yaml::from_str(yaml).unwrap();
+      keyFile: "{}"
+"#,
+        config_dir.join("id_ed25519").display(),
+        config_dir.join("id_ed25519_secondary").display()
+    );
+    let config: BackupConfig = serde_yaml::from_str(&yaml).unwrap();
     config.save_and_sync(&config_dir).unwrap();
 
     let profiles_file = config_dir.join("profiles.yaml");
@@ -509,8 +513,194 @@ storage:
 
     let content = fs::read_to_string(&profiles_file).unwrap();
     assert!(content.contains("option:"));
-    assert!(content.contains("sftp.command: ssh -o StrictHostKeyChecking=no -i /etc/backup/id_ed25519 -p 49382 backup_restic@59.25.177.53 -s sftp"));
-    assert!(content.contains("sftp.command: ssh -o StrictHostKeyChecking=no -i /etc/backup/id_ed25519_secondary -p 49382 backup_restic@59.25.177.53 -s sftp"));
+    assert!(content.contains("sftp.args="));
+    assert!(!content.contains("sftp.command:"));
+    for key in [
+        config_dir.join("id_ed25519").display().to_string(),
+        config_dir
+            .join("id_ed25519_secondary")
+            .display()
+            .to_string(),
+    ] {
+        assert!(content.contains(&key));
+    }
+    for policy in [
+        "IdentitiesOnly=yes",
+        "BatchMode=yes",
+        "StrictHostKeyChecking=accept-new",
+    ] {
+        assert!(content.contains(policy), "missing SFTP policy {policy}");
+    }
+    let known_hosts = config_dir.join("known_hosts");
+    assert!(content.contains(&format!("UserKnownHostsFile={}", known_hosts.display())));
+    assert!(known_hosts.exists());
+    let profiles =
+        backup::config::model::ResticProfileConfig::load_from_path(&profiles_file).unwrap();
+    let copy_options = profiles
+        .profiles
+        .get("sftp-test")
+        .and_then(|profile| profile.copy.as_ref())
+        .and_then(|copy| copy.option.as_ref())
+        .expect("SFTP copy section must carry destination auth options");
+    assert_eq!(
+        copy_options.get("sftp.args"),
+        profiles
+            .profiles
+            .get("secondary")
+            .and_then(|profile| profile.option.as_ref())
+            .and_then(|options| options.get("sftp.args"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn known_hosts_rejects_symbolic_link_escape() {
+    use backup::config::model::ensure_sftp_known_hosts_file;
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let outside = dir.path().join("outside-known-hosts");
+    let config_dir = dir.path().join("config");
+    fs::create_dir(&config_dir).unwrap();
+    fs::write(&outside, "trusted host\n").unwrap();
+    symlink(&outside, config_dir.join("known_hosts")).unwrap();
+
+    let error = ensure_sftp_known_hosts_file(&config_dir).unwrap_err();
+    assert!(error.to_string().contains("symbolic link"));
+    assert_eq!(fs::read_to_string(outside).unwrap(), "trusted host\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn known_hosts_is_created_with_private_permissions() {
+    use backup::config::model::ensure_sftp_known_hosts_file;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let path = ensure_sftp_known_hosts_file(dir.path()).unwrap();
+    assert_eq!(
+        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn sftp_auth_renderer_quotes_config_paths_and_derives_known_hosts() {
+    use backup::config::model::SftpAuthPolicy;
+    use std::path::Path;
+
+    let profiles_path = Path::new("/tmp/backup config/profiles.yaml");
+    let identity = Path::new("/tmp/backup config/id_ed25519");
+    let policy = SftpAuthPolicy::for_profiles_path(identity, profiles_path).unwrap();
+
+    let rendered = policy.render_restic_args().unwrap();
+    assert!(rendered.contains("-i '/tmp/backup config/id_ed25519'"));
+    assert!(rendered.contains("-o IdentitiesOnly=yes"));
+    assert!(rendered.contains("-o BatchMode=yes"));
+    assert!(rendered.contains("-o StrictHostKeyChecking=accept-new"));
+    assert!(rendered.contains("-o 'UserKnownHostsFile=/tmp/backup config/known_hosts'"));
+}
+
+#[test]
+fn sftp_legacy_command_is_migrated_and_removed() {
+    use backup::config::model::ResticProfileConfig;
+
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("backup config");
+    fs::create_dir_all(&config_dir).unwrap();
+    let profiles_file = config_dir.join("profiles.yaml");
+    fs::write(
+        &profiles_file,
+        r#"
+version: "2"
+profiles:
+  primary:
+    repository: "sftp://backup@host:2222/repo"
+    option:
+      sftp.command: "ssh -o StrictHostKeyChecking=no -i /tmp/backup config/id_ed25519 -p 2222 backup@host -s sftp"
+  daily:
+    inherit: primary
+    backup:
+      source: [/data]
+"#,
+    )
+    .unwrap();
+
+    let config_yaml = r#"
+version: "1.0"
+profile: "daily"
+backup: { targets: [/data], excludes: [] }
+retention: { keepDaily: 7, keepWeekly: 4, keepMonthly: 12 }
+storage:
+  primary:
+    backend: sftp
+    repository: "sftp://backup@host:2222/repo"
+    password: "secret_pass_123"
+    sftp:
+      host: host
+      port: 2222
+      user: backup
+      keyFile: "KEYFILE"
+"#
+    .replace(
+        "KEYFILE",
+        &config_dir.join("id_ed25519").display().to_string(),
+    );
+    let config: BackupConfig = serde_yaml::from_str(&config_yaml).unwrap();
+    config.save_to_profiles_path(&profiles_file).unwrap();
+
+    let saved = fs::read_to_string(&profiles_file).unwrap();
+    assert!(saved.contains("sftp.args="));
+    assert!(!saved.contains("sftp.command:"));
+    let parsed = ResticProfileConfig::load_from_path(&profiles_file).unwrap();
+    let args = parsed
+        .profiles
+        .get("primary")
+        .and_then(|profile| profile.option.as_ref())
+        .and_then(|options| options.get("sftp.args"))
+        .unwrap();
+    assert!(args.contains("StrictHostKeyChecking=accept-new"));
+}
+
+#[test]
+fn staged_sftp_profiles_keep_trust_state_beside_live_profiles() {
+    let dir = tempdir().unwrap();
+    let live_dir = dir.path().join("live config");
+    let staged_dir = dir.path().join(".setup");
+    let staged_profiles = staged_dir.join("profiles.yaml");
+    let config_yaml = r#"
+version: "1.0"
+profile: daily
+backup: { targets: [/data], excludes: [] }
+retention: { keepDaily: 7, keepWeekly: 4, keepMonthly: 12 }
+storage:
+  primary:
+    backend: sftp
+    repository: sftp:backup@host:/repo
+    password: secret_pass_123
+    sftp:
+      host: host
+      port: 22
+      user: backup
+      keyFile: "KEYFILE"
+"#
+    .replace(
+        "KEYFILE",
+        &live_dir.join("id_ed25519").display().to_string(),
+    );
+    let config: BackupConfig = serde_yaml::from_str(&config_yaml).unwrap();
+
+    config
+        .save_to_profiles_path_with_config_dir(&staged_profiles, &live_dir)
+        .unwrap();
+    let staged = fs::read_to_string(&staged_profiles).unwrap();
+    assert!(staged.contains(&format!(
+        "UserKnownHostsFile={}",
+        live_dir.join("known_hosts").display()
+    )));
+    assert!(!staged.contains(&staged_dir.join("known_hosts").display().to_string()));
+    assert!(live_dir.join("known_hosts").exists());
+    assert!(!staged_dir.join("known_hosts").exists());
 }
 
 #[test]

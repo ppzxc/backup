@@ -216,6 +216,7 @@ fn purge_configuration_scope(profiles_path: &Path) -> Result<()> {
         "id_ed25519.pub",
         "id_ed25519_secondary",
         "id_ed25519_secondary.pub",
+        crate::config::model::SFTP_KNOWN_HOSTS_FILENAME,
     ] {
         files.push(config_dir.join(name));
     }

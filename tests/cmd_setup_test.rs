@@ -1,7 +1,8 @@
 mod support;
 use backup::commands::setup::{
-    SetupEngine, SetupParams, SetupPrompter, create_default_profiles_file, run_setup_with_prompter,
-    run_setup_with_prompter_and_runners,
+    SetupEngine, SetupParams, SetupPrompter, create_default_profiles_file, discard_pending_setup,
+    pending_setup_profiles_path, promote_pending_setup, render_sftp_diagnostic_summary,
+    resolve_reused_sftp_config, run_setup_with_prompter, run_setup_with_prompter_and_runners,
 };
 use backup::config::model::*;
 use backup::config::profile_resolver::ProfileResolver;
@@ -242,7 +243,8 @@ fn test_setup_with_prompter_success() {
                 host: "192.168.1.100".into(),
                 port: 22,
                 user: "backup".into(),
-                key_file: Some("/etc/backup/id_ed25519".into()),
+                key_file: Some(config_dir.join("id_ed25519").to_string_lossy().into_owned()),
+                additional_args: Vec::new(),
             }),
             s3: None,
         },
@@ -311,6 +313,7 @@ fn test_setup_engine_validation_rules() {
                 port: 22,
                 user: "backup".into(),
                 key_file: Some("/etc/backup/id_rsa".into()),
+                additional_args: Vec::new(),
             }),
             s3: None,
         },
@@ -426,6 +429,7 @@ impl SetupPrompter for ConfirmSaveMockPrompter {
 fn test_setup_engine_saves_config_when_user_confirms_save_on_init_failure() {
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("profiles.yaml");
+    std::fs::write(&config_path, "previous live configuration").unwrap();
 
     let params = SetupParams {
         profile: "test-save-on-fail".into(),
@@ -466,7 +470,94 @@ fn test_setup_engine_saves_config_when_user_confirms_save_on_init_failure() {
     );
 
     assert!(res.is_ok());
-    assert!(config_path.exists());
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        "previous live configuration"
+    );
+    let pending_profiles = pending_setup_profiles_path(&config_path);
+    assert!(pending_profiles.exists());
+    assert!(
+        std::fs::read_to_string(&pending_profiles)
+            .unwrap()
+            .contains("test-save-on-fail")
+    );
+    assert!(scheduler.calls.lock().unwrap().is_empty());
+
+    assert!(promote_pending_setup(&config_path).unwrap());
+    assert!(
+        std::fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("test-save-on-fail")
+    );
+    assert!(!pending_profiles.exists());
+    discard_pending_setup(&config_path).unwrap();
+}
+
+struct MutatingFailurePrompter;
+
+impl SetupPrompter for MutatingFailurePrompter {
+    fn prompt_setup_params(
+        &self,
+        _lang_opt: Option<Language>,
+        config_dir: &std::path::Path,
+        _profiles_path: &std::path::Path,
+    ) -> anyhow::Result<SetupParams> {
+        std::fs::write(config_dir.join("id_ed25519"), "new-key").unwrap();
+        std::fs::write(config_dir.join("known_hosts"), "new-host-key").unwrap();
+        anyhow::bail!("operator cancelled setup")
+    }
+}
+
+#[test]
+fn setup_cancellation_restores_preexisting_sftp_artifacts() {
+    let dir = tempdir().unwrap();
+    let profiles = dir.path().join("profiles.yaml");
+    std::fs::write(&profiles, "previous configuration").unwrap();
+    std::fs::write(dir.path().join("id_ed25519"), "old-key").unwrap();
+    std::fs::write(dir.path().join("known_hosts"), "old-host-key\n").unwrap();
+
+    let error = run_setup_with_prompter_and_runners(
+        &profiles,
+        &MutatingFailurePrompter,
+        false,
+        Some(Language::En),
+        &MockResticProfileRunner::new(0, "unused"),
+        &support::MockScheduler::new(0, "unused"),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("operator cancelled setup"));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("id_ed25519")).unwrap(),
+        "old-key"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("known_hosts")).unwrap(),
+        "old-host-key\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&profiles).unwrap(),
+        "previous configuration"
+    );
+}
+
+#[test]
+fn setup_cancellation_removes_new_sftp_artifacts() {
+    let dir = tempdir().unwrap();
+    let profiles = dir.path().join("profiles.yaml");
+
+    let _ = run_setup_with_prompter_and_runners(
+        &profiles,
+        &MutatingFailurePrompter,
+        false,
+        Some(Language::En),
+        &MockResticProfileRunner::new(0, "unused"),
+        &support::MockScheduler::new(0, "unused"),
+    );
+
+    assert!(!dir.path().join("id_ed25519").exists());
+    assert!(!dir.path().join("known_hosts").exists());
+    assert!(!profiles.exists());
 }
 
 #[test]
@@ -705,7 +796,8 @@ fn test_setup_does_not_enable_schedule_outside_the_isolated_e2e_runner() {
                 host: "192.168.1.100".into(),
                 port: 22,
                 user: "backup".into(),
-                key_file: Some("/etc/backup/id_ed25519".into()),
+                key_file: Some(dir.path().join("id_ed25519").to_string_lossy().into_owned()),
+                additional_args: Vec::new(),
             }),
             s3: None,
         },
@@ -898,6 +990,7 @@ fn test_sftp_params_key_path_validation() {
                 port: 22,
                 user: "backup".into(),
                 key_file: Some("/etc/backup/id_ed25519".into()),
+                additional_args: Vec::new(),
             }),
             s3: None,
         },
@@ -955,12 +1048,16 @@ fn test_verify_sftp_connection_success_and_failure() {
     let expected_args = [
         "-i",
         "/etc/backup/id_ed25519",
-        "-P",
-        "49382",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "BatchMode=yes",
         "-o",
         "StrictHostKeyChecking=accept-new",
         "-o",
-        "BatchMode=yes",
+        "UserKnownHostsFile=/etc/backup/known_hosts",
+        "-P",
+        "49382",
         "-o",
         "ConnectTimeout=5",
         "-b",
@@ -1033,4 +1130,195 @@ fn test_verify_sftp_connection_success_and_failure() {
     );
     assert_eq!(res.unwrap_err(), "exit code: 255");
     assert_eq!(mock_empty_failure.get_calls(), vec![expected_call]);
+}
+
+#[test]
+fn reused_sftp_native_args_recover_only_managed_identity() {
+    use std::collections::BTreeMap;
+
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path();
+    std::fs::write(config_dir.join("id_ed25519"), "managed-key").unwrap();
+    let options = BTreeMap::from([(
+        "sftp.args".to_string(),
+        format!(
+            "-i {} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={}",
+            config_dir.join("id_ed25519").display(),
+            config_dir.join("known_hosts").display()
+        ),
+    )]);
+    let config =
+        resolve_reused_sftp_config("sftp://backup@host:2222/repo", Some(&options), config_dir)
+            .unwrap();
+    assert_eq!(config.host, "host");
+    assert_eq!(config.port, 2222);
+    assert_eq!(config.user, "backup");
+    assert_eq!(
+        config.key_file.as_deref(),
+        Some(config_dir.join("id_ed25519").to_str().unwrap())
+    );
+}
+
+#[test]
+fn reused_sftp_native_args_preserve_safe_additional_options() {
+    use std::collections::BTreeMap;
+
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path();
+    let key = config_dir.join("id_ed25519");
+    std::fs::write(&key, "managed-key").unwrap();
+    let options = BTreeMap::from([(
+        "sftp.args".to_string(),
+        format!(
+            "-i {} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={} -o ConnectTimeout=5",
+            key.display(),
+            config_dir.join("known_hosts").display()
+        ),
+    )]);
+
+    let config =
+        resolve_reused_sftp_config("sftp://backup@host:2222/repo", Some(&options), config_dir)
+            .unwrap();
+    assert_eq!(config.additional_args, ["-o", "ConnectTimeout=5"]);
+    let rendered = config.sftp_args_for_config_dir(config_dir).unwrap();
+    assert!(rendered.contains("-o ConnectTimeout=5"));
+}
+
+#[test]
+fn reused_sftp_native_args_reject_conflicting_or_duplicate_policy() {
+    use std::collections::BTreeMap;
+
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path();
+    let key = config_dir.join("id_ed25519");
+    std::fs::write(&key, "managed-key").unwrap();
+    let base = format!(
+        "-i {} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={}",
+        key.display(),
+        config_dir.join("known_hosts").display()
+    );
+    for suffix in [
+        " -o BatchMode=yes",
+        " -o BatchMode=no",
+        " -o batchmode=no",
+        &format!(" -i {}", key.display()),
+        " -p2222",
+        " -lother-user",
+        " -F/etc/ssh/config",
+        " -D8080",
+        " -o PermitLocalCommand=yes",
+        &format!(
+            " -o UserKnownHostsFile={}",
+            dir.path().join("other-known-hosts").display()
+        ),
+        &format!(" -o IdentityFile={}", key.display()),
+    ] {
+        let options = BTreeMap::from([("sftp.args".to_string(), format!("{base}{suffix}"))]);
+        let error =
+            resolve_reused_sftp_config("sftp://backup@host:2222/repo", Some(&options), config_dir)
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("explicit SFTP reconfiguration"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn reused_sftp_native_args_reject_key_symbolic_link() {
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path();
+    let outside = dir.path().join("outside-key");
+    std::fs::write(&outside, "outside-key").unwrap();
+    symlink(&outside, config_dir.join("id_ed25519")).unwrap();
+    let options = BTreeMap::from([(
+        "sftp.args".to_string(),
+        format!(
+            "-i {} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={}",
+            config_dir.join("id_ed25519").display(),
+            config_dir.join("known_hosts").display()
+        ),
+    )]);
+
+    let error =
+        resolve_reused_sftp_config("sftp://backup@host:2222/repo", Some(&options), config_dir)
+            .unwrap_err();
+    assert!(error.to_string().contains("explicit SFTP reconfiguration"));
+    assert_eq!(std::fs::read_to_string(outside).unwrap(), "outside-key");
+}
+
+#[test]
+fn reused_standard_legacy_sftp_command_is_migratable() {
+    use std::collections::BTreeMap;
+
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path();
+    std::fs::write(config_dir.join("id_ed25519"), "managed-key").unwrap();
+    let options = BTreeMap::from([(
+        "sftp.command".to_string(),
+        format!(
+            "ssh -o StrictHostKeyChecking=no -i {} -p 2222 backup@host -s sftp",
+            config_dir.join("id_ed25519").display()
+        ),
+    )]);
+    let config =
+        resolve_reused_sftp_config("sftp://backup@host:2222/repo", Some(&options), config_dir)
+            .unwrap();
+    assert_eq!(
+        config.key_file.as_deref(),
+        Some(config_dir.join("id_ed25519").to_str().unwrap())
+    );
+}
+
+#[test]
+fn reused_sftp_nonstandard_legacy_command_requires_reconfiguration() {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    let options = BTreeMap::from([(
+        "sftp.command".to_string(),
+        "ssh custom-wrapper --sftp".to_string(),
+    )]);
+    let error = resolve_reused_sftp_config(
+        "sftp://backup@host:2222/repo",
+        Some(&options),
+        Path::new("/tmp/backup"),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("explicit SFTP reconfiguration"));
+}
+
+#[test]
+fn sftp_initialization_diagnostic_contains_context_without_secrets() {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    let options = BTreeMap::from([(
+        "sftp.args".to_string(),
+        "-i /tmp/backup/id_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes".to_string(),
+    )]);
+    let summary = render_sftp_diagnostic_summary(
+        "primary",
+        "sftp://backup@host:2222/repo",
+        Some(&options),
+        Path::new("/tmp/backup/profiles.yaml"),
+        "authentication failed for secret-password",
+    )
+    .unwrap();
+    for field in [
+        "backend=primary",
+        "host=host",
+        "port=2222",
+        "user=backup",
+        "identity=/tmp/backup/id_ed25519",
+        "authentication=managed-key-only",
+        "known_hosts=/tmp/backup/known_hosts",
+    ] {
+        assert!(summary.contains(field), "missing diagnostic field {field}");
+    }
+    assert!(!summary.contains("secret-password"));
 }

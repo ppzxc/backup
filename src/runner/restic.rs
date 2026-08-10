@@ -26,6 +26,18 @@ pub trait ResticRunner {
     ) -> Result<String> {
         self.list_snapshots(repo, password)
     }
+    fn list_snapshots_with_env_and_sftp_args(
+        &self,
+        repo: &str,
+        password: &str,
+        env: &[(&str, &str)],
+        sftp_args: Option<&str>,
+    ) -> Result<String> {
+        if sftp_args.is_some() {
+            anyhow::bail!("ResticRunner implementation does not support native SFTP arguments");
+        }
+        self.list_snapshots_with_env(repo, password, env)
+    }
     fn list_snapshot_infos_with_env(
         &self,
         repo: &str,
@@ -34,6 +46,18 @@ pub trait ResticRunner {
     ) -> Result<Vec<SnapshotInfo>> {
         parse_snapshot_json(&self.list_snapshots_with_env(repo, password, env)?)
             .map_err(anyhow::Error::new)
+    }
+    fn list_snapshot_infos_with_env_and_sftp_args(
+        &self,
+        repo: &str,
+        password: &str,
+        env: &[(&str, &str)],
+        sftp_args: Option<&str>,
+    ) -> Result<Vec<SnapshotInfo>> {
+        parse_snapshot_json(
+            &self.list_snapshots_with_env_and_sftp_args(repo, password, env, sftp_args)?,
+        )
+        .map_err(anyhow::Error::new)
     }
     fn restore(&self, repo: &str, password: &str, snapshot: &str, target: &str) -> Result<String>;
     fn restore_with_env(
@@ -46,6 +70,20 @@ pub trait ResticRunner {
     ) -> Result<String> {
         self.restore(repo, password, snapshot, target)
     }
+    fn restore_with_env_and_sftp_args(
+        &self,
+        repo: &str,
+        password: &str,
+        snapshot: &str,
+        target: &str,
+        env: &[(&str, &str)],
+        sftp_args: Option<&str>,
+    ) -> Result<String> {
+        if sftp_args.is_some() {
+            anyhow::bail!("ResticRunner implementation does not support native SFTP arguments");
+        }
+        self.restore_with_env(repo, password, snapshot, target, env)
+    }
     fn restore_with_env_and_timeout(
         &self,
         repo: &str,
@@ -56,6 +94,30 @@ pub trait ResticRunner {
         _timeout: Duration,
     ) -> Result<String> {
         self.restore_with_env(repo, password, snapshot, target, env)
+    }
+    fn restore_with_env_and_sftp_args_and_timeout(
+        &self,
+        repo: &str,
+        password: &str,
+        snapshot: &str,
+        target: &str,
+        env: &[(&str, &str)],
+        sftp_args: Option<&str>,
+        timeout: Duration,
+    ) -> Result<String> {
+        match sftp_args {
+            Some(sftp_args) => self.restore_with_env_and_sftp_args(
+                repo,
+                password,
+                snapshot,
+                target,
+                env,
+                Some(sftp_args),
+            ),
+            None => {
+                self.restore_with_env_and_timeout(repo, password, snapshot, target, env, timeout)
+            }
+        }
     }
     fn backup_command(
         &self,
@@ -102,17 +164,30 @@ impl<'a, E: CommandRunner + ?Sized> ResticTool<'a, E> {
         repo: &str,
         password: &str,
         environment: Option<&[(&str, &str)]>,
+        sftp_args: Option<&str>,
         json: bool,
     ) -> Result<String> {
         let pass_file = create_temp_password_file(password)?;
         let pass_path = pass_file.path().to_string_lossy();
-        let mut args = vec!["-r", repo, "--password-file", &pass_path, "snapshots"];
-        if json {
-            args.push("--json");
+        let sftp_option = sftp_args.map(|args| format!("sftp.args={args}"));
+        let mut args = vec!["-r".to_owned(), repo.to_owned()];
+        if let Some(option) = &sftp_option {
+            args.extend(["--option".into(), option.clone()]);
         }
+        args.extend([
+            "--password-file".into(),
+            pass_path.into_owned(),
+            "snapshots".into(),
+        ]);
+        if json {
+            args.push("--json".into());
+        }
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let output = match environment {
-            Some(environment) => self.executor.run_with_env("restic", &args, environment)?,
-            None => self.executor.run("restic", &args)?,
+            Some(environment) => self
+                .executor
+                .run_with_env("restic", &arg_refs, environment)?,
+            None => self.executor.run("restic", &arg_refs)?,
         };
         Self::checked(output)
     }
@@ -135,27 +210,34 @@ impl<'a, E: CommandRunner + ?Sized> ResticTool<'a, E> {
         snapshot: &str,
         target: &str,
         environment: &[(&str, &str)],
+        sftp_args: Option<&str>,
         timeout: Option<Duration>,
     ) -> Result<String> {
         let pass_file = create_temp_password_file(password)?;
         let pass_path = pass_file.path().to_string_lossy();
-        let args = [
-            "-r",
-            repo,
-            "--password-file",
-            &pass_path,
-            "restore",
-            snapshot,
-            "--target",
-            target,
-        ];
+        let sftp_option = sftp_args.map(|args| format!("sftp.args={args}"));
+        let mut args = vec!["-r".to_owned(), repo.to_owned()];
+        if let Some(option) = &sftp_option {
+            args.extend(["--option".into(), option.clone()]);
+        }
+        args.extend([
+            "--password-file".into(),
+            pass_path.into_owned(),
+            "restore".into(),
+            snapshot.to_owned(),
+            "--target".into(),
+            target.to_owned(),
+        ]);
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         let output = match timeout {
             Some(timeout) => {
                 self.executor
-                    .run_with_timeout("restic", &args, environment, timeout)?
+                    .run_with_timeout("restic", &arg_refs, environment, timeout)?
             }
-            None if environment.is_empty() => self.executor.run("restic", &args)?,
-            None => self.executor.run_with_env("restic", &args, environment)?,
+            None if environment.is_empty() => self.executor.run("restic", &arg_refs)?,
+            None => self
+                .executor
+                .run_with_env("restic", &arg_refs, environment)?,
         };
         Self::checked(output)
     }
@@ -201,7 +283,7 @@ impl<'a, E: CommandRunner + ?Sized> ResticRunner for ResticTool<'a, E> {
     }
 
     fn list_snapshots(&self, repo: &str, password: &str) -> Result<String> {
-        self.list_snapshot_output(repo, password, None, false)
+        self.list_snapshot_output(repo, password, None, None, false)
     }
     fn list_snapshots_with_env(
         &self,
@@ -209,10 +291,19 @@ impl<'a, E: CommandRunner + ?Sized> ResticRunner for ResticTool<'a, E> {
         password: &str,
         env: &[(&str, &str)],
     ) -> Result<String> {
-        self.list_snapshot_output(repo, password, Some(env), false)
+        self.list_snapshot_output(repo, password, Some(env), None, false)
+    }
+    fn list_snapshots_with_env_and_sftp_args(
+        &self,
+        repo: &str,
+        password: &str,
+        env: &[(&str, &str)],
+        sftp_args: Option<&str>,
+    ) -> Result<String> {
+        self.list_snapshot_output(repo, password, Some(env), sftp_args, false)
     }
     fn list_snapshot_infos(&self, repo: &str, password: &str) -> Result<Vec<SnapshotInfo>> {
-        parse_snapshot_json(&self.list_snapshot_output(repo, password, None, true)?)
+        parse_snapshot_json(&self.list_snapshot_output(repo, password, None, None, true)?)
             .map_err(anyhow::Error::new)
     }
     fn list_snapshot_infos_with_env(
@@ -221,11 +312,27 @@ impl<'a, E: CommandRunner + ?Sized> ResticRunner for ResticTool<'a, E> {
         password: &str,
         env: &[(&str, &str)],
     ) -> Result<Vec<SnapshotInfo>> {
-        parse_snapshot_json(&self.list_snapshot_output(repo, password, Some(env), true)?)
+        parse_snapshot_json(&self.list_snapshot_output(repo, password, Some(env), None, true)?)
             .map_err(anyhow::Error::new)
     }
+    fn list_snapshot_infos_with_env_and_sftp_args(
+        &self,
+        repo: &str,
+        password: &str,
+        env: &[(&str, &str)],
+        sftp_args: Option<&str>,
+    ) -> Result<Vec<SnapshotInfo>> {
+        parse_snapshot_json(&self.list_snapshot_output(
+            repo,
+            password,
+            Some(env),
+            sftp_args,
+            true,
+        )?)
+        .map_err(anyhow::Error::new)
+    }
     fn restore(&self, repo: &str, password: &str, snapshot: &str, target: &str) -> Result<String> {
-        self.restore_output(repo, password, snapshot, target, &[], None)
+        self.restore_output(repo, password, snapshot, target, &[], None, None)
     }
     fn restore_with_env(
         &self,
@@ -235,7 +342,18 @@ impl<'a, E: CommandRunner + ?Sized> ResticRunner for ResticTool<'a, E> {
         target: &str,
         env: &[(&str, &str)],
     ) -> Result<String> {
-        self.restore_output(repo, password, snapshot, target, env, None)
+        self.restore_output(repo, password, snapshot, target, env, None, None)
+    }
+    fn restore_with_env_and_sftp_args(
+        &self,
+        repo: &str,
+        password: &str,
+        snapshot: &str,
+        target: &str,
+        env: &[(&str, &str)],
+        sftp_args: Option<&str>,
+    ) -> Result<String> {
+        self.restore_output(repo, password, snapshot, target, env, sftp_args, None)
     }
     fn restore_with_env_and_timeout(
         &self,
@@ -246,7 +364,27 @@ impl<'a, E: CommandRunner + ?Sized> ResticRunner for ResticTool<'a, E> {
         env: &[(&str, &str)],
         timeout: Duration,
     ) -> Result<String> {
-        self.restore_output(repo, password, snapshot, target, env, Some(timeout))
+        self.restore_output(repo, password, snapshot, target, env, None, Some(timeout))
+    }
+    fn restore_with_env_and_sftp_args_and_timeout(
+        &self,
+        repo: &str,
+        password: &str,
+        snapshot: &str,
+        target: &str,
+        env: &[(&str, &str)],
+        sftp_args: Option<&str>,
+        timeout: Duration,
+    ) -> Result<String> {
+        self.restore_output(
+            repo,
+            password,
+            snapshot,
+            target,
+            env,
+            sftp_args,
+            Some(timeout),
+        )
     }
     fn backup_command(
         &self,

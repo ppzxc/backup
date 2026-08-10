@@ -27,8 +27,19 @@ pub fn execute_snapshots_from_profiles<R: ResticRunner + ?Sized>(
                 redact_snapshot_diagnostic(&error.to_string(), "", "")
             )
         })?;
+    let primary_sftp_args = config
+        .profiles
+        .get("primary")
+        .and_then(|profile| profile.option.as_ref())
+        .and_then(|options| options.get("sftp.args"))
+        .map(String::as_str);
     let primary = runner
-        .list_snapshots_with_env(&primary_repository, &primary_password, &environment)
+        .list_snapshots_with_env_and_sftp_args(
+            &primary_repository,
+            &primary_password,
+            &environment,
+            primary_sftp_args,
+        )
         .map_err(|error| {
             anyhow::anyhow!(
                 "primary snapshots unavailable: {}",
@@ -45,28 +56,37 @@ pub fn execute_snapshots_from_profiles<R: ResticRunner + ?Sized>(
     );
     if config.profiles.contains_key("secondary") {
         match config.backend_credentials(config_dir, "secondary") {
-            Ok((secondary_repository, secondary_password)) => match runner.list_snapshots_with_env(
-                &secondary_repository,
-                &secondary_password,
-                &environment,
-            ) {
-                Ok(snapshots) => output.push_str(&format!(
-                    "\nSecondary snapshots:\n{}",
-                    redact_snapshot_diagnostic(
-                        &snapshots,
-                        &secondary_repository,
-                        &secondary_password,
-                    )
-                )),
-                Err(error) => output.push_str(&format!(
-                    "\n[WARN] Secondary snapshots unavailable: {}",
-                    redact_snapshot_diagnostic(
-                        &error.to_string(),
-                        &secondary_repository,
-                        &secondary_password,
-                    )
-                )),
-            },
+            Ok((secondary_repository, secondary_password)) => {
+                let secondary_sftp_args = config
+                    .profiles
+                    .get("secondary")
+                    .and_then(|profile| profile.option.as_ref())
+                    .and_then(|options| options.get("sftp.args"))
+                    .map(String::as_str);
+                match runner.list_snapshots_with_env_and_sftp_args(
+                    &secondary_repository,
+                    &secondary_password,
+                    &environment,
+                    secondary_sftp_args,
+                ) {
+                    Ok(snapshots) => output.push_str(&format!(
+                        "\nSecondary snapshots:\n{}",
+                        redact_snapshot_diagnostic(
+                            &snapshots,
+                            &secondary_repository,
+                            &secondary_password,
+                        )
+                    )),
+                    Err(error) => output.push_str(&format!(
+                        "\n[WARN] Secondary snapshots unavailable: {}",
+                        redact_snapshot_diagnostic(
+                            &error.to_string(),
+                            &secondary_repository,
+                            &secondary_password,
+                        )
+                    )),
+                }
+            }
             Err(error) => output.push_str(&format!(
                 "\n[WARN] Secondary snapshots unavailable: {}",
                 redact_snapshot_diagnostic(&error.to_string(), "", "")

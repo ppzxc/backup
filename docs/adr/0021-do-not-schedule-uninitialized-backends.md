@@ -1,0 +1,3 @@
+# Do not schedule configuration with an uninitialized backend
+
+**Status: accepted.** When Setup Wizard backend initialization fails, an operator may preserve the staged Unified Backup Configuration and its retryable authentication artifacts—SSH keys, `known_hosts`, and secure sidecars—for later repair, but Setup Wizard must not enable or replace the scheduler with that configuration. The existing configuration and scheduler remain authoritative until `backend-init` succeeds, preventing a scheduled Backup Pipeline from reporting or attempting work against an uninitialized Backend Adapter. If the operator cancels instead, newly created artifacts are rolled back with the staged configuration.

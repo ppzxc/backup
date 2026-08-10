@@ -222,6 +222,35 @@ pub fn select_latest_tagged_snapshot_with_env<R: crate::runner::restic::ResticRu
     selection_from_listing(listing, profile)
 }
 
+/// Environment-aware snapshot selection for a direct restic invocation that must carry the
+/// managed native SFTP authentication option outside resticprofile.
+pub fn select_latest_tagged_snapshot_with_env_and_sftp_args<
+    R: crate::runner::restic::ResticRunner + ?Sized,
+>(
+    runner: &R,
+    repository: &str,
+    password: &SecretString,
+    environment: &[(&str, &str)],
+    profile: &str,
+    sftp_args: Option<&str>,
+) -> SnapshotSelection {
+    let listing = match sftp_args {
+        Some(sftp_args) => runner.list_snapshot_infos_with_env_and_sftp_args(
+            repository,
+            password.expose_secret(),
+            environment,
+            Some(sftp_args),
+        ),
+        None if environment.is_empty() => {
+            runner.list_snapshot_infos(repository, password.expose_secret())
+        }
+        None => {
+            runner.list_snapshot_infos_with_env(repository, password.expose_secret(), environment)
+        }
+    };
+    selection_from_listing(listing, profile)
+}
+
 fn selection_from_listing(
     listing: anyhow::Result<Vec<SnapshotInfo>>,
     profile: &str,

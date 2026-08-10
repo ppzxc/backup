@@ -249,6 +249,87 @@ fn restic_tool_requests_snapshot_json_for_concrete_selection() {
 }
 
 #[test]
+fn restic_tool_forwards_native_sftp_args_to_direct_snapshot_and_restore_calls() {
+    let mock = MockExecutor::new();
+    mock.push_output(
+        "restic",
+        CommandOutput {
+            status_code: 0,
+            stdout: "[]".into(),
+            stderr: String::new(),
+        },
+    );
+    mock.push_output(
+        "restic",
+        CommandOutput {
+            status_code: 0,
+            stdout: "restore complete".into(),
+            stderr: String::new(),
+        },
+    );
+
+    let restic_tool = ResticTool::new(&mock);
+    let sftp_args = "-i /etc/backup/id_ed25519 -o UserKnownHostsFile=/etc/backup/known_hosts";
+    assert!(
+        restic_tool
+            .list_snapshot_infos_with_env_and_sftp_args(
+                "sftp:backup@host:/repo",
+                "secret",
+                &[],
+                Some(sftp_args),
+            )
+            .unwrap()
+            .is_empty()
+    );
+    restic_tool
+        .restore_with_env_and_sftp_args(
+            "sftp:backup@host:/repo",
+            "secret",
+            "snapshot-001",
+            "/tmp/restore",
+            &[],
+            Some(sftp_args),
+        )
+        .unwrap();
+
+    let calls = mock.get_calls();
+    for call in calls {
+        assert!(call.1.windows(2).any(|window| {
+            window[0] == "--option" && window[1] == format!("sftp.args={sftp_args}")
+        }));
+    }
+}
+
+#[test]
+fn legacy_restic_runner_implementations_do_not_silently_drop_sftp_args() {
+    let runner = MockResticRunner::new(0, "unused");
+    let error = runner
+        .list_snapshots_with_env_and_sftp_args("sftp:repo", "password", &[], Some("-i key"))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not support native SFTP arguments")
+    );
+
+    let error = runner
+        .restore_with_env_and_sftp_args(
+            "sftp:repo",
+            "password",
+            "latest",
+            "/tmp/restore",
+            &[],
+            Some("-i key"),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not support native SFTP arguments")
+    );
+}
+
+#[test]
 fn restic_database_stream_forwards_credentials_only_through_environment() {
     let mock = MockExecutor::new();
     mock.push_output(

@@ -18,7 +18,8 @@ use crate::config::profile_resolver::ProfileResolver;
 use crate::runner::executor::{CommandRunner, SystemExecutor};
 use crate::runner::restic::{ResticRunner, ResticTool};
 use crate::runner::snapshot::{
-    SnapshotSelectionReason, SnapshotSelectionStatus, select_latest_tagged_snapshot_with_env,
+    SnapshotSelectionReason, SnapshotSelectionStatus,
+    select_latest_tagged_snapshot_with_env_and_sftp_args,
 };
 use anyhow::Result;
 use secrecy::{ExposeSecret, SecretString};
@@ -49,6 +50,7 @@ pub struct RestoreDrillStorageConfig {
     pub repository: String,
     pub password: SecretString,
     pub environment: SecretEnvironment,
+    pub sftp_args: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -271,6 +273,7 @@ impl ReportConfig {
                 repository: self.primary_repository.clone(),
                 password: self.primary_password.clone(),
                 environment: self.primary_environment.clone(),
+                sftp_args: None,
             }),
             primary_diagnostic: None,
             secondary: None,
@@ -309,11 +312,18 @@ fn restore_drill_storage_from_profiles(
         return Ok(None);
     }
     let (repository, password) = profiles.backend_credentials(config_dir, backend)?;
+    let sftp_args = profiles
+        .profiles
+        .get(backend)
+        .and_then(|profile| profile.option.as_ref())
+        .and_then(|options| options.get("sftp.args"))
+        .cloned();
     Ok(Some(RestoreDrillStorageConfig {
         backend: backend.into(),
         repository,
         password: SecretString::new(password),
         environment,
+        sftp_args,
     }))
 }
 
@@ -1514,12 +1524,13 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
             database_type,
         ));
     }
-    let selection = select_latest_tagged_snapshot_with_env(
+    let selection = select_latest_tagged_snapshot_with_env_and_sftp_args(
         runner,
         &storage.repository,
         &storage.password,
         &environment,
         profile,
+        storage.sftp_args.as_deref(),
     );
     if selection.status != SnapshotSelectionStatus::Selected {
         let operation_finish = clock.now();
@@ -1620,14 +1631,26 @@ fn collect_restore_storage_result<R: ResticRunner + ?Sized, C: RestoreDrillClock
         ));
     }
     let target_path = target.path().to_string_lossy().into_owned();
-    let restore = runner.restore_with_env_and_timeout(
-        &storage.repository,
-        storage.password.expose_secret(),
-        &snapshot_id,
-        &target_path,
-        &environment,
-        Duration::from_millis(config.restore_drill_policy.timeout_milliseconds()),
-    );
+    let restore_timeout = Duration::from_millis(config.restore_drill_policy.timeout_milliseconds());
+    let restore = match storage.sftp_args.as_deref() {
+        Some(sftp_args) => runner.restore_with_env_and_sftp_args_and_timeout(
+            &storage.repository,
+            storage.password.expose_secret(),
+            &snapshot_id,
+            &target_path,
+            &environment,
+            Some(sftp_args),
+            restore_timeout,
+        ),
+        None => runner.restore_with_env_and_timeout(
+            &storage.repository,
+            storage.password.expose_secret(),
+            &snapshot_id,
+            &target_path,
+            &environment,
+            restore_timeout,
+        ),
+    };
     let operation_finish = clock.now();
     let elapsed_milliseconds = operation_finish
         .monotonic_milliseconds
@@ -2169,6 +2192,7 @@ mod tests {
                 "AWS_SECRET_ACCESS_KEY".into(),
                 SecretString::new("secondary-access".into()),
             )],
+            sftp_args: None,
         };
 
         assert!(storage_is_configured(&storage));

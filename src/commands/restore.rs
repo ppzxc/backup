@@ -408,12 +408,19 @@ pub fn execute_restore_from_profiles<R: ResticRunner + ?Sized>(
         RestoreStorage::Secondary => "secondary",
     };
     let (repository, password) = config.backend_credentials(config_dir, backend)?;
-    let result = runner.restore_with_env(
+    let sftp_args = config
+        .profiles
+        .get(backend)
+        .and_then(|profile| profile.option.as_ref())
+        .and_then(|options| options.get("sftp.args"))
+        .map(String::as_str);
+    let result = runner.restore_with_env_and_sftp_args(
         &repository,
         &password,
         snapshot_id,
         target_path,
         &environment,
+        sftp_args,
     )?;
     // The generic restore command has no exact Backup Profile selector. It must not infer a
     // Database Stream expectation from application metadata and apply it to every snapshot;

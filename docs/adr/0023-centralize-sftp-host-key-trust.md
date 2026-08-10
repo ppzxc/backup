@@ -1,0 +1,3 @@
+# Centralize SFTP host-key trust
+
+**Status: accepted.** Setup Wizard and scheduled Backup Pipeline executions use a `known_hosts` file beside the selected `profiles.yaml` as the SFTP `UserKnownHostsFile`; the default production path is `/etc/backup/known_hosts`. The file has `0600` permissions enforced under the existing configuration-directory security boundary. The SSH policy accepts a host key only on first use and rejects later changes, so setup and systemd/cron executions share one trust state regardless of their effective user environment. Newly created trust state participates in setup rollback.

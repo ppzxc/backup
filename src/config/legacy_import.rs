@@ -109,6 +109,7 @@ pub fn parse_legacy_env(content: &str) -> Result<BackupConfig> {
                     key_file: env_map
                         .get(LegacyEnvKey::StorageKeyFile)
                         .map(|s| s.to_string()),
+                    additional_args: Vec::new(),
                 }),
                 s3: None,
             },

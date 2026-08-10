@@ -776,15 +776,26 @@ fn dispatch_inner(
                 ))
             }
             Some(SetupAction::BackendInit) => {
-                let config = load_profiles(context)?;
+                let has_pending =
+                    crate::commands::setup::pending_setup_exists(&context.profiles_path)?;
+                let init_profiles_path = if has_pending {
+                    crate::commands::setup::pending_setup_profiles_path(&context.profiles_path)
+                } else {
+                    required_profiles_path(context)?
+                };
+                require_regular_profiles_file(&init_profiles_path)?;
+                let config = ResticProfileConfig::load_from_path(&init_profiles_path)
+                    .with_context(|| {
+                        format!(
+                            "failed to load unified profiles configuration at {}",
+                            init_profiles_path.display()
+                        )
+                    })?;
                 let targets = backend_initialization_targets(&config)?;
                 let mut output = Vec::new();
                 let mut failures = Vec::new();
                 for profile in targets {
-                    match adapters
-                        .resticprofile
-                        .init(&context.profiles_path, &profile)
-                    {
+                    match adapters.resticprofile.init(&init_profiles_path, &profile) {
                         Ok(result) => {
                             let heading = match context.language {
                                 Language::Ko => "=== 백엔드 저장소 초기화 프로필:",
@@ -793,10 +804,19 @@ fn dispatch_inner(
                             output
                                 .push(format!("{heading} [{profile}] ===\n{}", result.trim_end()));
                         }
-                        Err(error) => failures.push(format!("{profile}: {error}")),
+                        Err(error) => failures.push(format!(
+                            "{profile}: {}",
+                            crate::commands::setup::redact_backend_initialization_error(
+                                error.to_string(),
+                                &config,
+                                &init_profiles_path,
+                                &context.profiles_path,
+                            )
+                        )),
                     }
                 }
                 if failures.is_empty() {
+                    crate::commands::setup::promote_pending_setup(&context.profiles_path)?;
                     Ok(CommandOutcome::success_with_changes(
                         output.join("\n"),
                         "",
@@ -1262,18 +1282,29 @@ fn required_profiles_path(context: &CliRuntimeContext) -> Result<PathBuf> {
 
 fn load_profiles(context: &CliRuntimeContext) -> Result<ResticProfileConfig> {
     let path = required_profiles_path(context)?;
-    if !path.is_file() {
-        anyhow::bail!(
-            "Unified profiles configuration not found at {}",
-            path.display()
-        );
-    }
+    require_regular_profiles_file(&path)?;
     ResticProfileConfig::load_from_path(&path).with_context(|| {
         format!(
             "failed to load unified profiles configuration at {}",
             path.display()
         )
     })
+}
+
+fn require_regular_profiles_file(path: &std::path::Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        anyhow::anyhow!(
+            "Unified profiles configuration not found at {}: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        anyhow::bail!(
+            "Unified profiles configuration must be a regular file: {}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 fn resolve_profiles(config: &ResticProfileConfig, profile: Option<&str>) -> Result<Vec<String>> {
