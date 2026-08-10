@@ -210,6 +210,34 @@ pub struct RuntimeLogging {
     pub log_file: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RestoreDrillSetupOverrides {
+    pub rto_minutes: Option<u64>,
+    pub timeout_minutes: Option<u64>,
+    pub work_dir: Option<PathBuf>,
+}
+
+impl RestoreDrillSetupOverrides {
+    pub fn from_process_environment() -> Result<Self> {
+        fn minutes(name: &str) -> Result<Option<u64>> {
+            let Some(value) = std::env::var_os(name) else {
+                return Ok(None);
+            };
+            let value = value.to_string_lossy();
+            value
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|error| anyhow::anyhow!("{name} must be an unsigned integer: {error}"))
+        }
+
+        Ok(Self {
+            rto_minutes: minutes("BACKUP_TEST_RESTORE_DRILL_RTO_MINUTES")?,
+            timeout_minutes: minutes("BACKUP_TEST_RESTORE_DRILL_TIMEOUT_MINUTES")?,
+            work_dir: std::env::var_os("BACKUP_TEST_RESTORE_DRILL_WORK_DIR").map(PathBuf::from),
+        })
+    }
+}
+
 /// All process-derived values needed by one command execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliRuntimeContext {
@@ -222,6 +250,7 @@ pub struct CliRuntimeContext {
     pub adapter_selection: AdapterSelection,
     pub home_dir: PathBuf,
     pub host_name: String,
+    pub restore_drill_setup_overrides: RestoreDrillSetupOverrides,
 }
 
 impl CliRuntimeContext {
@@ -266,6 +295,7 @@ impl CliRuntimeContext {
             adapter_selection,
             home_dir: PathBuf::from("/tmp"),
             host_name: "localhost".into(),
+            restore_drill_setup_overrides: RestoreDrillSetupOverrides::default(),
         })
     }
 
@@ -283,6 +313,14 @@ impl CliRuntimeContext {
 
     pub fn with_scheduler_force_cron(mut self, force_cron: bool) -> Self {
         self.scheduler_force_cron = force_cron;
+        self
+    }
+
+    pub fn with_restore_drill_setup_overrides(
+        mut self,
+        overrides: RestoreDrillSetupOverrides,
+    ) -> Self {
+        self.restore_drill_setup_overrides = overrides;
         self
     }
 
@@ -778,7 +816,10 @@ fn dispatch_inner(
                 }
             }
             None => {
-                let prompter = crate::commands::setup::InquirePrompter;
+                let prompter =
+                    crate::commands::setup::InquirePrompter::with_restore_drill_overrides(
+                        context.restore_drill_setup_overrides.clone(),
+                    );
                 crate::commands::setup::run_setup_with_prompter_and_runners_with_scheduler_settings(
                     &context.profiles_path,
                     &prompter,

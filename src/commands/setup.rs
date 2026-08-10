@@ -30,7 +30,9 @@ pub trait SetupPrompter {
     }
 }
 
-pub struct InquirePrompter;
+pub struct InquirePrompter {
+    restore_drill_overrides: crate::cli::RestoreDrillSetupOverrides,
+}
 
 fn prompt_text_with_default(msg: &str, default_val: &str, lang: Language) -> Result<String> {
     let prompt_msg = if default_val.is_empty() {
@@ -50,23 +52,25 @@ fn prompt_text_with_default(msg: &str, default_val: &str, lang: Language) -> Res
     }
 }
 
-fn test_restore_drill_minutes(name: &str) -> Result<Option<u64>> {
-    let Some(value) = std::env::var_os(name) else {
-        return Ok(None);
-    };
-    let value = value.to_string_lossy();
-    value
-        .parse::<u64>()
-        .map(Some)
-        .map_err(|error| anyhow::anyhow!("{name} must be an unsigned integer: {error}"))
-}
-
-fn test_restore_drill_work_dir() -> Option<String> {
-    std::env::var_os("BACKUP_TEST_RESTORE_DRILL_WORK_DIR")
-        .map(|value| value.to_string_lossy().into_owned())
-}
-
 pub const DEFAULT_BACKUP_TARGET: &str = "/var/log";
+
+impl InquirePrompter {
+    pub fn with_restore_drill_overrides(
+        restore_drill_overrides: crate::cli::RestoreDrillSetupOverrides,
+    ) -> Self {
+        Self {
+            restore_drill_overrides,
+        }
+    }
+}
+
+impl Default for InquirePrompter {
+    fn default() -> Self {
+        Self {
+            restore_drill_overrides: crate::cli::RestoreDrillSetupOverrides::default(),
+        }
+    }
+}
 
 impl SetupPrompter for InquirePrompter {
     fn prompt_confirm_save_on_init_failure(&self, msg: &str) -> Result<bool> {
@@ -447,18 +451,16 @@ impl SetupPrompter for InquirePrompter {
         let sys_mgr = prompt_text_with_default(msg.prompt_system_manager, default_sys_mgr, lang)?;
         let sec_off = prompt_text_with_default(msg.prompt_security_officer, default_sec_off, lang)?;
 
-        // These namespaced controls are used only by the isolated Docker acceptance test to
-        // exercise the real timeout path without rewriting the Wizard's generated YAML.
         let audit = AuditConfig {
             system_manager: Some(sys_mgr),
             security_officer: Some(sec_off),
-            restore_drill_rto_minutes: test_restore_drill_minutes(
-                "BACKUP_TEST_RESTORE_DRILL_RTO_MINUTES",
-            )?,
-            restore_drill_timeout_minutes: test_restore_drill_minutes(
-                "BACKUP_TEST_RESTORE_DRILL_TIMEOUT_MINUTES",
-            )?,
-            restore_drill_work_dir: test_restore_drill_work_dir(),
+            restore_drill_rto_minutes: self.restore_drill_overrides.rto_minutes,
+            restore_drill_timeout_minutes: self.restore_drill_overrides.timeout_minutes,
+            restore_drill_work_dir: self
+                .restore_drill_overrides
+                .work_dir
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned()),
         };
 
         Ok(SetupParams {
@@ -1147,7 +1149,7 @@ pub fn run_setup_with_prompter<P: SetupPrompter>(
 }
 
 pub fn run_setup(profiles_path: &Path, lang_opt: Option<Language>) -> Result<()> {
-    let prompter = InquirePrompter;
+    let prompter = InquirePrompter::default();
     run_setup_with_prompter(profiles_path, &prompter, false, lang_opt)
 }
 
