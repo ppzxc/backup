@@ -426,17 +426,20 @@ fn database_matrix_uses_setup_wizard_configuration_as_its_only_input() {
 }
 
 #[test]
-fn restore_timeout_script_exercises_rto_and_cleanup_contract() {
+fn restore_timeout_script_exercises_rto_and_hard_timeout_cleanup_contract() {
     let script = wizard_restore_timeout_script("s3-primary", "'s3-primary'");
 
     assert!(script.contains("setup --lang en"));
     assert!(script.contains("BACKUP_TEST_RESTORE_DRILL_TIMEOUT_MINUTES='2'"));
     assert!(!script.contains("sed -i"));
     assert!(script.contains("BACKUP_TEST_RESTORE_DRILL_RTO_MINUTES='1'"));
+    assert!(script.contains("BACKUP_TEST_RESTORE_DRILL_TIMEOUT_MINUTES='1'"));
     assert!(script.contains("sleep 65"));
     assert!(script.contains("mkdir -p \"\\$target\""));
     assert!(script.contains("timed_out == false"));
     assert!(script.contains("failure_stage == \"rto\""));
+    assert!(script.contains("hard-timeout.yaml"));
+    assert!(script.contains("timed_out == true"));
     assert!(script.contains("test -z \"$(find /work/s3-primary/timeout-work"));
 }
 
@@ -591,6 +594,16 @@ if [ -z "$scheduled_report" ]; then
   journalctl -u backup-pipeline.service --no-pager -n 80 || true
   exit 1
 fi
+for _ in {{1..60}}; do
+  if ! systemctl is-active --quiet backup-pipeline.service; then break; fi
+  sleep 1
+done
+if systemctl is-active --quiet backup-pipeline.service; then
+  systemctl status backup-pipeline.service --no-pager || true
+  journalctl -u backup-pipeline.service --no-pager -n 80 || true
+  exit 1
+fi
+sleep 5
 last_trigger=$(systemctl show backup-pipeline.timer --property=LastTriggerUSec --value || true)
 if [ -z "$last_trigger" ] || [ "$last_trigger" = "n/a" ]; then
   systemctl status backup-pipeline.timer --no-pager || true
@@ -884,6 +897,7 @@ cat > /work/{name}/timeout-bin/restic <<EOF
 case "\$*" in
   *" restore "*)
     sleep 65
+    if printf '%s' "\$*" | grep -Fq 'hard-timeout-work'; then exit 0; fi
     target=''
     previous=''
     for argument in "\$@"; do
@@ -919,7 +933,30 @@ if ! jq -e '
   exit 1
 fi
 test -d /work/{name}/timeout-work
-test -z "$(find /work/{name}/timeout-work -mindepth 1 -maxdepth 1 -print -quit)""###,
+test -z "$(find /work/{name}/timeout-work -mindepth 1 -maxdepth 1 -print -quit)"
+printf '%s\n' {answers} | BACKUP_TEST_RESTORE_DRILL_RTO_MINUTES='1' BACKUP_TEST_RESTORE_DRILL_TIMEOUT_MINUTES='1' BACKUP_TEST_RESTORE_DRILL_WORK_DIR='/work/{name}/hard-timeout-work' BACKUP_TEST_SCHEDULE_CALENDAR='*-*-* *:*:00' TERM=dumb script -qec '/usr/local/bin/backup --profiles /work/{name}/hard-timeout.yaml setup --lang en' /dev/null
+backup --profiles /work/{name}/hard-timeout.yaml schedule disable
+set +e
+PATH=/work/{name}/timeout-bin:$PATH backup --profiles /work/{name}/hard-timeout.yaml report restore-drill --file /work/reports/{name}/hard-timeout-drill >/work/{name}/hard-timeout.out 2>&1
+hard_timeout_status=$?
+set -e
+if [ "$hard_timeout_status" != 1 ]; then cat /work/{name}/hard-timeout.out; cat /work/reports/{name}/hard-timeout-drill.json; exit 1; fi
+if ! jq -e '
+  .schema_version == "1" and
+  .overall_status == "fail" and
+  (.storage_results | length) == 2 and
+  .storage_results[0].status == "fail" and
+  .storage_results[0].timed_out == true and
+  .storage_results[0].failure_stage == "restore" and
+  (.storage_results[0].snapshot_id | type) == "string" and
+  .storage_results[1].status == "not_applicable"
+' /work/reports/{name}/hard-timeout-drill.json; then
+  jq . /work/reports/{name}/hard-timeout-drill.json
+  exit 1
+fi
+grep -Fq 'restore timed out' /work/reports/{name}/hard-timeout-drill.json
+test -d /work/{name}/hard-timeout-work
+test -z "$(find /work/{name}/hard-timeout-work -mindepth 1 -maxdepth 1 -print -quit)""###,
         answers = answers,
     )
 }
