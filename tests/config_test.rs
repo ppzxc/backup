@@ -1,4 +1,7 @@
-use backup::config::model::{BackupConfig, BackupType, ReportsConfig};
+use backup::config::model::{
+    BackupConfig, BackupType, ReportsConfig, ResticProfileConfig, SecondaryStorageTarget,
+    StorageConfig, StorageTarget,
+};
 use secrecy::ExposeSecret;
 use std::fs;
 use tempfile::tempdir;
@@ -1016,5 +1019,68 @@ storage:
     } else {
         assert_eq!(sec_prof.password, None);
         assert!(sec_prof.password_file.is_some());
+    }
+}
+
+#[test]
+fn explicit_secondary_repository_password_uses_an_independent_secure_sidecar() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("etc_backup");
+    let primary_password = "primary-secret-123";
+    let secondary_password = "secondary-secret-456";
+    let config = BackupConfig {
+        profile: "daily".into(),
+        storage: StorageConfig {
+            primary: StorageTarget {
+                backend: "local".into(),
+                repository: "/primary-repository".into(),
+                password: secrecy::SecretString::new(primary_password.into()),
+                sftp: None,
+                s3: None,
+            },
+            secondary: Some(SecondaryStorageTarget {
+                enabled: true,
+                backend: "local".into(),
+                repository: "/secondary-repository".into(),
+                password: secrecy::SecretString::new(secondary_password.into()),
+                sftp: None,
+                s3: None,
+            }),
+        },
+        ..BackupConfig::default()
+    };
+
+    config.save_and_sync(&config_dir).unwrap();
+    let profiles = ResticProfileConfig::load_from_path(&config_dir.join("profiles.yaml")).unwrap();
+    let primary = profiles.profiles.get("primary").unwrap();
+    let secondary = profiles.profiles.get("secondary").unwrap();
+    let copy = profiles
+        .profiles
+        .get("daily")
+        .unwrap()
+        .copy
+        .as_ref()
+        .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(primary.password_file.as_ref().unwrap()).unwrap(),
+        primary_password
+    );
+    assert_eq!(
+        fs::read_to_string(secondary.password_file.as_ref().unwrap()).unwrap(),
+        secondary_password
+    );
+    assert_eq!(copy.password_file, secondary.password_file);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(secondary.password_file.as_ref().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
 }

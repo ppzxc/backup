@@ -1881,6 +1881,30 @@ fn setup_backend_init_promotes_a_retryable_pending_configuration_after_success()
 }
 
 #[test]
+fn setup_backend_init_keeps_pending_configuration_when_snapshots_rejects_the_repository_key() {
+    let fixture = setup_contract_fixture();
+    let pending_dir = backup::commands::setup::pending_setup_dir(&fixture.profiles);
+    backup::config::model::create_secure_dir(&pending_dir).unwrap();
+    write_mode_600(
+        &pending_dir.join("profiles.yaml"),
+        "version: '2'\nprofiles:\n  primary:\n    repository: /pending-repository\n    password-file: primary-password\n  default: {}\n",
+    );
+    write_mode_600(&pending_dir.join("primary-password"), "pending-secret");
+    let runner = SetupTraceAdapter::with_snapshot_failure("No key found for configured password");
+
+    let outcome = dispatch_setup(&fixture.profiles, ["setup", "backend-init"], &runner);
+
+    assert_eq!(outcome.exit_status, 1);
+    assert!(outcome.stderr.to_ascii_lowercase().contains("no key found"));
+    assert!(pending_dir.exists());
+    assert!(
+        !std::fs::read_to_string(&fixture.profiles)
+            .unwrap()
+            .contains("/pending-repository")
+    );
+}
+
+#[test]
 fn setup_non_interactive_contract_initializes_existing_targets_without_prompts() {
     let fixture = setup_contract_fixture();
     let runner = SetupTraceAdapter::new(None);
@@ -2289,6 +2313,7 @@ struct SetupFixture {
 struct SetupTraceAdapter {
     calls: Mutex<Vec<String>>,
     failure: Option<String>,
+    snapshot_failure: Option<String>,
 }
 
 impl SetupTraceAdapter {
@@ -2296,6 +2321,15 @@ impl SetupTraceAdapter {
         Self {
             calls: Mutex::new(Vec::new()),
             failure: failure.map(Into::into),
+            snapshot_failure: None,
+        }
+    }
+
+    fn with_snapshot_failure(message: &str) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            failure: None,
+            snapshot_failure: Some(message.into()),
         }
     }
 
@@ -2309,6 +2343,13 @@ impl SetupTraceAdapter {
             anyhow::bail!("{profile} repository unavailable")
         }
         Ok(format!("{profile} initialized"))
+    }
+
+    fn snapshots(&self) -> Result<String> {
+        if let Some(message) = &self.snapshot_failure {
+            anyhow::bail!("{message}");
+        }
+        Ok("repository credentials verified".into())
     }
 }
 
@@ -2338,7 +2379,7 @@ impl ResticProfileRunner for SetupResticProfileAdapter<'_> {
     }
 
     fn list_snapshots(&self, _: &Path, _: &str) -> Result<String> {
-        anyhow::bail!("unexpected setup snapshots call")
+        self.inner.snapshots()
     }
 
     fn prune(&self, _: &Path, _: &str) -> Result<String> {

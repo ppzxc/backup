@@ -516,7 +516,31 @@ impl SetupPrompter for InquirePrompter {
                             &runner,
                             notices,
                         )?;
-                        (repo_uri, String::new(), Some(sec_sftp_conf), None)
+                        let key_choice = inquire::Select::new(
+                            match lang {
+                                Language::Ko => "2차 restic 저장소 키를 선택하세요:",
+                                Language::En => "Choose the secondary restic repository key:",
+                            },
+                            match lang {
+                                Language::Ko => {
+                                    vec!["1차 저장소 키 재사용", "기존 2차 저장소 키 입력"]
+                                }
+                                Language::En => vec![
+                                    "Reuse primary repository key",
+                                    "Enter existing secondary repository key",
+                                ],
+                            },
+                        )
+                        .raw_prompt()?
+                        .index;
+                        let password = if key_choice == 0 {
+                            primary.password.expose_secret().to_owned()
+                        } else {
+                            inquire::Password::new(msg.secondary_password)
+                                .without_confirmation()
+                                .prompt()?
+                        };
+                        (repo_uri, password, Some(sec_sftp_conf), None)
                     } else if sec_backend == "s3" {
                         let mode_choice = inquire::Select::new(
                             msg.s3_mode_select,
@@ -1417,6 +1441,14 @@ impl SetupEngine {
             }
         }
 
+        if let Some(secondary) = &params.secondary_storage {
+            if secondary.enabled && secondary.password.expose_secret().len() < 12 {
+                anyhow::bail!(
+                    "ISMS Compliance Error: Secondary password must be at least 12 characters long."
+                );
+            }
+        }
+
         Ok(BackupConfig {
             version: "1.0".into(),
             profile: params.profile,
@@ -1587,6 +1619,7 @@ impl SetupEngine {
             &staged_profiles,
             &staged.backend_initialization_targets()?,
             runner,
+            true,
         );
 
         let mut initialization_failed = false;
@@ -1613,6 +1646,19 @@ impl SetupEngine {
             }
             err_msg = append_sftp_diagnostics(err_msg, &staged, profiles_path);
             tracing::error!("{}", err_msg);
+
+            // `init` is idempotent for an existing repository and does not
+            // prove that the selected key can decrypt it. Do not offer to
+            // retain a setup that is known to use the wrong credential.
+            if is_repository_credential_failure(&err_msg) {
+                drop(staged_dir);
+                previous.restore()?;
+                return Err(SetupCancellationError::new(
+                    SetupCancellationKind::InitializationFailure,
+                    err_msg,
+                )
+                .into());
+            }
 
             if !non_interactive {
                 match prompter.prompt_init_failure_decision(msg.backend_init_failed_save_prompt)? {
@@ -1713,7 +1759,7 @@ impl SetupEngine {
         let targets = profiles.backend_initialization_targets()?;
         let msg = crate::i18n::I18nMessages::get(language);
         notices.notice(msg.initializing_backend_repo);
-        let init_result = initialize_backend_targets(profiles_path, &targets, runner);
+        let init_result = initialize_backend_targets(profiles_path, &targets, runner, false);
         if let Err(error) = init_result {
             let message = append_sftp_diagnostics(
                 redact_existing_profile_error(
@@ -1741,11 +1787,24 @@ fn initialize_backend_targets<R: crate::runner::resticprofile::ResticProfileRunn
     profiles_path: &Path,
     targets: &[String],
     runner: &R,
+    stop_on_credential_failure: bool,
 ) -> Result<()> {
     let mut failures = Vec::new();
     for profile in targets {
         if let Err(error) = runner.init(profiles_path, profile) {
             failures.push(format!("{profile}: {error}"));
+            if stop_on_credential_failure && is_repository_credential_failure(&error.to_string()) {
+                break;
+            }
+            continue;
+        }
+        if let Err(error) = runner.list_snapshots(profiles_path, profile) {
+            failures.push(format!(
+                "{profile}: repository credential verification failed: {error}"
+            ));
+            if stop_on_credential_failure && is_repository_credential_failure(&error.to_string()) {
+                break;
+            }
         }
     }
     if failures.is_empty() {
@@ -1756,6 +1815,14 @@ fn initialize_backend_targets<R: crate::runner::resticprofile::ResticProfileRunn
             failures.join("; ")
         )
     }
+}
+
+/// Restic currently exposes these credential failures only in its command
+/// output. Keep the classification deliberately narrow to avoid treating a
+/// transport or permission failure as a bad repository key.
+pub fn is_repository_credential_failure(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("wrong password") || message.contains("no key found")
 }
 
 /// Returns the retryable setup transaction directory beside the live profiles file.

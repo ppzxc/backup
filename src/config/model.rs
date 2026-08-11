@@ -235,6 +235,23 @@ impl BackupConfig {
         config_dir: &Path,
         is_secondary: bool,
     ) -> Result<(Option<String>, Option<String>)> {
+        // A secondary repository may deliberately use a different restic key.
+        // Its dedicated sidecar therefore takes precedence over the legacy
+        // shared `enc` sidecar and is retained when setup is rerun.
+        if is_secondary {
+            if let Some(secondary) = &self.storage.secondary {
+                let secondary_password = secondary.password.expose_secret();
+                if !secondary_password.trim().is_empty()
+                    && secondary_password != self.storage.primary.password.expose_secret()
+                {
+                    return Ok((None, Some(secondary_password.to_owned())));
+                }
+            }
+            let secondary_password = config_dir.join("secondary-password");
+            if secondary_password.is_file() {
+                return Ok((Some(secondary_password.to_string_lossy().to_string()), None));
+            }
+        }
         let enc_path = config_dir.join("enc");
         if enc_path.is_file() {
             return Ok((Some(enc_path.to_string_lossy().to_string()), None));

@@ -905,6 +905,27 @@ fn dispatch_inner(
                             };
                             output
                                 .push(format!("{heading} [{profile}] ===\n{}", result.trim_end()));
+                            if let Err(error) = adapters
+                                .resticprofile
+                                .list_snapshots(&init_profiles_path, &profile)
+                            {
+                                let error =
+                                    crate::commands::setup::redact_backend_initialization_error(
+                                        error.to_string(),
+                                        &config,
+                                        &init_profiles_path,
+                                        &context.profiles_path,
+                                    );
+                                let failure_kind =
+                                    if crate::commands::setup::is_repository_credential_failure(
+                                        &error,
+                                    ) {
+                                        "repository credential verification failed (key mismatch)"
+                                    } else {
+                                        "repository credential verification failed"
+                                    };
+                                failures.push(format!("{profile}: {failure_kind}: {error}",));
+                            }
                         }
                         Err(error) => failures.push(format!(
                             "{profile}: {}",
