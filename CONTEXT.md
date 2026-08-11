@@ -46,6 +46,10 @@
 * **설명**: SFTP Backend Adapter가 원격 서버의 SSH 호스트 키를 식별하고 이후 변경을 감지하는 신뢰 상태.
 * **비고**: Setup Wizard와 예약 백업은 호스트별 실행 사용자에 의존하지 않는 중앙 신뢰 상태를 공유하며, 최초 등록 이후 호스트 키 변경은 연결 실패로 처리한다.
 
+### 4-4. Repository Credential Verification (저장소 자격 증명 검증)
+* **설명**: Backend Adapter 연결 성공과 별개로, 선택한 restic 저장소 키로 해당 저장소를 실제 복호화해 읽을 수 있는지 확인하는 Setup Wizard 검증 단계.
+* **비고**: 각 초기화 대상은 `init` 뒤 같은 프로필의 `snapshots`를 실행해 검증한다. `init`의 기존 저장소 멱등 성공만으로 키 유효성을 추론하지 않는다. `wrong password` 또는 `no key found`는 키 불일치로만 분류하며, 대화형 새 Setup은 즉시 새 설정·sidecar·스케줄을 롤백한다. 다른 검증 실패는 retryable pending 설정 정책을 따른다.
+
 ### 5. Notification Adapter (알림 어댑터)
 * **설명**: Slack, Discord, Custom 등 다양한 알림 채널에 맞추어 페이로드 포맷을 정하고 웹훅 디스패치 및 필수 값 검증을 추상화한 다형성 모듈.
 * **비고**: `notification_${type}_${action}` 형태로 함수가 명명되며, 메인 디스패처 `dispatch_notification`는 각 어댑터의 세부 전송 방식에 의존하지 않고 다형적으로 호출합니다.

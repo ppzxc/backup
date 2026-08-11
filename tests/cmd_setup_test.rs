@@ -9,7 +9,10 @@ use backup::commands::setup::{
 use backup::config::model::*;
 use backup::config::profile_resolver::ProfileResolver;
 use backup::i18n::Language;
+use backup::runner::resticprofile::ResticProfileRunner;
 use secrecy::SecretString;
+use std::path::Path;
+use std::sync::Mutex;
 use support::{MockExecutor, MockResticProfileRunner};
 use tempfile::tempdir;
 
@@ -269,6 +272,7 @@ fn test_setup_with_prompter_success() {
             backend: "s3".into(),
             repository: "s3:offsite-bucket".into(),
             password: SecretString::new("secondary_pass_123".into()),
+            password_source: SecondaryPasswordSource::Explicit,
             sftp: None,
             s3: None,
         }),
@@ -304,6 +308,63 @@ fn test_setup_with_prompter_success() {
     assert!(content.contains("profile-db"));
     assert!(content.contains("sftp:backup@192.168.1.100:/storage"));
     assert!(content.contains("keep-daily: 180"));
+}
+
+#[test]
+fn setup_persists_explicit_secondary_key_even_when_it_equals_primary_key() {
+    let dir = tempdir().unwrap();
+    let profiles = dir.path().join("profiles.yaml");
+    let same_password = "same-primary-secondary-key";
+    let params = SetupParams {
+        profile: "daily".into(),
+        backup_type: BackupType::Directory,
+        targets: vec!["/data".into()],
+        excludes: Vec::new(),
+        retention: RetentionPolicy::standard_defaults(),
+        primary_storage: StorageTarget {
+            backend: "local".into(),
+            repository: "/primary-repository".into(),
+            password: SecretString::new(same_password.into()),
+            sftp: None,
+            s3: None,
+        },
+        secondary_storage: Some(SecondaryStorageTarget {
+            enabled: true,
+            backend: "local".into(),
+            repository: "/secondary-repository".into(),
+            password: SecretString::new(same_password.into()),
+            password_source: SecondaryPasswordSource::Explicit,
+            sftp: None,
+            s3: None,
+        }),
+        reports: ReportsConfig {
+            output_dir: dir.path().join("reports").to_string_lossy().into_owned(),
+            ..ReportsConfig::default()
+        },
+        audit: AuditConfig::default(),
+    };
+    let prompter = MockPrompter { params };
+    let runner = MockResticProfileRunner::new(0, "initialized");
+    let scheduler = support::MockScheduler::new(0, "scheduled");
+
+    run_setup_with_prompter_and_runners(
+        &profiles,
+        &prompter,
+        false,
+        Some(Language::En),
+        &runner,
+        &scheduler,
+    )
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("secondary-password")).unwrap(),
+        same_password
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("primary-password")).unwrap(),
+        same_password
+    );
 }
 
 #[test]
@@ -531,6 +592,85 @@ fn initialization_cancel_rolls_back_new_config_and_empty_reports_directories() {
     });
     assert!(!scope.exists(), "remaining setup paths: {remaining:?}");
     assert_eq!(std::fs::read_to_string(keep).unwrap(), "preserve");
+}
+
+struct InitSucceedsSnapshotsRejectsKey {
+    calls: Mutex<Vec<String>>,
+}
+
+impl InitSucceedsSnapshotsRejectsKey {
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl ResticProfileRunner for InitSucceedsSnapshotsRejectsKey {
+    fn backup(&self, _: &Path, _: &str, _: bool) -> anyhow::Result<String> {
+        unreachable!()
+    }
+    fn init(&self, _: &Path, profile: &str) -> anyhow::Result<String> {
+        self.calls.lock().unwrap().push(format!("init:{profile}"));
+        Ok("repository already initialized".into())
+    }
+    fn schedule_enable(&self, _: &Path) -> anyhow::Result<String> {
+        unreachable!()
+    }
+    fn schedule_disable(&self, _: &Path) -> anyhow::Result<String> {
+        unreachable!()
+    }
+    fn schedule_status(&self, _: &Path) -> anyhow::Result<String> {
+        unreachable!()
+    }
+    fn list_snapshots(&self, _: &Path, profile: &str) -> anyhow::Result<String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("snapshots:{profile}"));
+        anyhow::bail!("Fatal: wrong password or no key found")
+    }
+    fn prune(&self, _: &Path, _: &str) -> anyhow::Result<String> {
+        unreachable!()
+    }
+    fn check(&self, _: &Path, _: &str) -> anyhow::Result<String> {
+        unreachable!()
+    }
+    fn copy(&self, _: &Path, _: &str, _: bool) -> anyhow::Result<String> {
+        unreachable!()
+    }
+}
+
+#[test]
+fn setup_rolls_back_when_existing_repository_rejects_the_configured_key_after_init() {
+    let dir = tempdir().unwrap();
+    let profiles = dir.path().join("profiles.yaml");
+    let runner = InitSucceedsSnapshotsRejectsKey {
+        calls: Mutex::new(Vec::new()),
+    };
+    let scheduler = support::MockScheduler::new(0, "scheduled");
+    let prompter = TypedDecisionPrompter {
+        params: local_setup_params(&dir.path().join("reports")),
+        decision: SetupInitFailureDecision::Save,
+    };
+
+    let error = run_setup_with_prompter_and_runners(
+        &profiles,
+        &prompter,
+        false,
+        Some(Language::En),
+        &runner,
+        &scheduler,
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("wrong password")
+    );
+    assert_eq!(runner.calls(), vec!["init:primary", "snapshots:primary"]);
+    assert!(!profiles.exists());
+    assert!(scheduler.calls.lock().unwrap().is_empty());
 }
 
 #[test]

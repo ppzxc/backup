@@ -897,7 +897,11 @@ fn dispatch_inner(
                 let mut output = Vec::new();
                 let mut failures = Vec::new();
                 for profile in targets {
-                    match adapters.resticprofile.init(&init_profiles_path, &profile) {
+                    match crate::commands::setup::initialize_backend_target(
+                        &init_profiles_path,
+                        &profile,
+                        adapters.resticprofile,
+                    ) {
                         Ok(result) => {
                             let heading = match context.language {
                                 Language::Ko => "=== 백엔드 저장소 초기화 프로필:",
@@ -906,15 +910,22 @@ fn dispatch_inner(
                             output
                                 .push(format!("{heading} [{profile}] ===\n{}", result.trim_end()));
                         }
-                        Err(error) => failures.push(format!(
-                            "{profile}: {}",
-                            crate::commands::setup::redact_backend_initialization_error(
+                        Err(error) => {
+                            let error = crate::commands::setup::redact_backend_initialization_error(
                                 error.to_string(),
                                 &config,
                                 &init_profiles_path,
                                 &context.profiles_path,
-                            )
-                        )),
+                            );
+                            let failure_kind =
+                                if crate::commands::setup::is_repository_credential_failure(&error)
+                                {
+                                    "repository credential verification failed (key mismatch)"
+                                } else {
+                                    "repository credential verification failed"
+                                };
+                            failures.push(format!("{profile}: {failure_kind}: {error}"));
+                        }
                     }
                 }
                 if failures.is_empty() {
