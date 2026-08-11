@@ -388,6 +388,7 @@ impl SetupPrompter for InquirePrompter {
                             backend: sec_backend.to_string(),
                             repository: sec_repo,
                             password: SecretString::new(sec_pwd),
+                            password_source: SecondaryPasswordSource::ReusePrimary,
                             sftp,
                             s3: None,
                         })
@@ -506,7 +507,9 @@ impl SetupPrompter for InquirePrompter {
                     let sec_backend =
                         inquire::Select::new(msg.secondary_backend, vec!["sftp", "s3", "local"])
                             .prompt()?;
-                    let (sec_repo, sec_pass, sec_sftp, sec_s3) = if sec_backend == "sftp" {
+                    let (sec_repo, sec_pass, sec_password_source, sec_sftp, sec_s3) = if sec_backend
+                        == "sftp"
+                    {
                         let runner = SystemExecutor;
                         let (repo_uri, sec_sftp_conf) = prompt_sftp_storage(
                             msg,
@@ -533,14 +536,28 @@ impl SetupPrompter for InquirePrompter {
                         )
                         .raw_prompt()?
                         .index;
-                        let password = if key_choice == 0 {
-                            primary.password.expose_secret().to_owned()
+                        let (password, password_source) = if key_choice == 0 {
+                            (
+                                primary.password.clone(),
+                                SecondaryPasswordSource::ReusePrimary,
+                            )
                         } else {
-                            inquire::Password::new(msg.secondary_password)
-                                .without_confirmation()
-                                .prompt()?
+                            (
+                                SecretString::new(
+                                    inquire::Password::new(msg.secondary_password)
+                                        .without_confirmation()
+                                        .prompt()?,
+                                ),
+                                SecondaryPasswordSource::Explicit,
+                            )
                         };
-                        (repo_uri, password, Some(sec_sftp_conf), None)
+                        (
+                            repo_uri,
+                            password,
+                            password_source,
+                            Some(sec_sftp_conf),
+                            None,
+                        )
                     } else if sec_backend == "s3" {
                         let mode_choice = inquire::Select::new(
                             msg.s3_mode_select,
@@ -579,7 +596,13 @@ impl SetupPrompter for InquirePrompter {
                                 access_key_id: SecretString::new(access_key_id),
                                 secret_access_key: SecretString::new(secret_access_key_str),
                             };
-                            (repo_uri, String::new(), None, Some(s3_conf))
+                            (
+                                repo_uri,
+                                primary.password.clone(),
+                                SecondaryPasswordSource::ReusePrimary,
+                                None,
+                                Some(s3_conf),
+                            )
                         } else {
                             let sec_r = prompt_text_with_default(
                                 msg.secondary_repo_uri,
@@ -589,27 +612,33 @@ impl SetupPrompter for InquirePrompter {
                             let sec_p = inquire::Password::new(msg.secondary_password)
                                 .without_confirmation()
                                 .prompt()?;
-                            (sec_r, sec_p, None, None)
+                            (
+                                sec_r,
+                                SecretString::new(sec_p),
+                                SecondaryPasswordSource::Explicit,
+                                None,
+                                None,
+                            )
                         }
                     } else {
                         let sec_r = inquire::Text::new(msg.secondary_repo_uri).prompt()?;
                         let sec_p = inquire::Password::new(msg.secondary_password)
                             .without_confirmation()
                             .prompt()?;
-                        (sec_r, sec_p, None, None)
+                        (
+                            sec_r,
+                            SecretString::new(sec_p),
+                            SecondaryPasswordSource::Explicit,
+                            None,
+                            None,
+                        )
                     };
                     Some(SecondaryStorageTarget {
                         enabled: true,
                         backend: sec_backend.to_string(),
                         repository: sec_repo,
-                        // The detailed S3/SFTP flows authenticate storage access separately
-                        // and do not prompt for a second repository password. Restic copy
-                        // requires both repositories to use the same key in that case.
-                        password: SecretString::new(if sec_pass.is_empty() {
-                            primary.password.expose_secret().to_owned()
-                        } else {
-                            sec_pass
-                        }),
+                        password: sec_pass,
+                        password_source: sec_password_source,
                         sftp: sec_sftp,
                         s3: sec_s3,
                     })
@@ -1791,17 +1820,9 @@ fn initialize_backend_targets<R: crate::runner::resticprofile::ResticProfileRunn
 ) -> Result<()> {
     let mut failures = Vec::new();
     for profile in targets {
-        if let Err(error) = runner.init(profiles_path, profile) {
-            failures.push(format!("{profile}: {error}"));
-            if stop_on_credential_failure && is_repository_credential_failure(&error.to_string()) {
-                break;
-            }
-            continue;
-        }
-        if let Err(error) = runner.list_snapshots(profiles_path, profile) {
-            failures.push(format!(
-                "{profile}: repository credential verification failed: {error}"
-            ));
+        if let Err(error) = initialize_backend_target(profiles_path, profile, runner) {
+            let error_message = error.to_string();
+            failures.push(format!("{profile}: {error_message}"));
             if stop_on_credential_failure && is_repository_credential_failure(&error.to_string()) {
                 break;
             }
@@ -1815,6 +1836,20 @@ fn initialize_backend_targets<R: crate::runner::resticprofile::ResticProfileRunn
             failures.join("; ")
         )
     }
+}
+
+pub(crate) fn initialize_backend_target<
+    R: crate::runner::resticprofile::ResticProfileRunner + ?Sized,
+>(
+    profiles_path: &Path,
+    profile: &str,
+    runner: &R,
+) -> Result<String> {
+    let init_output = runner.init(profiles_path, profile)?;
+    runner
+        .list_snapshots(profiles_path, profile)
+        .map_err(|error| anyhow::anyhow!("repository credential verification failed: {error}"))?;
+    Ok(init_output)
 }
 
 /// Restic currently exposes these credential failures only in its command

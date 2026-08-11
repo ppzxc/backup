@@ -1,6 +1,6 @@
 use backup::config::model::{
-    BackupConfig, BackupType, ReportsConfig, ResticProfileConfig, SecondaryStorageTarget,
-    StorageConfig, StorageTarget,
+    BackupConfig, BackupType, ReportsConfig, ResticProfileConfig, SecondaryPasswordSource,
+    SecondaryStorageTarget, StorageConfig, StorageTarget,
 };
 use secrecy::ExposeSecret;
 use std::fs;
@@ -1043,6 +1043,7 @@ fn explicit_secondary_repository_password_uses_an_independent_secure_sidecar() {
                 backend: "local".into(),
                 repository: "/secondary-repository".into(),
                 password: secrecy::SecretString::new(secondary_password.into()),
+                password_source: SecondaryPasswordSource::Explicit,
                 sftp: None,
                 s3: None,
             }),
@@ -1083,4 +1084,95 @@ fn explicit_secondary_repository_password_uses_an_independent_secure_sidecar() {
             0o600
         );
     }
+}
+
+#[test]
+fn explicit_secondary_key_equal_to_primary_overwrites_existing_sidecar() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("etc_backup");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("secondary-password"),
+        "old-secondary-secret",
+    )
+    .unwrap();
+    let password = "same-primary-and-secondary";
+    let config = BackupConfig {
+        storage: StorageConfig {
+            primary: StorageTarget {
+                backend: "local".into(),
+                repository: "/primary-repository".into(),
+                password: secrecy::SecretString::new(password.into()),
+                sftp: None,
+                s3: None,
+            },
+            secondary: Some(SecondaryStorageTarget {
+                enabled: true,
+                backend: "local".into(),
+                repository: "/secondary-repository".into(),
+                password: secrecy::SecretString::new(password.into()),
+                password_source: SecondaryPasswordSource::Explicit,
+                sftp: None,
+                s3: None,
+            }),
+        },
+        ..BackupConfig::default()
+    };
+
+    config.save_and_sync(&config_dir).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(config_dir.join("secondary-password")).unwrap(),
+        password
+    );
+    let profiles = ResticProfileConfig::load_from_path(&config_dir.join("profiles.yaml")).unwrap();
+    assert_eq!(
+        profiles.profiles["secondary"].password_file.as_deref(),
+        Some(
+            config_dir
+                .join("secondary-password")
+                .to_string_lossy()
+                .as_ref()
+        )
+    );
+}
+
+#[test]
+fn reusing_primary_key_preserves_an_existing_secondary_sidecar() {
+    let dir = tempdir().unwrap();
+    let config_dir = dir.path().join("etc_backup");
+    fs::create_dir_all(&config_dir).unwrap();
+    backup::config::model::save_secure_file(
+        &config_dir.join("secondary-password"),
+        "existing-secondary-secret",
+    )
+    .unwrap();
+    let config = BackupConfig {
+        storage: StorageConfig {
+            primary: StorageTarget {
+                backend: "local".into(),
+                repository: "/primary-repository".into(),
+                password: secrecy::SecretString::new("primary-secret".into()),
+                sftp: None,
+                s3: None,
+            },
+            secondary: Some(SecondaryStorageTarget {
+                enabled: true,
+                backend: "local".into(),
+                repository: "/secondary-repository".into(),
+                password: secrecy::SecretString::new("primary-secret".into()),
+                password_source: SecondaryPasswordSource::ReusePrimary,
+                sftp: None,
+                s3: None,
+            }),
+        },
+        ..BackupConfig::default()
+    };
+
+    config.save_and_sync(&config_dir).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(config_dir.join("secondary-password")).unwrap(),
+        "existing-secondary-secret"
+    );
 }

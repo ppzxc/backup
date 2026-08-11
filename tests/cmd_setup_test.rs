@@ -272,6 +272,7 @@ fn test_setup_with_prompter_success() {
             backend: "s3".into(),
             repository: "s3:offsite-bucket".into(),
             password: SecretString::new("secondary_pass_123".into()),
+            password_source: SecondaryPasswordSource::Explicit,
             sftp: None,
             s3: None,
         }),
@@ -307,6 +308,63 @@ fn test_setup_with_prompter_success() {
     assert!(content.contains("profile-db"));
     assert!(content.contains("sftp:backup@192.168.1.100:/storage"));
     assert!(content.contains("keep-daily: 180"));
+}
+
+#[test]
+fn setup_persists_explicit_secondary_key_even_when_it_equals_primary_key() {
+    let dir = tempdir().unwrap();
+    let profiles = dir.path().join("profiles.yaml");
+    let same_password = "same-primary-secondary-key";
+    let params = SetupParams {
+        profile: "daily".into(),
+        backup_type: BackupType::Directory,
+        targets: vec!["/data".into()],
+        excludes: Vec::new(),
+        retention: RetentionPolicy::standard_defaults(),
+        primary_storage: StorageTarget {
+            backend: "local".into(),
+            repository: "/primary-repository".into(),
+            password: SecretString::new(same_password.into()),
+            sftp: None,
+            s3: None,
+        },
+        secondary_storage: Some(SecondaryStorageTarget {
+            enabled: true,
+            backend: "local".into(),
+            repository: "/secondary-repository".into(),
+            password: SecretString::new(same_password.into()),
+            password_source: SecondaryPasswordSource::Explicit,
+            sftp: None,
+            s3: None,
+        }),
+        reports: ReportsConfig {
+            output_dir: dir.path().join("reports").to_string_lossy().into_owned(),
+            ..ReportsConfig::default()
+        },
+        audit: AuditConfig::default(),
+    };
+    let prompter = MockPrompter { params };
+    let runner = MockResticProfileRunner::new(0, "initialized");
+    let scheduler = support::MockScheduler::new(0, "scheduled");
+
+    run_setup_with_prompter_and_runners(
+        &profiles,
+        &prompter,
+        false,
+        Some(Language::En),
+        &runner,
+        &scheduler,
+    )
+    .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("secondary-password")).unwrap(),
+        same_password
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("primary-password")).unwrap(),
+        same_password
+    );
 }
 
 #[test]

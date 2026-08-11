@@ -154,27 +154,22 @@ pub fn save_secure_file(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-impl BackupConfig {
-    fn profile_password_file(&self, config_dir: &Path, is_secondary: bool) -> Result<String> {
-        let (existing_file, inline_password) =
-            self.resolve_storage_password(config_dir, is_secondary)?;
-        if let Some(path) = existing_file {
-            return Ok(path);
-        }
-        let path = config_dir.join(if is_secondary {
-            "secondary-password"
-        } else {
-            "primary-password"
-        });
-        save_secure_file(
-            &path,
-            inline_password
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("Storage password cannot be resolved"))?,
-        )?;
-        Ok(path.to_string_lossy().into_owned())
+fn existing_secure_sidecar(path: &Path) -> Option<&Path> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() {
+        return None;
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o777 != 0o600 {
+            return None;
+        }
+    }
+    Some(path)
+}
 
+impl BackupConfig {
     pub fn validate(&self) -> Result<()> {
         if self
             .storage
@@ -228,59 +223,6 @@ impl BackupConfig {
         let yaml = serde_yaml::to_string(self)?;
         save_secure_file(path, &yaml)?;
         Ok(())
-    }
-
-    pub fn resolve_storage_password(
-        &self,
-        config_dir: &Path,
-        is_secondary: bool,
-    ) -> Result<(Option<String>, Option<String>)> {
-        // A secondary repository may deliberately use a different restic key.
-        // Its dedicated sidecar therefore takes precedence over the legacy
-        // shared `enc` sidecar and is retained when setup is rerun.
-        if is_secondary {
-            if let Some(secondary) = &self.storage.secondary {
-                let secondary_password = secondary.password.expose_secret();
-                if !secondary_password.trim().is_empty()
-                    && secondary_password != self.storage.primary.password.expose_secret()
-                {
-                    return Ok((None, Some(secondary_password.to_owned())));
-                }
-            }
-            let secondary_password = config_dir.join("secondary-password");
-            if secondary_password.is_file() {
-                return Ok((Some(secondary_password.to_string_lossy().to_string()), None));
-            }
-        }
-        let enc_path = config_dir.join("enc");
-        if enc_path.is_file() {
-            return Ok((Some(enc_path.to_string_lossy().to_string()), None));
-        }
-        let fallback_enc = Path::new("/etc/backup/enc");
-        if fallback_enc.is_file() {
-            return Ok((Some(fallback_enc.to_string_lossy().to_string()), None));
-        }
-
-        if is_secondary {
-            if let Some(ref sec) = self.storage.secondary {
-                let sec_pwd = sec.password.expose_secret();
-                if !sec_pwd.trim().is_empty() {
-                    return Ok((None, Some(sec_pwd.to_string())));
-                }
-            }
-            let primary_pwd = self.storage.primary.password.expose_secret();
-            if !primary_pwd.trim().is_empty() {
-                return Ok((None, Some(primary_pwd.to_string())));
-            }
-            anyhow::bail!("Secondary storage password cannot be resolved");
-        } else {
-            let pwd = self.storage.primary.password.expose_secret();
-            if !pwd.trim().is_empty() {
-                Ok((None, Some(pwd.to_string())))
-            } else {
-                anyhow::bail!("Primary storage password cannot be empty");
-            }
-        }
     }
 
     pub fn save_and_sync(&self, config_dir: &Path) -> Result<()> {
@@ -338,6 +280,9 @@ impl BackupConfig {
         restic_config.application =
             Some(self.application_metadata_with_secret_references(&config_dir)?);
 
+        let (primary_password_file, secondary_password_file) =
+            ResticProfileConfig::write_backend_password_files(&config_dir, &self.storage)?;
+
         // 1. Populate default profile (truly global options only)
         let mut default_profile = restic_config.profiles.remove("default").unwrap_or_default();
         if default_profile.description.is_none() {
@@ -358,7 +303,7 @@ impl BackupConfig {
             primary_profile.insecure_tls = Some(true);
         }
         primary_profile.repository = Some(self.storage.primary.repository.clone());
-        primary_profile.password_file = Some(self.profile_password_file(&config_dir, false)?);
+        primary_profile.password_file = Some(primary_password_file.clone());
         primary_profile.password = None;
         if let Some(s3) = &self.storage.primary.s3 {
             save_secure_file(
@@ -413,8 +358,7 @@ impl BackupConfig {
                 }
                 secondary_profile.inherit = Some("default".into());
                 secondary_profile.repository = Some(sec.repository.clone());
-                secondary_profile.password_file =
-                    Some(self.profile_password_file(&config_dir, true)?);
+                secondary_profile.password_file = secondary_password_file.clone();
                 secondary_profile.password = None;
                 if let Some(s3) = &sec.s3 {
                     save_secure_file(
@@ -474,7 +418,7 @@ impl BackupConfig {
             Some(CopyCommandSection {
                 profile: Some("secondary".into()),
                 repository: Some(sec.repository.clone()),
-                password_file: Some(self.profile_password_file(&config_dir, true)?),
+                password_file: secondary_password_file,
                 password: None,
                 initialize: Some(true),
                 schedule: None,
@@ -835,6 +779,18 @@ pub struct StorageTarget {
     pub s3: Option<S3Config>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecondaryPasswordSource {
+    ReusePrimary,
+    Explicit,
+}
+
+impl Default for SecondaryPasswordSource {
+    fn default() -> Self {
+        Self::Explicit
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecondaryStorageTarget {
@@ -843,6 +799,8 @@ pub struct SecondaryStorageTarget {
     pub repository: String,
     #[serde(serialize_with = "serialize_secret_string")]
     pub password: SecretString,
+    #[serde(skip)]
+    pub password_source: SecondaryPasswordSource,
     pub sftp: Option<SftpConfig>,
     pub s3: Option<S3Config>,
 }
@@ -1205,6 +1163,54 @@ pub struct EffectiveBackupSettings {
 }
 
 impl ResticProfileConfig {
+    fn write_backend_password_files(
+        config_dir: &Path,
+        storage: &StorageConfig,
+    ) -> Result<(String, Option<String>)> {
+        let primary_path = config_dir.join("primary-password");
+        let enc_path = config_dir.join("enc");
+        let primary_file = existing_secure_sidecar(&enc_path)
+            .or_else(|| existing_secure_sidecar(Path::new("/etc/backup/enc")))
+            .map(|path| path.to_path_buf())
+            .unwrap_or_else(|| primary_path.clone());
+        if primary_file == primary_path {
+            save_secure_file(&primary_file, storage.primary.password.expose_secret())?;
+        }
+
+        let secondary_file = storage
+            .secondary
+            .as_ref()
+            .filter(|secondary| secondary.enabled)
+            .map(|secondary| -> Result<String> {
+                let secondary_path = config_dir.join("secondary-password");
+                let existing = if secondary.password_source == SecondaryPasswordSource::ReusePrimary
+                {
+                    existing_secure_sidecar(&secondary_path)
+                        .or_else(|| existing_secure_sidecar(&enc_path))
+                        .or_else(|| existing_secure_sidecar(Path::new("/etc/backup/enc")))
+                        .map(Path::to_path_buf)
+                } else {
+                    None
+                };
+                let has_existing = existing.is_some();
+                let path = existing.unwrap_or_else(|| secondary_path.clone());
+                if !has_existing {
+                    let password = secondary
+                        .password
+                        .expose_secret()
+                        .trim()
+                        .is_empty()
+                        .then(|| storage.primary.password.expose_secret())
+                        .unwrap_or_else(|| secondary.password.expose_secret());
+                    save_secure_file(&path, password)?;
+                }
+                Ok(path.to_string_lossy().into_owned())
+            })
+            .transpose()?;
+
+        Ok((primary_file.to_string_lossy().into_owned(), secondary_file))
+    }
+
     pub fn load_from_path(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)?;
         let document: serde_yaml::Value = serde_yaml::from_str(&content)?;
