@@ -41,6 +41,32 @@ pub struct SystemHealthSnapshot {
     pub items: Vec<DoctorItem>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorOutputContract {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_status: i32,
+}
+
+/// Purely translates a completed diagnostic snapshot into the CLI output contract.
+/// Findings (including details) are data and stay on stdout. stderr is reserved for the short
+/// failure summary, and warnings alone remain a successful command.
+pub fn format_doctor_output(snapshot: &SystemHealthSnapshot) -> DoctorOutputContract {
+    let has_blocking_finding = snapshot
+        .items
+        .iter()
+        .any(|item| matches!(item.status, DoctorStatus::Fail | DoctorStatus::Unavailable));
+    DoctorOutputContract {
+        stdout: render_doctor_report(snapshot),
+        stderr: if has_blocking_finding {
+            "doctor reported one or more failed or unavailable diagnostics".into()
+        } else {
+            String::new()
+        },
+        exit_status: if has_blocking_finding { 1 } else { 0 },
+    }
+}
+
 pub struct SystemHealthDiagnoser;
 
 impl SystemHealthDiagnoser {
@@ -481,13 +507,9 @@ pub fn run_doctor_contract_with_runner_and_diagnostics<
         .items
         .iter()
         .all(|item| !matches!(item.status, DoctorStatus::Fail | DoctorStatus::Unavailable));
-    let diagnostics = snapshot
-        .items
-        .iter()
-        .map(|item| format!("{}: {}", item.criterion, item.detail))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Ok((render_doctor_report(&snapshot), passed, diagnostics))
+    let output = format_doctor_output(&snapshot);
+    debug_assert_eq!(passed, output.exit_status == 0);
+    Ok((output.stdout, passed, output.stderr))
 }
 
 fn check_scheduler_with_runner<C: CommandRunner + ?Sized>(runner: &C) -> (DoctorStatus, String) {
@@ -527,9 +549,10 @@ fn render_doctor_report(snapshot: &SystemHealthSnapshot) -> String {
             _ => &item.criterion,
         };
         report.push_str(&format!(
-            "{}: {}\n",
+            "{}: {} — {}\n",
             name,
-            doctor_status_label(&item.status)
+            doctor_status_label(&item.status),
+            item.detail
         ));
     }
 
@@ -542,5 +565,45 @@ fn doctor_status_label(status: &DoctorStatus) -> &'static str {
         DoctorStatus::Warn => "Warn",
         DoctorStatus::Fail => "Fail",
         DoctorStatus::Unavailable => "Unavailable",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot(status: DoctorStatus) -> SystemHealthSnapshot {
+        SystemHealthSnapshot {
+            host_name: "test-host".into(),
+            timestamp: "now".into(),
+            overall_pass: matches!(status, DoctorStatus::Pass | DoctorStatus::Warn),
+            items: vec![DoctorItem {
+                category: DoctorCategory::System,
+                criterion: "test diagnostic".into(),
+                status,
+                detail: "detail stays on stdout".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn doctor_pass_and_warn_keep_findings_on_stdout_and_stderr_empty() {
+        for status in [DoctorStatus::Pass, DoctorStatus::Warn] {
+            let output = format_doctor_output(&snapshot(status));
+            assert_eq!(output.exit_status, 0);
+            assert!(output.stderr.is_empty());
+            assert!(output.stdout.contains("detail stays on stdout"));
+        }
+    }
+
+    #[test]
+    fn doctor_fail_and_unavailable_use_exit_one_and_only_a_short_stderr_summary() {
+        for status in [DoctorStatus::Fail, DoctorStatus::Unavailable] {
+            let output = format_doctor_output(&snapshot(status));
+            assert_eq!(output.exit_status, 1);
+            assert!(output.stderr.contains("failed or unavailable"));
+            assert!(output.stdout.contains("detail stays on stdout"));
+            assert!(!output.stderr.contains("detail stays on stdout"));
+        }
     }
 }

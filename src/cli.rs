@@ -591,6 +591,7 @@ pub struct CommandOutcome {
 struct SetupExecutionFailure {
     message: String,
     notices: String,
+    cancellation: Option<crate::commands::setup::SetupCancellationKind>,
 }
 
 impl fmt::Display for SetupExecutionFailure {
@@ -734,6 +735,17 @@ pub fn dispatch(
                     setup_failure.message.clone(),
                 );
                 outcome.stdout = setup_failure.notices.clone();
+                match setup_failure.cancellation {
+                    Some(crate::commands::setup::SetupCancellationKind::Sftp)
+                    | Some(crate::commands::setup::SetupCancellationKind::Explicit) => {
+                        outcome.stderr.clear();
+                    }
+                    Some(crate::commands::setup::SetupCancellationKind::InitializationFailure) => {
+                        outcome.stderr = setup_failure.message.clone();
+                    }
+                    Some(crate::commands::setup::SetupCancellationKind::InputInterrupted)
+                    | None => {}
+                }
                 outcome
             } else if let Some(report_failure) =
                 error.downcast_ref::<crate::commands::report::ReportCommandFailure>()
@@ -795,11 +807,27 @@ fn finish_setup_dispatch(
                 vec!["configuration and scheduler updated".into()],
             ))
         }
-        Err(error) => Err(SetupExecutionFailure {
-            message: error.to_string(),
-            notices,
+        Err(error) => {
+            let cancellation = error
+                .downcast_ref::<crate::commands::setup::SetupCancellationError>()
+                .map(|error| error.kind);
+            let message = error
+                .downcast_ref::<crate::commands::setup::SetupCancellationError>()
+                .map(|error| {
+                    if error.diagnostic.is_empty() {
+                        error.to_string()
+                    } else {
+                        error.diagnostic.clone()
+                    }
+                })
+                .unwrap_or_else(|| error.to_string());
+            Err(SetupExecutionFailure {
+                message,
+                notices,
+                cancellation,
+            }
+            .into())
         }
-        .into()),
     }
 }
 
@@ -1028,12 +1056,10 @@ fn dispatch_inner(
                     Some(&context.profiles_path),
                     &context.host_name,
                 )?;
-            let mut outcome = CommandOutcome::success(output, diagnostics, Vec::new());
+            let mut outcome = CommandOutcome::success(output, "", Vec::new());
             if !passed {
                 outcome.exit_status = 1;
-                outcome
-                    .stderr
-                    .push_str("\ndoctor reported one or more failed diagnostics");
+                outcome.stderr = diagnostics;
             }
             Ok(outcome)
         }
@@ -1413,23 +1439,45 @@ fn report_paths_from_output(output: &str) -> Vec<PathBuf> {
     crate::commands::report::saved_report_paths(output)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportStdoutContract {
+    ArtifactNotice,
+    ArtifactOnly,
+}
+
+/// Selects the report stdout contract without collecting configuration or writing artifacts.
+/// An action-level format is more specific than the top-level option.
+pub fn report_stdout_contract(
+    action: Option<&ReportAction>,
+    global_format: Option<ReportFormat>,
+) -> ReportStdoutContract {
+    let selected_format = match action {
+        Some(ReportAction::Environment { format, .. })
+        | Some(ReportAction::TimeSync { format, .. })
+        | Some(ReportAction::RestoreDrill { format, .. }) => (*format).or(global_format),
+        None => global_format,
+    };
+    if matches!(selected_format, Some(ReportFormat::Json)) {
+        ReportStdoutContract::ArtifactOnly
+    } else {
+        ReportStdoutContract::ArtifactNotice
+    }
+}
+
 fn report_uses_machine_readable_output(
     action: Option<&ReportAction>,
     format: Option<ReportFormat>,
 ) -> bool {
-    matches!(format, Some(ReportFormat::Json))
-        || action.is_some_and(|action| match action {
-            ReportAction::Environment { format, .. }
-            | ReportAction::TimeSync { format, .. }
-            | ReportAction::RestoreDrill { format, .. } => {
-                matches!(format, Some(ReportFormat::Json))
-            }
-        })
+    matches!(
+        report_stdout_contract(action, format),
+        ReportStdoutContract::ArtifactOnly
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::report_paths_from_output;
+    use super::{ReportStdoutContract, report_paths_from_output, report_stdout_contract};
+    use crate::commands::report::{ReportAction, ReportFormat};
     use std::path::PathBuf;
 
     #[test]
@@ -1446,6 +1494,34 @@ mod tests {
                 "All 3 sub-reports generated successfully:\nISMS report saved to /tmp/a.html, /tmp/a.json"
             ),
             vec![PathBuf::from("/tmp/a.html"), PathBuf::from("/tmp/a.json")]
+        );
+    }
+
+    #[test]
+    fn report_stdout_contract_keeps_json_artifact_only_and_honors_action_format_precedence() {
+        assert_eq!(
+            report_stdout_contract(None, Some(ReportFormat::Json)),
+            ReportStdoutContract::ArtifactOnly
+        );
+        assert_eq!(
+            report_stdout_contract(None, Some(ReportFormat::Html)),
+            ReportStdoutContract::ArtifactNotice
+        );
+        let action = ReportAction::Environment {
+            file: None,
+            format: Some(ReportFormat::Json),
+        };
+        assert_eq!(
+            report_stdout_contract(Some(&action), Some(ReportFormat::Html)),
+            ReportStdoutContract::ArtifactOnly
+        );
+        let action = ReportAction::TimeSync {
+            file: None,
+            format: Some(ReportFormat::Html),
+        };
+        assert_eq!(
+            report_stdout_contract(Some(&action), Some(ReportFormat::Json)),
+            ReportStdoutContract::ArtifactNotice
         );
     }
 }
