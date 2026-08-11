@@ -2,6 +2,7 @@ use crate::config::model::*;
 use crate::i18n::{I18nMessages, Language};
 use anyhow::Result;
 use secrecy::{ExposeSecret, SecretString};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
@@ -17,12 +18,93 @@ pub struct SetupParams {
     pub audit: AuditConfig,
 }
 
+/// Destination for notices that help an operator understand setup progress or choose the next
+/// action. It is deliberately separate from structured system diagnostics.
+pub trait SetupNoticeSink {
+    fn notice(&mut self, message: &str);
+}
+
+#[derive(Default)]
+pub struct SetupNoticeCollector {
+    notices: Vec<String>,
+}
+
+impl SetupNoticeCollector {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn into_output(self) -> String {
+        self.notices.join("\n")
+    }
+}
+
+impl SetupNoticeSink for SetupNoticeCollector {
+    fn notice(&mut self, message: &str) {
+        self.notices.push(message.to_owned());
+    }
+}
+
+/// Renderer used by the interactive wizard. It writes notices through the wizard's terminal
+/// output path rather than through the global structured logger.
+pub struct TuiSetupNoticeRenderer<W: Write = std::io::Stdout> {
+    writer: W,
+}
+
+impl<W: Write> TuiSetupNoticeRenderer<W> {
+    pub fn new(writer: W) -> Self {
+        Self { writer }
+    }
+
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+}
+
+impl TuiSetupNoticeRenderer<std::io::Stdout> {
+    pub fn stdout() -> Self {
+        Self::new(std::io::stdout())
+    }
+}
+
+impl<W: Write> SetupNoticeSink for TuiSetupNoticeRenderer<W> {
+    fn notice(&mut self, message: &str) {
+        let _ = writeln!(self.writer, "{message}");
+        let _ = self.writer.flush();
+    }
+}
+
+pub struct SetupRunOptions<'a> {
+    scheduler_settings: &'a crate::runner::scheduler::SchedulerSettings,
+    notices: &'a mut dyn SetupNoticeSink,
+}
+
+impl<'a> SetupRunOptions<'a> {
+    pub fn new(
+        scheduler_settings: &'a crate::runner::scheduler::SchedulerSettings,
+        notices: &'a mut dyn SetupNoticeSink,
+    ) -> Self {
+        Self {
+            scheduler_settings,
+            notices,
+        }
+    }
+}
+
+#[derive(Default)]
+struct NoopSetupNoticeSink;
+
+impl SetupNoticeSink for NoopSetupNoticeSink {
+    fn notice(&mut self, _message: &str) {}
+}
+
 pub trait SetupPrompter {
     fn prompt_setup_params(
         &self,
         lang_opt: Option<Language>,
         config_dir: &Path,
         profiles_path: &Path,
+        notices: &mut dyn SetupNoticeSink,
     ) -> Result<SetupParams>;
 
     fn prompt_confirm_save_on_init_failure(&self, _msg: &str) -> Result<bool> {
@@ -86,6 +168,7 @@ impl SetupPrompter for InquirePrompter {
         lang_opt: Option<Language>,
         config_dir: &Path,
         profiles_path: &Path,
+        notices: &mut dyn SetupNoticeSink,
     ) -> Result<SetupParams> {
         let lang = lang_opt.unwrap_or(Language::En);
         let msg = I18nMessages::get(lang);
@@ -250,7 +333,7 @@ impl SetupPrompter for InquirePrompter {
             let (repository, sftp_config, s3_config) = if backend == "sftp" {
                 let runner = SystemExecutor;
                 let (repo_uri, conf) =
-                    prompt_sftp_storage(msg, lang, config_dir, "id_ed25519", &runner)?;
+                    prompt_sftp_storage(msg, lang, config_dir, "id_ed25519", &runner, notices)?;
                 (repo_uri, Some(conf), None)
             } else if backend == "s3" {
                 let mode_choice = inquire::Select::new(
@@ -303,7 +386,7 @@ impl SetupPrompter for InquirePrompter {
 
             let enc_file_path = config_dir.join("enc");
             let password = if let Some(existing_pass) = resolve_encryption_keyfile(&enc_file_path) {
-                crate::logger::interactive_notice(msg.found_existing_keyfile);
+                notices.notice(msg.found_existing_keyfile);
                 existing_pass
             } else {
                 let auto_gen = inquire::Confirm::new(msg.auto_generate_password_prompt)
@@ -356,6 +439,7 @@ impl SetupPrompter for InquirePrompter {
                         config_dir,
                         "id_ed25519_secondary",
                         &runner,
+                        notices,
                     )?;
                     (repo_uri, String::new(), Some(sec_sftp_conf), None)
                 } else if sec_backend == "s3" {
@@ -563,6 +647,7 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
     config_dir: &Path,
     key_name: &str,
     runner: &R,
+    notices: &mut dyn SetupNoticeSink,
 ) -> Result<(String, SftpConfig)> {
     let key_dir = config_dir;
     let key_path = key_dir.join(key_name);
@@ -607,7 +692,7 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
     crate::config::model::ensure_sftp_known_hosts_file(config_dir)?;
 
     if let Ok(pub_key) = std::fs::read_to_string(&pub_path) {
-        crate::logger::interactive_notice(format!(
+        notices.notice(&format!(
             "{}\n{}\n{}\n{}",
             "================================================================================",
             msg.sftp_pubkey_notice,
@@ -627,7 +712,7 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
 
     loop {
         // Perform SFTP connection test
-        crate::logger::interactive_notice(msg.sftp_testing_connection);
+        notices.notice(msg.sftp_testing_connection);
         let test_result = verify_sftp_connection_with_config_dir(
             &user,
             &host,
@@ -639,11 +724,13 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
 
         let success = match test_result {
             Ok(()) => {
-                crate::logger::interactive_notice(msg.sftp_test_success);
+                notices.notice(msg.sftp_test_success);
                 true
             }
             Err(ref reason) => {
-                tracing::warn!("{}", msg.sftp_test_failed.replace("{}", reason));
+                let notice = msg.sftp_test_failed.replace("{}", reason);
+                tracing::warn!("{}", notice);
+                notices.notice(&notice);
                 false
             }
         };
@@ -702,7 +789,7 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
                     }
                 }
                 if let Ok(pub_key) = std::fs::read_to_string(&pub_path) {
-                    crate::logger::interactive_notice(format!(
+                    notices.notice(&format!(
                         "{}\n{}\n{}\n{}",
                         "================================================================================",
                         msg.sftp_pubkey_notice,
@@ -1243,14 +1330,18 @@ impl SetupEngine {
         runner: &R,
         scheduler: &S,
     ) -> Result<()> {
-        Self::run_with_scheduler_settings(
+        let mut notices = NoopSetupNoticeSink;
+        Self::run_with_options(
             profiles_path,
             prompter,
             non_interactive,
             lang_opt,
             runner,
             scheduler,
-            &crate::runner::scheduler::SchedulerSettings::auto(),
+            SetupRunOptions::new(
+                &crate::runner::scheduler::SchedulerSettings::auto(),
+                &mut notices,
+            ),
         )
     }
 
@@ -1267,6 +1358,35 @@ impl SetupEngine {
         scheduler: &S,
         scheduler_settings: &crate::runner::scheduler::SchedulerSettings,
     ) -> Result<()> {
+        let mut notices = NoopSetupNoticeSink;
+        Self::run_with_options(
+            profiles_path,
+            prompter,
+            non_interactive,
+            lang_opt,
+            runner,
+            scheduler,
+            SetupRunOptions::new(scheduler_settings, &mut notices),
+        )
+    }
+
+    pub fn run_with_options<
+        P: SetupPrompter,
+        R: crate::runner::resticprofile::ResticProfileRunner + ?Sized,
+        S: crate::runner::scheduler::BackupScheduler + ?Sized,
+    >(
+        profiles_path: &Path,
+        prompter: &P,
+        non_interactive: bool,
+        lang_opt: Option<Language>,
+        runner: &R,
+        scheduler: &S,
+        options: SetupRunOptions<'_>,
+    ) -> Result<()> {
+        let SetupRunOptions {
+            scheduler_settings,
+            notices,
+        } = options;
         let config_dir = if let Some(parent) = profiles_path.parent() {
             if parent.as_os_str().is_empty() {
                 Path::new(".")
@@ -1284,20 +1404,6 @@ impl SetupEngine {
             std::fs::set_permissions(config_dir, std::fs::Permissions::from_mode(0o700))?;
         }
 
-        struct TuiGuard;
-        impl Drop for TuiGuard {
-            fn drop(&mut self) {
-                crate::logger::set_tui_mode(false);
-            }
-        }
-
-        let _tui_guard = if !non_interactive {
-            crate::logger::set_tui_mode(true);
-            Some(TuiGuard)
-        } else {
-            None
-        };
-
         let language = lang_opt.unwrap_or(Language::En);
         if non_interactive {
             return Self::run_existing_profiles_setup(
@@ -1306,19 +1412,21 @@ impl SetupEngine {
                 scheduler,
                 scheduler_settings,
                 language,
+                notices,
             );
         }
 
         // Capture the live state before prompting. Key generation, encryption
         // sidecars, and host-key trust may all happen during prompting.
         let previous = LiveConfigSnapshot::capture(profiles_path)?;
-        let params = match prompter.prompt_setup_params(lang_opt, config_dir, profiles_path) {
-            Ok(params) => params,
-            Err(error) => {
-                previous.restore()?;
-                return Err(error);
-            }
-        };
+        let params =
+            match prompter.prompt_setup_params(lang_opt, config_dir, profiles_path, notices) {
+                Ok(params) => params,
+                Err(error) => {
+                    previous.restore()?;
+                    return Err(error);
+                }
+            };
         let config = match Self::validate_and_build(params) {
             Ok(config) => config,
             Err(error) => {
@@ -1354,7 +1462,7 @@ impl SetupEngine {
             };
         let msg = crate::i18n::I18nMessages::get(language);
 
-        crate::logger::interactive_notice(msg.initializing_backend_repo);
+        notices.notice(msg.initializing_backend_repo);
 
         let init_result = initialize_backend_targets(
             &staged_profiles,
@@ -1446,6 +1554,7 @@ impl SetupEngine {
         scheduler: &S,
         scheduler_settings: &crate::runner::scheduler::SchedulerSettings,
         language: Language,
+        notices: &mut dyn SetupNoticeSink,
     ) -> Result<()> {
         if !profiles_path.is_file() {
             let message = match language {
@@ -1469,6 +1578,8 @@ impl SetupEngine {
         }
 
         let targets = profiles.backend_initialization_targets()?;
+        let msg = crate::i18n::I18nMessages::get(language);
+        notices.notice(msg.initializing_backend_repo);
         let init_result = initialize_backend_targets(profiles_path, &targets, runner);
         if let Err(error) = init_result {
             let message = append_sftp_diagnostics(
@@ -1480,6 +1591,7 @@ impl SetupEngine {
                 &profiles,
                 profiles_path,
             );
+            tracing::error!("{}", message);
             let prefix = match language {
                 Language::Ko => "비대화형 설정의 저장소 초기화에 실패했습니다",
                 Language::En => "Non-interactive setup failed repository initialization",

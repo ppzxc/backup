@@ -1,8 +1,9 @@
 mod support;
 use backup::commands::setup::{
-    SetupEngine, SetupParams, SetupPrompter, create_default_profiles_file, discard_pending_setup,
-    pending_setup_profiles_path, promote_pending_setup, render_sftp_diagnostic_summary,
-    resolve_reused_sftp_config, run_setup_with_prompter, run_setup_with_prompter_and_runners,
+    SetupEngine, SetupNoticeSink, SetupParams, SetupPrompter, TuiSetupNoticeRenderer,
+    create_default_profiles_file, discard_pending_setup, pending_setup_profiles_path,
+    promote_pending_setup, render_sftp_diagnostic_summary, resolve_reused_sftp_config,
+    run_setup_with_prompter, run_setup_with_prompter_and_runners,
 };
 use backup::config::model::*;
 use backup::config::profile_resolver::ProfileResolver;
@@ -10,6 +11,19 @@ use backup::i18n::Language;
 use secrecy::SecretString;
 use support::{MockExecutor, MockResticProfileRunner};
 use tempfile::tempdir;
+
+#[test]
+fn setup_tui_notice_renderer_uses_its_injected_writer_in_order() {
+    let mut renderer = TuiSetupNoticeRenderer::new(Vec::new());
+
+    renderer.notice("first notice");
+    renderer.notice("second notice");
+
+    assert_eq!(
+        String::from_utf8(renderer.into_inner()).unwrap(),
+        "first notice\nsecond notice\n"
+    );
+}
 
 #[test]
 fn test_create_default_profiles_file() {
@@ -182,6 +196,7 @@ impl SetupPrompter for MockPrompter {
         _lang_opt: Option<Language>,
         _config_dir: &std::path::Path,
         _profiles_path: &std::path::Path,
+        _notices: &mut dyn SetupNoticeSink,
     ) -> anyhow::Result<SetupParams> {
         if self.params.primary_storage.backend == "sftp" {
             let key = self
@@ -416,6 +431,7 @@ impl SetupPrompter for ConfirmSaveMockPrompter {
         _lang_opt: Option<Language>,
         _config_dir: &std::path::Path,
         _profiles_path: &std::path::Path,
+        _notices: &mut dyn SetupNoticeSink,
     ) -> anyhow::Result<SetupParams> {
         Ok(self.params.clone())
     }
@@ -501,6 +517,7 @@ impl SetupPrompter for MutatingFailurePrompter {
         _lang_opt: Option<Language>,
         config_dir: &std::path::Path,
         _profiles_path: &std::path::Path,
+        _notices: &mut dyn SetupNoticeSink,
     ) -> anyhow::Result<SetupParams> {
         std::fs::write(config_dir.join("id_ed25519"), "new-key").unwrap();
         std::fs::write(config_dir.join("known_hosts"), "new-host-key").unwrap();
@@ -748,6 +765,7 @@ fn test_setup_auto_detects_language_when_lang_opt_none() {
             lang_opt: Option<Language>,
             _config_dir: &std::path::Path,
             _profiles_path: &std::path::Path,
+            _notices: &mut dyn SetupNoticeSink,
         ) -> anyhow::Result<SetupParams> {
             *self.received_lang.lock().unwrap() = lang_opt;
             anyhow::bail!("capture_only") // 언어 캡처가 목적이므로 에러로 조기 종료

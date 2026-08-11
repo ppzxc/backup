@@ -14,6 +14,7 @@ use crate::runner::resticprofile::ResticProfileRunner;
 use crate::runner::scheduler::BackupScheduler;
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
+use std::fmt;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -586,6 +587,20 @@ pub struct CommandOutcome {
     pub external_state_changes: Vec<String>,
 }
 
+#[derive(Debug)]
+struct SetupExecutionFailure {
+    message: String,
+    notices: String,
+}
+
+impl fmt::Display for SetupExecutionFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.message.fmt(formatter)
+    }
+}
+
+impl std::error::Error for SetupExecutionFailure {}
+
 impl CommandOutcome {
     pub fn success(
         stdout: impl Into<String>,
@@ -712,7 +727,15 @@ pub fn dispatch(
     match dispatch_inner(context, command, adapters) {
         Ok(outcome) => outcome,
         Err(error) => {
-            if let Some(report_failure) =
+            if let Some(setup_failure) = error.downcast_ref::<SetupExecutionFailure>() {
+                let mut outcome = CommandOutcome::failure(
+                    &command_name,
+                    "execution",
+                    setup_failure.message.clone(),
+                );
+                outcome.stdout = setup_failure.notices.clone();
+                outcome
+            } else if let Some(report_failure) =
                 error.downcast_ref::<crate::commands::report::ReportCommandFailure>()
             {
                 CommandOutcome::failure_with_metadata(
@@ -747,6 +770,57 @@ pub fn dispatch(
             }
         }
     }
+}
+
+fn finish_setup_dispatch(
+    context: &CliRuntimeContext,
+    result: Result<()>,
+    notices: String,
+) -> Result<CommandOutcome> {
+    match result {
+        Ok(()) => {
+            let success = match context.language {
+                Language::Ko => "설정이 성공적으로 완료되었습니다.",
+                Language::En => "Setup completed successfully.",
+            };
+            let stdout = if notices.is_empty() {
+                success.to_owned()
+            } else {
+                format!("{notices}\n{success}")
+            };
+            Ok(CommandOutcome::success_with_changes(
+                stdout,
+                "",
+                Vec::new(),
+                vec!["configuration and scheduler updated".into()],
+            ))
+        }
+        Err(error) => Err(SetupExecutionFailure {
+            message: error.to_string(),
+            notices,
+        }
+        .into()),
+    }
+}
+
+fn run_setup_with_notice_sink(
+    context: &CliRuntimeContext,
+    prompter: &crate::commands::setup::InquirePrompter,
+    non_interactive: bool,
+    lang: Option<Language>,
+    adapters: &AdapterSet<'_>,
+    notices: &mut dyn crate::commands::setup::SetupNoticeSink,
+) -> Result<()> {
+    let scheduler_settings = context.scheduler_settings();
+    crate::commands::setup::SetupEngine::run_with_options(
+        &context.profiles_path,
+        prompter,
+        non_interactive,
+        lang,
+        adapters.resticprofile,
+        adapters.scheduler,
+        crate::commands::setup::SetupRunOptions::new(&scheduler_settings, notices),
+    )
 }
 
 fn dispatch_inner(
@@ -840,29 +914,35 @@ fn dispatch_inner(
                     crate::commands::setup::InquirePrompter::with_restore_drill_overrides(
                         context.restore_drill_setup_overrides.clone(),
                     );
-                crate::commands::setup::run_setup_with_prompter_and_runners_with_scheduler_settings(
-                    &context.profiles_path,
-                    &prompter,
-                    non_interactive,
-                    Some(
-                        lang.as_deref()
-                            .map(parse_language)
-                            .transpose()?
-                            .unwrap_or(context.language),
-                    ),
-                    adapters.resticprofile,
-                    adapters.scheduler,
-                    &context.scheduler_settings(),
-                )?;
-                Ok(CommandOutcome::success_with_changes(
-                    match context.language {
-                        Language::Ko => "설정이 성공적으로 완료되었습니다.",
-                        Language::En => "Setup completed successfully.",
-                    },
-                    "",
-                    Vec::new(),
-                    vec!["configuration and scheduler updated".into()],
-                ))
+                let setup_language = Some(
+                    lang.as_deref()
+                        .map(parse_language)
+                        .transpose()?
+                        .unwrap_or(context.language),
+                );
+                if non_interactive {
+                    let mut notices = crate::commands::setup::SetupNoticeCollector::new();
+                    let result = run_setup_with_notice_sink(
+                        context,
+                        &prompter,
+                        true,
+                        setup_language,
+                        adapters,
+                        &mut notices,
+                    );
+                    finish_setup_dispatch(context, result, notices.into_output())
+                } else {
+                    let mut notices = crate::commands::setup::TuiSetupNoticeRenderer::stdout();
+                    let result = run_setup_with_notice_sink(
+                        context,
+                        &prompter,
+                        false,
+                        setup_language,
+                        adapters,
+                        &mut notices,
+                    );
+                    finish_setup_dispatch(context, result, String::new())
+                }
             }
         },
         Command::Copy { profile, dry_run } => {
@@ -962,6 +1042,7 @@ fn dispatch_inner(
             file,
             format,
         } => {
+            let machine_readable = report_uses_machine_readable_output(action.as_ref(), format);
             let profiles_path = required_profiles_path(context)?;
             let profiles = load_profiles(context)?;
             let meta = crate::commands::report::AuditReportMeta::new(
@@ -979,8 +1060,13 @@ fn dispatch_inner(
                 adapters.restic,
                 &meta,
             )?;
+            let stdout = if machine_readable {
+                ""
+            } else {
+                output.as_str()
+            };
             Ok(CommandOutcome::success_with_changes(
-                &output,
+                stdout,
                 "",
                 report_paths_from_output(&output),
                 vec!["report artifacts committed".into()],
@@ -1325,6 +1411,20 @@ fn backend_initialization_targets(config: &ResticProfileConfig) -> Result<Vec<St
 
 fn report_paths_from_output(output: &str) -> Vec<PathBuf> {
     crate::commands::report::saved_report_paths(output)
+}
+
+fn report_uses_machine_readable_output(
+    action: Option<&ReportAction>,
+    format: Option<ReportFormat>,
+) -> bool {
+    matches!(format, Some(ReportFormat::Json))
+        || action.is_some_and(|action| match action {
+            ReportAction::Environment { format, .. }
+            | ReportAction::TimeSync { format, .. }
+            | ReportAction::RestoreDrill { format, .. } => {
+                matches!(format, Some(ReportFormat::Json))
+            }
+        })
 }
 
 #[cfg(test)]

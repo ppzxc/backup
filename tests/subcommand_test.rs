@@ -141,7 +141,7 @@ fn test_report_cli_format_json_execution() {
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
 
-    assert!(stdout.contains("ISMS report saved to"));
+    assert!(stdout.trim().is_empty());
     assert!(temp_dir.path().join("report_env.json").exists());
     assert!(!temp_dir.path().join("report_env.html").exists());
 }

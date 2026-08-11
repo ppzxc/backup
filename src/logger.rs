@@ -13,33 +13,9 @@ use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use tracing_subscriber::Layer;
-use tracing_subscriber::filter::filter_fn;
-
 pub const MASKED_VALUE: &str = "***MASKED***";
 
 static WORKER_GUARD: Mutex<Option<WorkerGuard>> = Mutex::new(None);
-static TUI_MODE: AtomicBool = AtomicBool::new(false);
-
-/// Sets interactive TUI mode state for stderr console log suppression.
-pub fn set_tui_mode(enabled: bool) {
-    TUI_MODE.store(enabled, Ordering::SeqCst);
-}
-
-/// Returns true if interactive TUI mode is currently active.
-pub fn is_tui_mode() -> bool {
-    TUI_MODE.load(Ordering::SeqCst)
-}
-
-/// Emits a user-facing setup notice while preserving the TUI console filter.
-pub fn interactive_notice(message: impl AsRef<str>) {
-    if is_tui_mode() {
-        tracing::warn!("{}", message.as_ref());
-    } else {
-        tracing::info!("{}", message.as_ref());
-    }
-}
 
 /// Represents the active system log target in the 3-tier fallback pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,7 +190,7 @@ impl std::io::Write for SocketWriter {
     }
 }
 
-/// Initializes global tracing logging subscriber with stderr and 3-tier system target layers.
+/// Initializes global tracing logging subscriber with the 3-tier system target pipeline.
 pub fn init_logging(config: LogConfig) -> Result<(), anyhow::Error> {
     let filter_str = if config.level_filter.is_empty() {
         "info"
@@ -251,29 +227,24 @@ pub fn init_logging(config: LogConfig) -> Result<(), anyhow::Error> {
         }
     };
 
-    let stderr_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr)
-        .fmt_fields(SecretMaskingFormatter::new())
-        .with_filter(filter_fn(|meta| {
-            if is_tui_mode() {
-                *meta.level() <= tracing::Level::WARN
-            } else {
-                true
-            }
-        }));
-
     let sys_layer = tracing_subscriber::fmt::layer()
         .with_writer(sys_writer)
         .fmt_fields(SecretMaskingFormatter::new());
 
     let subscriber = tracing_subscriber::registry()
         .with(env_filter)
-        .with(stderr_layer)
         .with(sys_layer);
 
     let _ = subscriber.try_init();
 
     Ok(())
+}
+
+/// Flushes asynchronous system-log writes before the CLI process exits.
+pub fn shutdown_logging() {
+    if let Ok(mut guard) = WORKER_GUARD.lock() {
+        guard.take();
+    }
 }
 
 /// Returns `***MASKED***` if `field_name` is sensitive or if `value` indicates a secret,
@@ -431,15 +402,6 @@ mod tests {
         assert_eq!(determine_level_filter(0, true, None), "warn");
         assert_eq!(determine_level_filter(0, true, Some("trace")), "warn");
         assert_eq!(determine_level_filter(0, false, Some("debug")), "debug");
-    }
-
-    #[test]
-    fn test_tui_mode_toggle() {
-        assert!(!is_tui_mode());
-        set_tui_mode(true);
-        assert!(is_tui_mode());
-        set_tui_mode(false);
-        assert!(!is_tui_mode());
     }
 }
 

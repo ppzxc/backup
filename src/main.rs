@@ -129,6 +129,7 @@ fn main() {
     if !outcome.stderr.is_empty() {
         eprintln!("{}", outcome.stderr);
     }
+    backup::logger::shutdown_logging();
     if !outcome.is_success() {
         std::process::exit(outcome.exit_status);
     }
