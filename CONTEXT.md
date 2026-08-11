@@ -105,11 +105,15 @@
 
 ### 14. System Diagnostic Logging (시스템 진단 로깅)
 * **설명**: `tracing` 및 `tracing-subscriber` Layered 아키텍처 기반으로 터미널 UX 보호, 비밀값 마스킹, 3단계 시스템 폴백(Journald -> Syslog -> Rotating File)을 보장하는 구조화된 진단 및 운영 로그 수집 체계.
-* **비고**: `stdout`은 데이터/리포트 전용으로 격리하고 `stderr`로 터미널 진단 메시지를 출력합니다. 3단계 폴백 파이프라인(1. Journald socket `/run/systemd/journal/socket`, 2. Syslog socket `/dev/log`, 3. 회전 로그 파일 `/var/log/backup/backup.log` 순차 적용)을 통해 어떤 실행 환경에서도 진단 로그를 안전하게 수집하며, 비밀값(`SecretString`, `password`, `access_key`, `secret_key`, `token` 등)은 `***MASKED***`로 자동 은닉합니다. 대화형 설정 위자드(`backup setup`) 실행 시 터미널 `stderr` 출력을 차단하여 TUI UI 깨짐을 방지합니다. Logging precedence는 명시적 CLI option(`-q` 또는 `-v`) -> `BACKUP_LOG` -> `RUST_LOG` -> 기본 `info` 순서입니다. `--quiet`와 모든 `-v` 조합은 parser 단계에서 exit code `2`로 거부합니다. `-v` 개수는 `0`, `1`, `2`, `3 이상`을 각각 `info`, `debug`, `trace`, `trace`로 해석합니다. 전역 `--log-file <path>`가 지정되면 해당 경로를 우선 사용하고 부모 디렉터리 `700`, 파일 `600`을 강제합니다. 생성·open·권한 설정 실패는 fallback하지 않고 command 실행 전 exit code `1`로 전파하며, 미지정 시에만 Journald -> Syslog -> 기본 파일 fallback을 사용합니다.
+* **비고**: 구조화 진단은 시스템 로그 sink로만 전달하며 터미널 `stdout`·`stderr`에는 직접 출력하지 않습니다. 터미널 채널은 CLI User Notice와 명령 실패 진단을 위해서만 사용합니다. 기본 sink는 이벤트별로 Journald, Syslog, 안전한 일 단위 파일 순서로 시도하고 모든 sink가 실패한 이벤트만 유실합니다. 명시적 `--log-file`은 사용자가 지정한 단일 파일이며 생성·open·권한 설정 실패를 exit code `1`로 반환합니다. 비밀값은 시스템 로그와 명령 실패 진단에서 마스킹합니다.
+
+### 14-1. CLI User Notice (CLI 사용자 알림)
+* **설명**: 사용자가 명령의 진행·완료·취소 상태를 이해하기 위해 직접 보는 비구조화 메시지.
+* **비고**: CLI User Notice는 비대화형 실행에서 `CommandOutcome.stdout`으로, 대화형 Setup Wizard에서는 TUI 전용 렌더링 경로로 출력하며 `tracing` 구조화 진단 로그로 표현하지 않습니다. 진행·완료·명시 취소 알림은 stdout에 두고, 실패 시 최종 진단은 stderr에 둡니다. 기계 판독 JSON report는 artifact만 생성하고 stdout은 비웁니다.
 
 ### 15. CLI Command Contract (CLI 커맨드 계약)
 * **설명**: 사용자가 선택한 command와 option이 의도한 Backup Pipeline, 진단, 복원, 스케줄러 동작과 관찰 가능한 결과로 이어지는 외부 행동 계약.
-* **비고**: CLI Command Contract는 하나의 authoritative CLI schema를 기준으로 입력 option의 해석, Backup Pipeline 외부 adapter 호출 순서, 성공·실패 결과, stdout/stderr, 생성 산출물, 외부 adapter 동작을 함께 설명하며, command 구현의 내부 구조와 분리해 검증합니다. Command의 결과는 stdout data, stderr diagnostics, exit status, 생성 artifact와 외부 상태 변화를 포함하는 구조화된 command outcome으로 관찰합니다. 기본 Backup Pipeline 순서는 Database Stream(선택) -> Primary Backend Adapter -> Secondary Backend Adapter(선택) -> Retention -> Backup Execution Report입니다.
+* **비고**: CLI Command Contract는 authoritative CLI schema를 기준으로 입력 해석, 외부 adapter 호출, 성공·실패 결과, stdout/stderr, artifact와 외부 상태 변화를 함께 설명하며 내부 구현과 분리해 검증합니다. `CommandOutcome.stdout`은 사용자 데이터와 User Notice, `stderr`는 parser/startup/command-failure 진단을 담고 System Diagnostic Logging은 두 채널에 포함하지 않습니다. JSON report는 artifact 전용이며 stdout은 비웁니다. 기본 Backup Pipeline 순서는 Database Stream(선택) -> Primary Backend Adapter -> Secondary Backend Adapter(선택) -> Retention -> Backup Execution Report입니다.
 
 ### 15-1. Option Behavior Class (옵션 행동 등가 클래스)
 * **설명**: 문자열이나 경로의 구체적인 값은 달라도 command의 실행·검증 결과가 같은 입력 집합.
@@ -135,6 +139,7 @@
 ### 1. `backup setup` (환경 및 프로필 초기화)
 * **`backup setup`**: `inquire` TUI 마법사로 통합 설정과 **Backup Profile** 대화형 생성
 * **`backup setup --non-interactive`**: 대화 없이 설정 파일 기반으로 환경 설정 및 초기화 일괄 수행합니다. action이 없으면 prompt 없이 전체 Setup Wizard를 실행하고, `dependencies`·`backend-init`에도 동일하게 허용하되 해당 action의 검증·실행 계약을 유지합니다. 비대화형 stdin에서 옵션 없이 wizard를 실행하면 설정 변경 없이 exit code `1`이며, 필수 입력 누락을 예시값·기본 비밀값으로 대체하지 않습니다. 어느 단계든 실패하면 기존 설정과 scheduler를 유지합니다.
+* **Setup cancellation**: 명시 취소, 저장하지 않음, 입력 중단(Ctrl-C)을 typed outcome으로 구분합니다. SFTP 명시 취소는 TUI stdout에 취소 notice를 정확히 한 번 표시하고 stderr 없이 exit code `1`로 종료합니다. 저장소 초기화 실패 후 저장하지 않음을 선택하면 취소 문구 없이 원인 진단만 stderr에 두며, 이번 실행이 만든 설정·키·known_hosts·빈 app-owned 디렉터리만 롤백합니다. 원격 저장소 초기화 결과와 기존 경로는 되돌리지 않습니다.
 * **`backup setup --lang <ko|en>`**: setup wizard와 `dependencies`, `backend-init`, `--non-interactive`의 사용자 출력을 지정 언어로 렌더링합니다. 허용값 이외의 입력은 exit code `1`로 거부하며, 명시값이 `LC_ALL`/`LANG` 감지보다 우선합니다. 언어 선택은 설정 의미·profile 이름·외부 adapter 인자를 변경하지 않습니다.
 * **`backup setup dependencies`**: 필수 바이너리 의존성(`restic`, `rclone`, `resticprofile`) 검증 및 자동 설치. 세 의존성을 모두 검사하고 누락된 항목은 각각 설치를 시도합니다. 실행 파일은 `which` 성공만으로 완료 처리하지 않고 실제 실행 가능성을 검증하며, 다운로드·압축 해제·권한 설정·원자적 교체 중 하나라도 실패하면 설치 완료로 보고하지 않습니다. 모든 항목을 검사한 뒤 하나라도 실패하면 종료 코드 `1`을 반환하고, 성공한 다른 의존성 설치는 되돌리지 않습니다.
 * **`backup setup backend-init`**: 1차/2차 **Backend Adapter** 저장소(`restic init`) 연결 점검 및 초기화
@@ -154,10 +159,10 @@
 * **관계**: 독립 실행 진입점이지만, Database Backup Adapter가 설정된 경우 `backup run`도 동일한 동작을 파이프라인의 데이터베이스 단계로 실행. Adapter가 없으면 `backup database`는 설정 오류로 종료하고, `backup run`은 파일 백업 파이프라인을 계속 실행합니다.
 
 ### 5. `backup doctor` (시스템 및 백업 종합 진단)
-* **`backup doctor`**: 백업 바이너리, 설정파일/보안 권한(`700`/`600`), 저장소 네트워크 연결성, NTP 시각 동기화, 타이머 스케줄러 헬스체크 종합 진단 및 문제 조치 가이드 제공. 모든 진단 항목을 끝까지 실행하고 각 결과를 `Pass`/`Warn`/`Fail`/`Unavailable`로 stdout에 구조화해 보고하며, 명령 오류 상세는 stderr에 기록하고 비밀값을 마스킹합니다. 진단 중 설정·저장소·scheduler를 수정하거나 자동 복구하지 않습니다. 필수 진단이 모두 통과하면 exit code `0`, 하나라도 `Fail`이거나 진단 자체를 실행할 수 없으면 exit code `1`이며, 단순 경고만 있으면 `0`을 반환합니다.
+* **`backup doctor`**: 백업 바이너리, 설정파일/보안 권한(`700`/`600`), 저장소 연결성, NTP 시각 동기화, 타이머 스케줄러 헬스체크를 끝까지 진단합니다. 각 상태와 세부 결과는 stdout으로 보고하고, 하나라도 `Fail` 또는 `Unavailable`이면 짧은 실패 요약만 stderr에 두고 exit code `1`을 반환합니다. `Pass`와 `Warn`만 있으면 stderr는 비우고 exit code `0`을 반환합니다. 진단 중 설정·저장소·scheduler를 수정하거나 자동 복구하지 않습니다.
 
 ### 6. `backup report` (ISMS-P 감사 증적 및 레포트 생성)
-* **`backup report [subcommand] [--file <path>] [--format <html|json>]`**: 서브 커맨드 미지정 시 전체 검사 항목(`environment`, `time-sync`, `restore-drill`)을 순환 실행하여 각각의 보고서를 생성하며, `--file` 미지정 시 `BackupConfig.reports.output_dir` (기본값: `/data/backup/reports`) 내 타임스탬프 파일로 기록됨. `--format` 미지정 시 각 보고서의 HTML 및 JSON 포맷 2종을 모두 생성하며, 지정 시 해당 포맷 파일만 생성됨. Parent option과 action-level option이 함께 주어지면 action-level option이 우선하며, 전체 보고서에서 `--file <stem>`을 지정하면 검사 항목별 파일로 분리합니다. 모든 artifact는 임시 파일 작성 후 atomic rename하며, 명시한 기존 `--file`은 원자적으로 교체하고 자동 timestamp 파일 충돌은 회피 이름을 사용합니다. 전체 report의 부분 성공 산출물은 보존하고 반쪽 파일은 남기지 않습니다. Environment·TimeSync는 report 산출 성공 여부를 exit status로 사용하고, RestoreDrill은 실제 복원 또는 Restore Verification 실패 시 실패 report를 남기고 exit code `1`을 반환합니다.
+* **`backup report [subcommand] [--file <path>] [--format <html|json>]`**: 서브 커맨드 미지정 시 전체 검사 항목(`environment`, `time-sync`, `restore-drill`)을 순환 실행하여 보고서를 생성합니다. `--format` 미지정 시 HTML과 JSON artifact를 모두 생성하며, action-level option이 parent option보다 우선합니다. JSON 결과는 artifact에만 기록하고 stdout은 비우며, HTML 결과는 artifact 경로 notice를 stdout에 기록합니다. 모든 artifact는 임시 파일 작성 후 atomic rename하며, 부분 성공 산출물은 보존합니다.
 * **`backup report environment [--file <path>] [--format <html|json>]`**: 통합 설정 파일의 권한 및 보안 규정 검증 보고서 생성
 * **`backup report time-sync [--file <path>] [--format <html|json>]`**: NTP/Chrony 시각 동기화 검증 및 ISMS 증적 보고서 생성
 * **`backup report restore-drill [--file <path>] [--format <html|json>]`**: 스냅샷을 임시 복구 대상에 실제로 복원하는 비파괴 모의훈련을 실행하고, RTO 및 DB 덤프 무결성 검증 보고서를 생성. 운영 데이터베이스에는 dump를 import하지 않습니다.

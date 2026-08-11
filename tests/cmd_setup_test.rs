@@ -1,8 +1,10 @@
 mod support;
 use backup::commands::setup::{
-    SetupEngine, SetupParams, SetupPrompter, create_default_profiles_file, discard_pending_setup,
-    pending_setup_profiles_path, promote_pending_setup, render_sftp_diagnostic_summary,
-    resolve_reused_sftp_config, run_setup_with_prompter, run_setup_with_prompter_and_runners,
+    SetupCancellationError, SetupCancellationKind, SetupEngine, SetupInitFailureDecision,
+    SetupNoticeSink, SetupParams, SetupPrompter, TuiSetupNoticeRenderer,
+    create_default_profiles_file, discard_pending_setup, pending_setup_profiles_path,
+    promote_pending_setup, render_sftp_diagnostic_summary, resolve_reused_sftp_config,
+    run_setup_with_prompter, run_setup_with_prompter_and_runners,
 };
 use backup::config::model::*;
 use backup::config::profile_resolver::ProfileResolver;
@@ -10,6 +12,19 @@ use backup::i18n::Language;
 use secrecy::SecretString;
 use support::{MockExecutor, MockResticProfileRunner};
 use tempfile::tempdir;
+
+#[test]
+fn setup_tui_notice_renderer_uses_its_injected_writer_in_order() {
+    let mut renderer = TuiSetupNoticeRenderer::new(Vec::new());
+
+    renderer.notice("first notice");
+    renderer.notice("second notice");
+
+    assert_eq!(
+        String::from_utf8(renderer.into_inner()).unwrap(),
+        "first notice\nsecond notice\n"
+    );
+}
 
 #[test]
 fn test_create_default_profiles_file() {
@@ -182,6 +197,7 @@ impl SetupPrompter for MockPrompter {
         _lang_opt: Option<Language>,
         _config_dir: &std::path::Path,
         _profiles_path: &std::path::Path,
+        _notices: &mut dyn SetupNoticeSink,
     ) -> anyhow::Result<SetupParams> {
         if self.params.primary_storage.backend == "sftp" {
             let key = self
@@ -410,12 +426,146 @@ struct ConfirmSaveMockPrompter {
     params: SetupParams,
 }
 
+struct TypedDecisionPrompter {
+    params: SetupParams,
+    decision: SetupInitFailureDecision,
+}
+
+impl SetupPrompter for TypedDecisionPrompter {
+    fn prompt_setup_params(
+        &self,
+        _lang_opt: Option<Language>,
+        _config_dir: &std::path::Path,
+        _profiles_path: &std::path::Path,
+        _notices: &mut dyn SetupNoticeSink,
+    ) -> anyhow::Result<SetupParams> {
+        Ok(self.params.clone())
+    }
+
+    fn prompt_init_failure_decision(&self, _msg: &str) -> anyhow::Result<SetupInitFailureDecision> {
+        Ok(self.decision)
+    }
+}
+
+fn local_setup_params(reports_dir: &std::path::Path) -> SetupParams {
+    SetupParams {
+        profile: "cancelled-setup".into(),
+        backup_type: BackupType::Directory,
+        targets: vec!["/data".into()],
+        excludes: Vec::new(),
+        retention: RetentionPolicy::standard_defaults(),
+        primary_storage: StorageTarget {
+            backend: "local".into(),
+            repository: "/repository-that-is-not-rolled-back".into(),
+            password: SecretString::new("long-enough-password".into()),
+            sftp: None,
+            s3: None,
+        },
+        secondary_storage: None,
+        reports: ReportsConfig {
+            output_dir: reports_dir.to_string_lossy().into_owned(),
+            ..ReportsConfig::default()
+        },
+        audit: AuditConfig::default(),
+    }
+}
+
+#[test]
+fn setup_initialization_cancel_is_typed_and_reports_only_the_redacted_cause() {
+    let dir = tempdir().unwrap();
+    let profiles = dir.path().join("scope/profiles.yaml");
+    let params = local_setup_params(&dir.path().join("scope/reports"));
+    let prompter = TypedDecisionPrompter {
+        params,
+        decision: SetupInitFailureDecision::Cancel,
+    };
+    let error = run_setup_with_prompter_and_runners(
+        &profiles,
+        &prompter,
+        false,
+        Some(Language::En),
+        &MockResticProfileRunner::new(1, "repository initialization failed"),
+        &support::MockScheduler::new(0, "unused"),
+    )
+    .unwrap_err();
+
+    let cancellation = error.downcast_ref::<SetupCancellationError>().unwrap();
+    assert_eq!(
+        cancellation.kind,
+        SetupCancellationKind::InitializationFailure
+    );
+    assert!(
+        cancellation
+            .diagnostic
+            .contains("repository initialization failed")
+    );
+    assert!(!error.to_string().contains("Setup cancelled"));
+}
+
+#[test]
+fn initialization_cancel_rolls_back_new_config_and_empty_reports_directories() {
+    let dir = tempdir().unwrap();
+    let keep = dir.path().join("keep.txt");
+    std::fs::write(&keep, "preserve").unwrap();
+    let scope = dir.path().join("new-scope");
+    let profiles = scope.join("profiles.yaml");
+    let prompter = TypedDecisionPrompter {
+        params: local_setup_params(&scope.join("reports")),
+        decision: SetupInitFailureDecision::Cancel,
+    };
+
+    let _ = run_setup_with_prompter_and_runners(
+        &profiles,
+        &prompter,
+        false,
+        Some(Language::En),
+        &MockResticProfileRunner::new(1, "initialization failed"),
+        &support::MockScheduler::new(0, "unused"),
+    );
+
+    let remaining = scope.exists().then(|| {
+        std::fs::read_dir(&scope)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>()
+    });
+    assert!(!scope.exists(), "remaining setup paths: {remaining:?}");
+    assert_eq!(std::fs::read_to_string(keep).unwrap(), "preserve");
+}
+
+#[test]
+fn initialization_ctrl_c_is_not_reported_as_explicit_cancellation() {
+    let dir = tempdir().unwrap();
+    let profiles = dir.path().join("profiles.yaml");
+    let prompter = TypedDecisionPrompter {
+        params: local_setup_params(&dir.path().join("reports")),
+        decision: SetupInitFailureDecision::InputInterrupted,
+    };
+
+    let error = run_setup_with_prompter_and_runners(
+        &profiles,
+        &prompter,
+        false,
+        Some(Language::En),
+        &MockResticProfileRunner::new(1, "initialization failed"),
+        &support::MockScheduler::new(0, "unused"),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error.downcast_ref::<SetupCancellationError>().unwrap().kind,
+        SetupCancellationKind::InputInterrupted
+    );
+    assert!(!error.to_string().contains("Setup cancelled"));
+}
+
 impl SetupPrompter for ConfirmSaveMockPrompter {
     fn prompt_setup_params(
         &self,
         _lang_opt: Option<Language>,
         _config_dir: &std::path::Path,
         _profiles_path: &std::path::Path,
+        _notices: &mut dyn SetupNoticeSink,
     ) -> anyhow::Result<SetupParams> {
         Ok(self.params.clone())
     }
@@ -501,6 +651,7 @@ impl SetupPrompter for MutatingFailurePrompter {
         _lang_opt: Option<Language>,
         config_dir: &std::path::Path,
         _profiles_path: &std::path::Path,
+        _notices: &mut dyn SetupNoticeSink,
     ) -> anyhow::Result<SetupParams> {
         std::fs::write(config_dir.join("id_ed25519"), "new-key").unwrap();
         std::fs::write(config_dir.join("known_hosts"), "new-host-key").unwrap();
@@ -748,6 +899,7 @@ fn test_setup_auto_detects_language_when_lang_opt_none() {
             lang_opt: Option<Language>,
             _config_dir: &std::path::Path,
             _profiles_path: &std::path::Path,
+            _notices: &mut dyn SetupNoticeSink,
         ) -> anyhow::Result<SetupParams> {
             *self.received_lang.lock().unwrap() = lang_opt;
             anyhow::bail!("capture_only") // 언어 캡처가 목적이므로 에러로 조기 종료

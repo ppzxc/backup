@@ -14,6 +14,7 @@ use crate::runner::resticprofile::ResticProfileRunner;
 use crate::runner::scheduler::BackupScheduler;
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
+use std::fmt;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -586,6 +587,21 @@ pub struct CommandOutcome {
     pub external_state_changes: Vec<String>,
 }
 
+#[derive(Debug)]
+struct SetupExecutionFailure {
+    message: String,
+    notices: String,
+    cancellation: Option<crate::commands::setup::SetupCancellationKind>,
+}
+
+impl fmt::Display for SetupExecutionFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.message.fmt(formatter)
+    }
+}
+
+impl std::error::Error for SetupExecutionFailure {}
+
 impl CommandOutcome {
     pub fn success(
         stdout: impl Into<String>,
@@ -712,7 +728,26 @@ pub fn dispatch(
     match dispatch_inner(context, command, adapters) {
         Ok(outcome) => outcome,
         Err(error) => {
-            if let Some(report_failure) =
+            if let Some(setup_failure) = error.downcast_ref::<SetupExecutionFailure>() {
+                let mut outcome = CommandOutcome::failure(
+                    &command_name,
+                    "execution",
+                    setup_failure.message.clone(),
+                );
+                outcome.stdout = setup_failure.notices.clone();
+                match setup_failure.cancellation {
+                    Some(crate::commands::setup::SetupCancellationKind::Sftp)
+                    | Some(crate::commands::setup::SetupCancellationKind::Explicit) => {
+                        outcome.stderr.clear();
+                    }
+                    Some(crate::commands::setup::SetupCancellationKind::InitializationFailure) => {
+                        outcome.stderr = setup_failure.message.clone();
+                    }
+                    Some(crate::commands::setup::SetupCancellationKind::InputInterrupted)
+                    | None => {}
+                }
+                outcome
+            } else if let Some(report_failure) =
                 error.downcast_ref::<crate::commands::report::ReportCommandFailure>()
             {
                 CommandOutcome::failure_with_metadata(
@@ -747,6 +782,73 @@ pub fn dispatch(
             }
         }
     }
+}
+
+fn finish_setup_dispatch(
+    context: &CliRuntimeContext,
+    result: Result<()>,
+    notices: String,
+) -> Result<CommandOutcome> {
+    match result {
+        Ok(()) => {
+            let success = match context.language {
+                Language::Ko => "설정이 성공적으로 완료되었습니다.",
+                Language::En => "Setup completed successfully.",
+            };
+            let stdout = if notices.is_empty() {
+                success.to_owned()
+            } else {
+                format!("{notices}\n{success}")
+            };
+            Ok(CommandOutcome::success_with_changes(
+                stdout,
+                "",
+                Vec::new(),
+                vec!["configuration and scheduler updated".into()],
+            ))
+        }
+        Err(error) => {
+            let cancellation = error
+                .downcast_ref::<crate::commands::setup::SetupCancellationError>()
+                .map(|error| error.kind);
+            let message = error
+                .downcast_ref::<crate::commands::setup::SetupCancellationError>()
+                .map(|error| {
+                    if error.diagnostic.is_empty() {
+                        error.to_string()
+                    } else {
+                        error.diagnostic.clone()
+                    }
+                })
+                .unwrap_or_else(|| error.to_string());
+            Err(SetupExecutionFailure {
+                message,
+                notices,
+                cancellation,
+            }
+            .into())
+        }
+    }
+}
+
+fn run_setup_with_notice_sink(
+    context: &CliRuntimeContext,
+    prompter: &crate::commands::setup::InquirePrompter,
+    non_interactive: bool,
+    lang: Option<Language>,
+    adapters: &AdapterSet<'_>,
+    notices: &mut dyn crate::commands::setup::SetupNoticeSink,
+) -> Result<()> {
+    let scheduler_settings = context.scheduler_settings();
+    crate::commands::setup::SetupEngine::run_with_options(
+        &context.profiles_path,
+        prompter,
+        non_interactive,
+        lang,
+        adapters.resticprofile,
+        adapters.scheduler,
+        crate::commands::setup::SetupRunOptions::new(&scheduler_settings, notices),
+    )
 }
 
 fn dispatch_inner(
@@ -840,29 +942,35 @@ fn dispatch_inner(
                     crate::commands::setup::InquirePrompter::with_restore_drill_overrides(
                         context.restore_drill_setup_overrides.clone(),
                     );
-                crate::commands::setup::run_setup_with_prompter_and_runners_with_scheduler_settings(
-                    &context.profiles_path,
-                    &prompter,
-                    non_interactive,
-                    Some(
-                        lang.as_deref()
-                            .map(parse_language)
-                            .transpose()?
-                            .unwrap_or(context.language),
-                    ),
-                    adapters.resticprofile,
-                    adapters.scheduler,
-                    &context.scheduler_settings(),
-                )?;
-                Ok(CommandOutcome::success_with_changes(
-                    match context.language {
-                        Language::Ko => "설정이 성공적으로 완료되었습니다.",
-                        Language::En => "Setup completed successfully.",
-                    },
-                    "",
-                    Vec::new(),
-                    vec!["configuration and scheduler updated".into()],
-                ))
+                let setup_language = Some(
+                    lang.as_deref()
+                        .map(parse_language)
+                        .transpose()?
+                        .unwrap_or(context.language),
+                );
+                if non_interactive {
+                    let mut notices = crate::commands::setup::SetupNoticeCollector::new();
+                    let result = run_setup_with_notice_sink(
+                        context,
+                        &prompter,
+                        true,
+                        setup_language,
+                        adapters,
+                        &mut notices,
+                    );
+                    finish_setup_dispatch(context, result, notices.into_output())
+                } else {
+                    let mut notices = crate::commands::setup::TuiSetupNoticeRenderer::stdout();
+                    let result = run_setup_with_notice_sink(
+                        context,
+                        &prompter,
+                        false,
+                        setup_language,
+                        adapters,
+                        &mut notices,
+                    );
+                    finish_setup_dispatch(context, result, String::new())
+                }
             }
         },
         Command::Copy { profile, dry_run } => {
@@ -948,12 +1056,10 @@ fn dispatch_inner(
                     Some(&context.profiles_path),
                     &context.host_name,
                 )?;
-            let mut outcome = CommandOutcome::success(output, diagnostics, Vec::new());
+            let mut outcome = CommandOutcome::success(output, "", Vec::new());
             if !passed {
                 outcome.exit_status = 1;
-                outcome
-                    .stderr
-                    .push_str("\ndoctor reported one or more failed diagnostics");
+                outcome.stderr = diagnostics;
             }
             Ok(outcome)
         }
@@ -962,6 +1068,7 @@ fn dispatch_inner(
             file,
             format,
         } => {
+            let machine_readable = report_uses_machine_readable_output(action.as_ref(), format);
             let profiles_path = required_profiles_path(context)?;
             let profiles = load_profiles(context)?;
             let meta = crate::commands::report::AuditReportMeta::new(
@@ -979,8 +1086,13 @@ fn dispatch_inner(
                 adapters.restic,
                 &meta,
             )?;
+            let stdout = if machine_readable {
+                ""
+            } else {
+                output.as_str()
+            };
             Ok(CommandOutcome::success_with_changes(
-                &output,
+                stdout,
                 "",
                 report_paths_from_output(&output),
                 vec!["report artifacts committed".into()],
@@ -1327,9 +1439,45 @@ fn report_paths_from_output(output: &str) -> Vec<PathBuf> {
     crate::commands::report::saved_report_paths(output)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportStdoutContract {
+    ArtifactNotice,
+    ArtifactOnly,
+}
+
+/// Selects the report stdout contract without collecting configuration or writing artifacts.
+/// An action-level format is more specific than the top-level option.
+pub fn report_stdout_contract(
+    action: Option<&ReportAction>,
+    global_format: Option<ReportFormat>,
+) -> ReportStdoutContract {
+    let selected_format = match action {
+        Some(ReportAction::Environment { format, .. })
+        | Some(ReportAction::TimeSync { format, .. })
+        | Some(ReportAction::RestoreDrill { format, .. }) => (*format).or(global_format),
+        None => global_format,
+    };
+    if matches!(selected_format, Some(ReportFormat::Json)) {
+        ReportStdoutContract::ArtifactOnly
+    } else {
+        ReportStdoutContract::ArtifactNotice
+    }
+}
+
+fn report_uses_machine_readable_output(
+    action: Option<&ReportAction>,
+    format: Option<ReportFormat>,
+) -> bool {
+    matches!(
+        report_stdout_contract(action, format),
+        ReportStdoutContract::ArtifactOnly
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::report_paths_from_output;
+    use super::{ReportStdoutContract, report_paths_from_output, report_stdout_contract};
+    use crate::commands::report::{ReportAction, ReportFormat};
     use std::path::PathBuf;
 
     #[test]
@@ -1346,6 +1494,34 @@ mod tests {
                 "All 3 sub-reports generated successfully:\nISMS report saved to /tmp/a.html, /tmp/a.json"
             ),
             vec![PathBuf::from("/tmp/a.html"), PathBuf::from("/tmp/a.json")]
+        );
+    }
+
+    #[test]
+    fn report_stdout_contract_keeps_json_artifact_only_and_honors_action_format_precedence() {
+        assert_eq!(
+            report_stdout_contract(None, Some(ReportFormat::Json)),
+            ReportStdoutContract::ArtifactOnly
+        );
+        assert_eq!(
+            report_stdout_contract(None, Some(ReportFormat::Html)),
+            ReportStdoutContract::ArtifactNotice
+        );
+        let action = ReportAction::Environment {
+            file: None,
+            format: Some(ReportFormat::Json),
+        };
+        assert_eq!(
+            report_stdout_contract(Some(&action), Some(ReportFormat::Html)),
+            ReportStdoutContract::ArtifactOnly
+        );
+        let action = ReportAction::TimeSync {
+            file: None,
+            format: Some(ReportFormat::Html),
+        };
+        assert_eq!(
+            report_stdout_contract(Some(&action), Some(ReportFormat::Json)),
+            ReportStdoutContract::ArtifactNotice
         );
     }
 }

@@ -1918,12 +1918,63 @@ fn setup_non_interactive_contract_initializes_existing_targets_without_prompts()
     let outcome = dispatch(&context, cli.command, &adapters);
 
     assert!(outcome.is_success(), "{}", outcome.stderr);
+    assert!(
+        outcome
+            .stdout
+            .contains("Connecting to backend storage and initializing repository"),
+        "setup progress notice must be part of CLI stdout: {}",
+        outcome.stdout
+    );
     assert_eq!(
         runner.calls(),
         vec!["primary", "alpha", "zeta", "secondary"]
     );
     assert_eq!(scheduler.enable_calls(), 1);
     command_runner.assert_exhausted().unwrap();
+}
+
+#[test]
+fn setup_non_interactive_failure_preserves_progress_notice_on_stdout() {
+    let fixture = setup_contract_fixture();
+    let runner = SetupTraceAdapter::new(Some("alpha"));
+    let outcome = dispatch_setup(&fixture.profiles, ["setup", "--non-interactive"], &runner);
+
+    assert_eq!(outcome.exit_status, 1);
+    assert!(
+        outcome
+            .stdout
+            .contains("Connecting to backend storage and initializing repository")
+    );
+    assert!(outcome.stderr.contains("backend initialization"));
+    assert!(!outcome.stderr.contains("message="));
+}
+
+#[test]
+fn binary_structured_logs_are_written_to_the_system_sink_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let log_file = directory.path().join("backup.log");
+
+    let output = Command::cargo_bin("backup")
+        .unwrap()
+        .args([
+            "--log-file",
+            log_file.to_str().unwrap(),
+            "uninstall",
+            "--purge",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("uninstall failed at execution"));
+    assert!(!stderr.contains("Executing backup CLI uninstallation"));
+    assert!(!stderr.contains("message="));
+
+    let system_log = std::fs::read_to_string(&log_file).unwrap();
+    assert!(system_log.contains("Executing backup CLI uninstallation"));
 }
 
 #[derive(Debug, Clone)]

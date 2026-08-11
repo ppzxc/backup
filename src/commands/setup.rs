@@ -2,6 +2,7 @@ use crate::config::model::*;
 use crate::i18n::{I18nMessages, Language};
 use anyhow::Result;
 use secrecy::{ExposeSecret, SecretString};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
@@ -17,16 +18,159 @@ pub struct SetupParams {
     pub audit: AuditConfig,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupInitFailureDecision {
+    Save,
+    Cancel,
+    InputInterrupted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupCancellationKind {
+    Explicit,
+    Sftp,
+    InitializationFailure,
+    InputInterrupted,
+}
+
+#[derive(Debug)]
+pub struct SetupCancellationError {
+    pub kind: SetupCancellationKind,
+    pub diagnostic: String,
+}
+
+impl SetupCancellationError {
+    pub fn new(kind: SetupCancellationKind, diagnostic: impl Into<String>) -> Self {
+        Self {
+            kind,
+            diagnostic: diagnostic.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for SetupCancellationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.diagnostic.is_empty() {
+            match self.kind {
+                SetupCancellationKind::Sftp => "SFTP setup cancelled by user".fmt(formatter),
+                SetupCancellationKind::InputInterrupted => {
+                    "setup input interrupted (Ctrl-C)".fmt(formatter)
+                }
+                SetupCancellationKind::Explicit => "setup cancelled by user".fmt(formatter),
+                SetupCancellationKind::InitializationFailure => {
+                    "setup cancelled after repository initialization failure".fmt(formatter)
+                }
+            }
+        } else {
+            self.diagnostic.fmt(formatter)
+        }
+    }
+}
+
+impl std::error::Error for SetupCancellationError {}
+
+/// Destination for notices that help an operator understand setup progress or choose the next
+/// action. It is deliberately separate from structured system diagnostics.
+pub trait SetupNoticeSink {
+    fn notice(&mut self, message: &str);
+}
+
+#[derive(Default)]
+pub struct SetupNoticeCollector {
+    notices: Vec<String>,
+}
+
+impl SetupNoticeCollector {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn into_output(self) -> String {
+        self.notices.join("\n")
+    }
+}
+
+impl SetupNoticeSink for SetupNoticeCollector {
+    fn notice(&mut self, message: &str) {
+        self.notices.push(message.to_owned());
+    }
+}
+
+/// Renderer used by the interactive wizard. It writes notices through the wizard's terminal
+/// output path rather than through the global structured logger.
+pub struct TuiSetupNoticeRenderer<W: Write = std::io::Stdout> {
+    writer: W,
+}
+
+impl<W: Write> TuiSetupNoticeRenderer<W> {
+    pub fn new(writer: W) -> Self {
+        Self { writer }
+    }
+
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+}
+
+impl TuiSetupNoticeRenderer<std::io::Stdout> {
+    pub fn stdout() -> Self {
+        Self::new(std::io::stdout())
+    }
+}
+
+impl<W: Write> SetupNoticeSink for TuiSetupNoticeRenderer<W> {
+    fn notice(&mut self, message: &str) {
+        let _ = writeln!(self.writer, "{message}");
+        let _ = self.writer.flush();
+    }
+}
+
+pub struct SetupRunOptions<'a> {
+    scheduler_settings: &'a crate::runner::scheduler::SchedulerSettings,
+    notices: &'a mut dyn SetupNoticeSink,
+}
+
+impl<'a> SetupRunOptions<'a> {
+    pub fn new(
+        scheduler_settings: &'a crate::runner::scheduler::SchedulerSettings,
+        notices: &'a mut dyn SetupNoticeSink,
+    ) -> Self {
+        Self {
+            scheduler_settings,
+            notices,
+        }
+    }
+}
+
+#[derive(Default)]
+struct NoopSetupNoticeSink;
+
+impl SetupNoticeSink for NoopSetupNoticeSink {
+    fn notice(&mut self, _message: &str) {}
+}
+
 pub trait SetupPrompter {
     fn prompt_setup_params(
         &self,
         lang_opt: Option<Language>,
         config_dir: &Path,
         profiles_path: &Path,
+        notices: &mut dyn SetupNoticeSink,
     ) -> Result<SetupParams>;
 
     fn prompt_confirm_save_on_init_failure(&self, _msg: &str) -> Result<bool> {
         Ok(false)
+    }
+
+    /// Typed replacement for the legacy boolean prompt. The default keeps existing test and
+    /// third-party prompters source-compatible while production prompt implementations can
+    /// distinguish save, explicit cancellation, and Ctrl-C interruption.
+    fn prompt_init_failure_decision(&self, msg: &str) -> Result<SetupInitFailureDecision> {
+        Ok(if self.prompt_confirm_save_on_init_failure(msg)? {
+            SetupInitFailureDecision::Save
+        } else {
+            SetupInitFailureDecision::Cancel
+        })
     }
 }
 
@@ -74,11 +218,17 @@ impl Default for InquirePrompter {
 }
 
 impl SetupPrompter for InquirePrompter {
-    fn prompt_confirm_save_on_init_failure(&self, msg: &str) -> Result<bool> {
-        Ok(inquire::Confirm::new(msg)
-            .with_default(false)
-            .prompt()
-            .unwrap_or(false))
+    fn prompt_init_failure_decision(&self, msg: &str) -> Result<SetupInitFailureDecision> {
+        match inquire::Confirm::new(msg).with_default(false).prompt() {
+            Ok(true) => Ok(SetupInitFailureDecision::Save),
+            Ok(false) | Err(inquire::error::InquireError::OperationCanceled) => {
+                Ok(SetupInitFailureDecision::Cancel)
+            }
+            Err(inquire::error::InquireError::OperationInterrupted) => {
+                Ok(SetupInitFailureDecision::InputInterrupted)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn prompt_setup_params(
@@ -86,279 +236,176 @@ impl SetupPrompter for InquirePrompter {
         lang_opt: Option<Language>,
         config_dir: &Path,
         profiles_path: &Path,
+        notices: &mut dyn SetupNoticeSink,
     ) -> Result<SetupParams> {
-        let lang = lang_opt.unwrap_or(Language::En);
-        let msg = I18nMessages::get(lang);
+        let result = (|| -> Result<SetupParams> {
+            let lang = lang_opt.unwrap_or(Language::En);
+            let msg = I18nMessages::get(lang);
 
-        let profile = prompt_text_with_default(msg.enter_profile_name, "default", lang)?;
+            let profile = prompt_text_with_default(msg.enter_profile_name, "default", lang)?;
 
-        let backup_type_choice = inquire::Select::new(
-            msg.select_backup_type,
-            vec![msg.dir_batch_backup, msg.db_stream_backup],
-        )
-        .prompt()?;
+            let backup_type_choice = inquire::Select::new(
+                msg.select_backup_type,
+                vec![msg.dir_batch_backup, msg.db_stream_backup],
+            )
+            .prompt()?;
 
-        let (backup_type, targets) = if backup_type_choice.starts_with("[1]") {
-            let t = prompt_text_with_default(msg.enter_target_dir, DEFAULT_BACKUP_TARGET, lang)?;
-            let target_list: Vec<String> = t
+            let (backup_type, targets) = if backup_type_choice.starts_with("[1]") {
+                let t =
+                    prompt_text_with_default(msg.enter_target_dir, DEFAULT_BACKUP_TARGET, lang)?;
+                let target_list: Vec<String> = t
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                (BackupType::Directory, target_list)
+            } else {
+                let db_kind =
+                    inquire::Select::new(msg.select_db_type, vec!["mysql", "postgres"]).prompt()?;
+                let db_type: DatabaseType = db_kind.parse()?;
+                let conn = inquire::Text::new(msg.enter_conn_url).prompt_skippable()?;
+                (
+                    BackupType::DbStream {
+                        db_type,
+                        connection_url: conn.filter(|s| !s.is_empty()),
+                    },
+                    vec![format!("db-stream:{}", db_type)],
+                )
+            };
+
+            let excludes_str = prompt_text_with_default(msg.enter_exclude_patterns, "", lang)?;
+            let excludes: Vec<String> = excludes_str
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            (BackupType::Directory, target_list)
-        } else {
-            let db_kind =
-                inquire::Select::new(msg.select_db_type, vec!["mysql", "postgres"]).prompt()?;
-            let db_type: DatabaseType = db_kind.parse()?;
-            let conn = inquire::Text::new(msg.enter_conn_url).prompt_skippable()?;
-            (
-                BackupType::DbStream {
-                    db_type,
-                    connection_url: conn.filter(|s| !s.is_empty()),
-                },
-                vec![format!("db-stream:{}", db_type)],
-            )
-        };
 
-        let excludes_str = prompt_text_with_default(msg.enter_exclude_patterns, "", lang)?;
-        let excludes: Vec<String> = excludes_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        // Retention defaults depending on type
-        let retention_defaults = match backup_type {
-            BackupType::Directory => RetentionPolicy::standard_defaults(),
-            BackupType::DbStream { .. } => RetentionPolicy::long_term_defaults(),
-        };
-
-        let keep_daily = inquire::CustomType::<u32>::new(msg.retention_keep_daily)
-            .with_default(retention_defaults.keep_daily)
-            .prompt()?;
-        let keep_weekly = inquire::CustomType::<u32>::new(msg.retention_keep_weekly)
-            .with_default(retention_defaults.keep_weekly)
-            .prompt()?;
-        let keep_monthly = inquire::CustomType::<u32>::new(msg.retention_keep_monthly)
-            .with_default(retention_defaults.keep_monthly)
-            .prompt()?;
-
-        // Primary & Secondary Storage Setup
-        let existing_restic = if profiles_path.exists() {
-            ResticProfileConfig::load_from_path(profiles_path).ok()
-        } else {
-            None
-        };
-
-        let primary_prof = existing_restic
-            .as_ref()
-            .and_then(|c| c.profiles.get("primary"));
-        let reuse_storage = if let Some(p) = primary_prof {
-            if let Some(ref repo) = p.repository {
-                let sec_repo = existing_restic
-                    .as_ref()
-                    .and_then(|c| c.profiles.get("secondary"))
-                    .and_then(|s| s.repository.as_deref())
-                    .unwrap_or("-");
-                let prompt_label = format!(
-                    "{} ({}: {}, {}: {}) — {}",
-                    msg.reuse_existing_storage_label,
-                    msg.reuse_primary_label,
-                    repo,
-                    msg.reuse_secondary_label,
-                    sec_repo,
-                    msg.reuse_existing_storage_prompt
-                );
-                inquire::Confirm::new(&prompt_label)
-                    .with_default(true)
-                    .prompt()?
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        let (primary_storage, secondary_storage) = if reuse_storage {
-            let p = primary_prof.unwrap();
-            let repo = p.repository.clone().unwrap_or_default();
-            let backend = if repo.starts_with("s3:") {
-                "s3"
-            } else if repo.starts_with("sftp:") {
-                "sftp"
-            } else {
-                "local"
+            // Retention defaults depending on type
+            let retention_defaults = match backup_type {
+                BackupType::Directory => RetentionPolicy::standard_defaults(),
+                BackupType::DbStream { .. } => RetentionPolicy::long_term_defaults(),
             };
 
-            let pwd = p.password.clone().unwrap_or_else(generate_secure_password);
-            let sftp = if backend == "sftp" {
-                Some(resolve_reused_sftp_config(
-                    &repo,
-                    p.option.as_ref(),
-                    config_dir,
-                )?)
+            let keep_daily = inquire::CustomType::<u32>::new(msg.retention_keep_daily)
+                .with_default(retention_defaults.keep_daily)
+                .prompt()?;
+            let keep_weekly = inquire::CustomType::<u32>::new(msg.retention_keep_weekly)
+                .with_default(retention_defaults.keep_weekly)
+                .prompt()?;
+            let keep_monthly = inquire::CustomType::<u32>::new(msg.retention_keep_monthly)
+                .with_default(retention_defaults.keep_monthly)
+                .prompt()?;
+
+            // Primary & Secondary Storage Setup
+            let existing_restic = if profiles_path.exists() {
+                ResticProfileConfig::load_from_path(profiles_path).ok()
             } else {
                 None
             };
-            let primary = StorageTarget {
-                backend: backend.to_string(),
-                repository: repo,
-                password: SecretString::new(pwd),
-                sftp,
-                s3: None,
-            };
 
-            let secondary = existing_restic
+            let primary_prof = existing_restic
                 .as_ref()
-                .and_then(|c| c.profiles.get("secondary"))
-                .map(|sec_prof| -> Result<SecondaryStorageTarget> {
-                    let sec_repo = sec_prof.repository.clone().unwrap_or_default();
-                    let sec_backend = if sec_repo.starts_with("s3:") {
-                        "s3"
-                    } else if sec_repo.starts_with("sftp:") {
-                        "sftp"
-                    } else {
-                        "local"
-                    };
-                    let sec_pwd = sec_prof.password.clone().unwrap_or_default();
-                    let sftp = if sec_backend == "sftp" {
-                        Some(resolve_reused_sftp_config(
-                            &sec_repo,
-                            sec_prof.option.as_ref(),
-                            config_dir,
-                        )?)
-                    } else {
-                        None
-                    };
-                    Ok(SecondaryStorageTarget {
-                        enabled: true,
-                        backend: sec_backend.to_string(),
-                        repository: sec_repo,
-                        password: SecretString::new(sec_pwd),
-                        sftp,
-                        s3: None,
-                    })
-                })
-                .transpose()?;
-
-            (primary, secondary)
-        } else {
-            let backend =
-                inquire::Select::new(msg.primary_storage_backend, vec!["sftp", "s3", "local"])
-                    .prompt()?;
-
-            let (repository, sftp_config, s3_config) = if backend == "sftp" {
-                let runner = SystemExecutor;
-                let (repo_uri, conf) =
-                    prompt_sftp_storage(msg, lang, config_dir, "id_ed25519", &runner)?;
-                (repo_uri, Some(conf), None)
-            } else if backend == "s3" {
-                let mode_choice = inquire::Select::new(
-                    msg.s3_mode_select,
-                    vec![msg.s3_mode_detailed, msg.s3_mode_uri_only],
-                )
-                .prompt()?;
-
-                if mode_choice.starts_with("[1]") {
-                    let endpoint = prompt_text_with_default(
-                        msg.s3_endpoint,
-                        "https://s3.amazonaws.com",
-                        lang,
-                    )?;
-                    let access_key_id = inquire::Text::new(msg.s3_access_key_id).prompt()?;
-                    let secret_access_key_str = inquire::Password::new(msg.s3_secret_access_key)
-                        .without_confirmation()
-                        .prompt()?;
-                    let _region = prompt_text_with_default(msg.s3_region, "", lang)?;
-                    let bucket = prompt_text_with_default(msg.s3_bucket, "my-backup-bucket", lang)?;
-                    let subfolder = prompt_text_with_default(msg.s3_path, "", lang)?;
-
-                    let clean_endpoint = endpoint.trim_start_matches("s3:").trim_end_matches('/');
-                    let clean_subfolder = subfolder.trim_matches('/');
-                    let repo_uri = if clean_subfolder.is_empty() {
-                        format!("s3:{}/{}", clean_endpoint, bucket)
-                    } else {
-                        format!("s3:{}/{}/{}", clean_endpoint, bucket, clean_subfolder)
-                    };
-
-                    let s3_conf = S3Config {
-                        endpoint,
-                        access_key_id: SecretString::new(access_key_id),
-                        secret_access_key: SecretString::new(secret_access_key_str),
-                    };
-                    (repo_uri, None, Some(s3_conf))
-                } else {
-                    let repo_uri = prompt_text_with_default(
-                        msg.primary_repo_uri,
-                        "s3:https://s3.amazonaws.com/my-backup-bucket/backup",
-                        lang,
-                    )?;
-                    (repo_uri, None, None)
-                }
-            } else {
-                let repo_uri =
-                    prompt_text_with_default(msg.primary_repo_uri, "/data/backup", lang)?;
-                (repo_uri, None, None)
-            };
-
-            let enc_file_path = config_dir.join("enc");
-            let password = if let Some(existing_pass) = resolve_encryption_keyfile(&enc_file_path) {
-                crate::logger::interactive_notice(msg.found_existing_keyfile);
-                existing_pass
-            } else {
-                let auto_gen = inquire::Confirm::new(msg.auto_generate_password_prompt)
-                    .with_default(true)
-                    .prompt()?;
-
-                if auto_gen {
-                    let gen_pass = generate_secure_password();
-                    let _ = save_encryption_keyfile(&enc_file_path, &gen_pass);
-                    gen_pass
-                } else {
-                    let user_pass = inquire::Password::new(msg.enter_encryption_password)
-                        .without_confirmation()
-                        .prompt()?;
-                    if user_pass.len() < 12 {
-                        anyhow::bail!(msg.isms_password_error);
-                    }
-                    let save_key = inquire::Confirm::new(msg.save_password_to_keyfile_prompt)
+                .and_then(|c| c.profiles.get("primary"));
+            let reuse_storage = if let Some(p) = primary_prof {
+                if let Some(ref repo) = p.repository {
+                    let sec_repo = existing_restic
+                        .as_ref()
+                        .and_then(|c| c.profiles.get("secondary"))
+                        .and_then(|s| s.repository.as_deref())
+                        .unwrap_or("-");
+                    let prompt_label = format!(
+                        "{} ({}: {}, {}: {}) — {}",
+                        msg.reuse_existing_storage_label,
+                        msg.reuse_primary_label,
+                        repo,
+                        msg.reuse_secondary_label,
+                        sec_repo,
+                        msg.reuse_existing_storage_prompt
+                    );
+                    inquire::Confirm::new(&prompt_label)
                         .with_default(true)
-                        .prompt()?;
-                    if save_key {
-                        let _ = save_encryption_keyfile(&enc_file_path, &user_pass);
-                    }
-                    user_pass
+                        .prompt()?
+                } else {
+                    false
                 }
+            } else {
+                false
             };
 
-            let primary = StorageTarget {
-                backend: backend.to_string(),
-                repository,
-                password: SecretString::new(password),
-                sftp: sftp_config,
-                s3: s3_config,
-            };
+            let (primary_storage, secondary_storage) = if reuse_storage {
+                let p = primary_prof.unwrap();
+                let repo = p.repository.clone().unwrap_or_default();
+                let backend = if repo.starts_with("s3:") {
+                    "s3"
+                } else if repo.starts_with("sftp:") {
+                    "sftp"
+                } else {
+                    "local"
+                };
 
-            // Secondary Storage Setup (Optional)
-            let enable_sec = inquire::Confirm::new(msg.config_secondary_storage)
-                .with_default(false)
-                .prompt()?;
-
-            let secondary = if enable_sec {
-                let sec_backend =
-                    inquire::Select::new(msg.secondary_backend, vec!["sftp", "s3", "local"])
-                        .prompt()?;
-                let (sec_repo, sec_pass, sec_sftp, sec_s3) = if sec_backend == "sftp" {
-                    let runner = SystemExecutor;
-                    let (repo_uri, sec_sftp_conf) = prompt_sftp_storage(
-                        msg,
-                        lang,
+                let pwd = p.password.clone().unwrap_or_else(generate_secure_password);
+                let sftp = if backend == "sftp" {
+                    Some(resolve_reused_sftp_config(
+                        &repo,
+                        p.option.as_ref(),
                         config_dir,
-                        "id_ed25519_secondary",
-                        &runner,
-                    )?;
-                    (repo_uri, String::new(), Some(sec_sftp_conf), None)
-                } else if sec_backend == "s3" {
+                    )?)
+                } else {
+                    None
+                };
+                let primary = StorageTarget {
+                    backend: backend.to_string(),
+                    repository: repo,
+                    password: SecretString::new(pwd),
+                    sftp,
+                    s3: None,
+                };
+
+                let secondary = existing_restic
+                    .as_ref()
+                    .and_then(|c| c.profiles.get("secondary"))
+                    .map(|sec_prof| -> Result<SecondaryStorageTarget> {
+                        let sec_repo = sec_prof.repository.clone().unwrap_or_default();
+                        let sec_backend = if sec_repo.starts_with("s3:") {
+                            "s3"
+                        } else if sec_repo.starts_with("sftp:") {
+                            "sftp"
+                        } else {
+                            "local"
+                        };
+                        let sec_pwd = sec_prof.password.clone().unwrap_or_default();
+                        let sftp = if sec_backend == "sftp" {
+                            Some(resolve_reused_sftp_config(
+                                &sec_repo,
+                                sec_prof.option.as_ref(),
+                                config_dir,
+                            )?)
+                        } else {
+                            None
+                        };
+                        Ok(SecondaryStorageTarget {
+                            enabled: true,
+                            backend: sec_backend.to_string(),
+                            repository: sec_repo,
+                            password: SecretString::new(sec_pwd),
+                            sftp,
+                            s3: None,
+                        })
+                    })
+                    .transpose()?;
+
+                (primary, secondary)
+            } else {
+                let backend =
+                    inquire::Select::new(msg.primary_storage_backend, vec!["sftp", "s3", "local"])
+                        .prompt()?;
+
+                let (repository, sftp_config, s3_config) = if backend == "sftp" {
+                    let runner = SystemExecutor;
+                    let (repo_uri, conf) =
+                        prompt_sftp_storage(msg, lang, config_dir, "id_ed25519", &runner, notices)?;
+                    (repo_uri, Some(conf), None)
+                } else if backend == "s3" {
                     let mode_choice = inquire::Select::new(
                         msg.s3_mode_select,
                         vec![msg.s3_mode_detailed, msg.s3_mode_uri_only],
@@ -395,110 +442,248 @@ impl SetupPrompter for InquirePrompter {
                             access_key_id: SecretString::new(access_key_id),
                             secret_access_key: SecretString::new(secret_access_key_str),
                         };
-                        (repo_uri, String::new(), None, Some(s3_conf))
+                        (repo_uri, None, Some(s3_conf))
                     } else {
-                        let sec_r = prompt_text_with_default(
-                            msg.secondary_repo_uri,
+                        let repo_uri = prompt_text_with_default(
+                            msg.primary_repo_uri,
                             "s3:https://s3.amazonaws.com/my-backup-bucket/backup",
                             lang,
                         )?;
+                        (repo_uri, None, None)
+                    }
+                } else {
+                    let repo_uri =
+                        prompt_text_with_default(msg.primary_repo_uri, "/data/backup", lang)?;
+                    (repo_uri, None, None)
+                };
+
+                let enc_file_path = config_dir.join("enc");
+                let password = if let Some(existing_pass) =
+                    resolve_encryption_keyfile(&enc_file_path)
+                {
+                    notices.notice(msg.found_existing_keyfile);
+                    existing_pass
+                } else {
+                    let auto_gen = inquire::Confirm::new(msg.auto_generate_password_prompt)
+                        .with_default(true)
+                        .prompt()?;
+
+                    if auto_gen {
+                        let gen_pass = generate_secure_password();
+                        let _ = save_encryption_keyfile(&enc_file_path, &gen_pass);
+                        gen_pass
+                    } else {
+                        let user_pass = inquire::Password::new(msg.enter_encryption_password)
+                            .without_confirmation()
+                            .prompt()?;
+                        if user_pass.len() < 12 {
+                            anyhow::bail!(msg.isms_password_error);
+                        }
+                        let save_key = inquire::Confirm::new(msg.save_password_to_keyfile_prompt)
+                            .with_default(true)
+                            .prompt()?;
+                        if save_key {
+                            let _ = save_encryption_keyfile(&enc_file_path, &user_pass);
+                        }
+                        user_pass
+                    }
+                };
+
+                let primary = StorageTarget {
+                    backend: backend.to_string(),
+                    repository,
+                    password: SecretString::new(password),
+                    sftp: sftp_config,
+                    s3: s3_config,
+                };
+
+                // Secondary Storage Setup (Optional)
+                let enable_sec = inquire::Confirm::new(msg.config_secondary_storage)
+                    .with_default(false)
+                    .prompt()?;
+
+                let secondary = if enable_sec {
+                    let sec_backend =
+                        inquire::Select::new(msg.secondary_backend, vec!["sftp", "s3", "local"])
+                            .prompt()?;
+                    let (sec_repo, sec_pass, sec_sftp, sec_s3) = if sec_backend == "sftp" {
+                        let runner = SystemExecutor;
+                        let (repo_uri, sec_sftp_conf) = prompt_sftp_storage(
+                            msg,
+                            lang,
+                            config_dir,
+                            "id_ed25519_secondary",
+                            &runner,
+                            notices,
+                        )?;
+                        (repo_uri, String::new(), Some(sec_sftp_conf), None)
+                    } else if sec_backend == "s3" {
+                        let mode_choice = inquire::Select::new(
+                            msg.s3_mode_select,
+                            vec![msg.s3_mode_detailed, msg.s3_mode_uri_only],
+                        )
+                        .prompt()?;
+
+                        if mode_choice.starts_with("[1]") {
+                            let endpoint = prompt_text_with_default(
+                                msg.s3_endpoint,
+                                "https://s3.amazonaws.com",
+                                lang,
+                            )?;
+                            let access_key_id =
+                                inquire::Text::new(msg.s3_access_key_id).prompt()?;
+                            let secret_access_key_str =
+                                inquire::Password::new(msg.s3_secret_access_key)
+                                    .without_confirmation()
+                                    .prompt()?;
+                            let _region = prompt_text_with_default(msg.s3_region, "", lang)?;
+                            let bucket =
+                                prompt_text_with_default(msg.s3_bucket, "my-backup-bucket", lang)?;
+                            let subfolder = prompt_text_with_default(msg.s3_path, "", lang)?;
+
+                            let clean_endpoint =
+                                endpoint.trim_start_matches("s3:").trim_end_matches('/');
+                            let clean_subfolder = subfolder.trim_matches('/');
+                            let repo_uri = if clean_subfolder.is_empty() {
+                                format!("s3:{}/{}", clean_endpoint, bucket)
+                            } else {
+                                format!("s3:{}/{}/{}", clean_endpoint, bucket, clean_subfolder)
+                            };
+
+                            let s3_conf = S3Config {
+                                endpoint,
+                                access_key_id: SecretString::new(access_key_id),
+                                secret_access_key: SecretString::new(secret_access_key_str),
+                            };
+                            (repo_uri, String::new(), None, Some(s3_conf))
+                        } else {
+                            let sec_r = prompt_text_with_default(
+                                msg.secondary_repo_uri,
+                                "s3:https://s3.amazonaws.com/my-backup-bucket/backup",
+                                lang,
+                            )?;
+                            let sec_p = inquire::Password::new(msg.secondary_password)
+                                .without_confirmation()
+                                .prompt()?;
+                            (sec_r, sec_p, None, None)
+                        }
+                    } else {
+                        let sec_r = inquire::Text::new(msg.secondary_repo_uri).prompt()?;
                         let sec_p = inquire::Password::new(msg.secondary_password)
                             .without_confirmation()
                             .prompt()?;
                         (sec_r, sec_p, None, None)
-                    }
+                    };
+                    Some(SecondaryStorageTarget {
+                        enabled: true,
+                        backend: sec_backend.to_string(),
+                        repository: sec_repo,
+                        // The detailed S3/SFTP flows authenticate storage access separately
+                        // and do not prompt for a second repository password. Restic copy
+                        // requires both repositories to use the same key in that case.
+                        password: SecretString::new(if sec_pass.is_empty() {
+                            primary.password.expose_secret().to_owned()
+                        } else {
+                            sec_pass
+                        }),
+                        sftp: sec_sftp,
+                        s3: sec_s3,
+                    })
                 } else {
-                    let sec_r = inquire::Text::new(msg.secondary_repo_uri).prompt()?;
-                    let sec_p = inquire::Password::new(msg.secondary_password)
-                        .without_confirmation()
-                        .prompt()?;
-                    (sec_r, sec_p, None, None)
+                    None
                 };
-                Some(SecondaryStorageTarget {
-                    enabled: true,
-                    backend: sec_backend.to_string(),
-                    repository: sec_repo,
-                    // The detailed S3/SFTP flows authenticate storage access separately
-                    // and do not prompt for a second repository password. Restic copy
-                    // requires both repositories to use the same key in that case.
-                    password: SecretString::new(if sec_pass.is_empty() {
-                        primary.password.expose_secret().to_owned()
-                    } else {
-                        sec_pass
-                    }),
-                    sftp: sec_sftp,
-                    s3: sec_s3,
-                })
-            } else {
-                None
+
+                (primary, secondary)
             };
 
-            (primary, secondary)
-        };
+            // ISMS Report Options Setup
+            let enable_reports = inquire::Confirm::new(msg.enable_isms_reports)
+                .with_default(true)
+                .prompt()?;
 
-        // ISMS Report Options Setup
-        let enable_reports = inquire::Confirm::new(msg.enable_isms_reports)
-            .with_default(true)
-            .prompt()?;
+            let report_dir_path = "/data/backup/reports";
+            let reports = if enable_reports {
+                let output_dir =
+                    prompt_text_with_default(msg.report_export_dir, report_dir_path, lang)?;
+                ReportsConfig {
+                    output_dir,
+                    enable_daily_reports: true,
+                    enable_annual_dr_drill_report: true,
+                }
+            } else {
+                ReportsConfig {
+                    output_dir: report_dir_path.into(),
+                    enable_daily_reports: false,
+                    enable_annual_dr_drill_report: false,
+                }
+            };
 
-        let report_dir_path = "/data/backup/reports";
-        let reports = if enable_reports {
-            let output_dir =
-                prompt_text_with_default(msg.report_export_dir, report_dir_path, lang)?;
-            crate::config::model::create_secure_dir(Path::new(&output_dir))?;
-            ReportsConfig {
-                output_dir,
-                enable_daily_reports: true,
-                enable_annual_dr_drill_report: true,
-            }
-        } else {
-            ReportsConfig {
-                output_dir: report_dir_path.into(),
-                enable_daily_reports: false,
-                enable_annual_dr_drill_report: false,
-            }
-        };
+            let default_sys_mgr = match lang {
+                Language::Ko => "시스템 운영팀",
+                Language::En => "System Operations Team",
+            };
+            let default_sec_off = match lang {
+                Language::Ko => "정보보안책임자",
+                Language::En => "Chief Information Security Officer",
+            };
 
-        let default_sys_mgr = match lang {
-            Language::Ko => "시스템 운영팀",
-            Language::En => "System Operations Team",
-        };
-        let default_sec_off = match lang {
-            Language::Ko => "정보보안책임자",
-            Language::En => "Chief Information Security Officer",
-        };
+            let sys_mgr =
+                prompt_text_with_default(msg.prompt_system_manager, default_sys_mgr, lang)?;
+            let sec_off =
+                prompt_text_with_default(msg.prompt_security_officer, default_sec_off, lang)?;
 
-        let sys_mgr = prompt_text_with_default(msg.prompt_system_manager, default_sys_mgr, lang)?;
-        let sec_off = prompt_text_with_default(msg.prompt_security_officer, default_sec_off, lang)?;
+            let audit = AuditConfig {
+                system_manager: Some(sys_mgr),
+                security_officer: Some(sec_off),
+                restore_drill_rto_minutes: self.restore_drill_overrides.rto_minutes,
+                restore_drill_timeout_minutes: self.restore_drill_overrides.timeout_minutes,
+                restore_drill_work_dir: self
+                    .restore_drill_overrides
+                    .work_dir
+                    .as_deref()
+                    .map(|path| path.to_string_lossy().into_owned()),
+            };
 
-        let audit = AuditConfig {
-            system_manager: Some(sys_mgr),
-            security_officer: Some(sec_off),
-            restore_drill_rto_minutes: self.restore_drill_overrides.rto_minutes,
-            restore_drill_timeout_minutes: self.restore_drill_overrides.timeout_minutes,
-            restore_drill_work_dir: self
-                .restore_drill_overrides
-                .work_dir
-                .as_deref()
-                .map(|path| path.to_string_lossy().into_owned()),
-        };
-
-        Ok(SetupParams {
-            profile,
-            backup_type,
-            targets,
-            excludes,
-            retention: RetentionPolicy {
-                keep_daily,
-                keep_weekly,
-                keep_monthly,
-            },
-            primary_storage,
-            secondary_storage,
-            reports,
-            audit,
-        })
+            Ok(SetupParams {
+                profile,
+                backup_type,
+                targets,
+                excludes,
+                retention: RetentionPolicy {
+                    keep_daily,
+                    keep_weekly,
+                    keep_monthly,
+                },
+                primary_storage,
+                secondary_storage,
+                reports,
+                audit,
+            })
+        })();
+        let result = result.map_err(classify_prompt_error);
+        if result.as_ref().is_err_and(|error| {
+            error
+                .downcast_ref::<SetupCancellationError>()
+                .is_some_and(|error| error.kind == SetupCancellationKind::Explicit)
+        }) {
+            notices.notice(I18nMessages::get(lang_opt.unwrap_or(Language::En)).setup_cancelled);
+        }
+        result
     }
+}
+
+fn classify_prompt_error(error: anyhow::Error) -> anyhow::Error {
+    let Some(prompt_error) = error.downcast_ref::<inquire::error::InquireError>() else {
+        return error;
+    };
+    let kind = match prompt_error {
+        inquire::error::InquireError::OperationCanceled => SetupCancellationKind::Explicit,
+        inquire::error::InquireError::OperationInterrupted => {
+            SetupCancellationKind::InputInterrupted
+        }
+        _ => return error,
+    };
+    SetupCancellationError::new(kind, prompt_error.to_string()).into()
 }
 
 pub fn create_default_profiles_file(
@@ -563,6 +748,7 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
     config_dir: &Path,
     key_name: &str,
     runner: &R,
+    notices: &mut dyn SetupNoticeSink,
 ) -> Result<(String, SftpConfig)> {
     let key_dir = config_dir;
     let key_path = key_dir.join(key_name);
@@ -607,7 +793,7 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
     crate::config::model::ensure_sftp_known_hosts_file(config_dir)?;
 
     if let Ok(pub_key) = std::fs::read_to_string(&pub_path) {
-        crate::logger::interactive_notice(format!(
+        notices.notice(&format!(
             "{}\n{}\n{}\n{}",
             "================================================================================",
             msg.sftp_pubkey_notice,
@@ -627,7 +813,7 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
 
     loop {
         // Perform SFTP connection test
-        crate::logger::interactive_notice(msg.sftp_testing_connection);
+        notices.notice(msg.sftp_testing_connection);
         let test_result = verify_sftp_connection_with_config_dir(
             &user,
             &host,
@@ -639,11 +825,12 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
 
         let success = match test_result {
             Ok(()) => {
-                crate::logger::interactive_notice(msg.sftp_test_success);
+                notices.notice(msg.sftp_test_success);
                 true
             }
             Err(ref reason) => {
-                tracing::warn!("{}", msg.sftp_test_failed.replace("{}", reason));
+                let notice = msg.sftp_test_failed.replace("{}", reason);
+                notices.notice(&notice);
                 false
             }
         };
@@ -659,9 +846,19 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
             msg.sftp_action_ignore,
             msg.sftp_action_cancel,
         ];
-        let choice_idx = inquire::Select::new(msg.sftp_test_failed_action, options)
-            .raw_prompt()?
-            .index;
+        let choice_idx =
+            match inquire::Select::new(msg.sftp_test_failed_action, options).raw_prompt() {
+                Ok(choice) => choice.index,
+                Err(inquire::error::InquireError::OperationCanceled) => {
+                    notices.notice(msg.setup_cancelled);
+                    return Err(SetupCancellationError::new(
+                        SetupCancellationKind::Sftp,
+                        "SFTP setup cancelled by user",
+                    )
+                    .into());
+                }
+                Err(error) => return Err(anyhow::Error::new(error)),
+            };
 
         match choice_idx {
             0 => continue, // Retry
@@ -702,7 +899,7 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
                     }
                 }
                 if let Ok(pub_key) = std::fs::read_to_string(&pub_path) {
-                    crate::logger::interactive_notice(format!(
+                    notices.notice(&format!(
                         "{}\n{}\n{}\n{}",
                         "================================================================================",
                         msg.sftp_pubkey_notice,
@@ -713,7 +910,14 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
                 let _ = inquire::Text::new(msg.sftp_press_enter).prompt_skippable()?;
             }
             3 => break, // Ignore warning and proceed
-            _ => anyhow::bail!("SFTP setup cancelled by user due to connection failure."),
+            _ => {
+                notices.notice(msg.setup_cancelled);
+                return Err(SetupCancellationError::new(
+                    SetupCancellationKind::Sftp,
+                    "SFTP setup cancelled by user due to connection failure",
+                )
+                .into());
+            }
         }
     }
 
@@ -1243,14 +1447,18 @@ impl SetupEngine {
         runner: &R,
         scheduler: &S,
     ) -> Result<()> {
-        Self::run_with_scheduler_settings(
+        let mut notices = NoopSetupNoticeSink;
+        Self::run_with_options(
             profiles_path,
             prompter,
             non_interactive,
             lang_opt,
             runner,
             scheduler,
-            &crate::runner::scheduler::SchedulerSettings::auto(),
+            SetupRunOptions::new(
+                &crate::runner::scheduler::SchedulerSettings::auto(),
+                &mut notices,
+            ),
         )
     }
 
@@ -1267,6 +1475,35 @@ impl SetupEngine {
         scheduler: &S,
         scheduler_settings: &crate::runner::scheduler::SchedulerSettings,
     ) -> Result<()> {
+        let mut notices = NoopSetupNoticeSink;
+        Self::run_with_options(
+            profiles_path,
+            prompter,
+            non_interactive,
+            lang_opt,
+            runner,
+            scheduler,
+            SetupRunOptions::new(scheduler_settings, &mut notices),
+        )
+    }
+
+    pub fn run_with_options<
+        P: SetupPrompter,
+        R: crate::runner::resticprofile::ResticProfileRunner + ?Sized,
+        S: crate::runner::scheduler::BackupScheduler + ?Sized,
+    >(
+        profiles_path: &Path,
+        prompter: &P,
+        non_interactive: bool,
+        lang_opt: Option<Language>,
+        runner: &R,
+        scheduler: &S,
+        options: SetupRunOptions<'_>,
+    ) -> Result<()> {
+        let SetupRunOptions {
+            scheduler_settings,
+            notices,
+        } = options;
         let config_dir = if let Some(parent) = profiles_path.parent() {
             if parent.as_os_str().is_empty() {
                 Path::new(".")
@@ -1277,27 +1514,6 @@ impl SetupEngine {
             profiles_path
         };
 
-        crate::config::model::create_secure_dir(config_dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(config_dir, std::fs::Permissions::from_mode(0o700))?;
-        }
-
-        struct TuiGuard;
-        impl Drop for TuiGuard {
-            fn drop(&mut self) {
-                crate::logger::set_tui_mode(false);
-            }
-        }
-
-        let _tui_guard = if !non_interactive {
-            crate::logger::set_tui_mode(true);
-            Some(TuiGuard)
-        } else {
-            None
-        };
-
         let language = lang_opt.unwrap_or(Language::En);
         if non_interactive {
             return Self::run_existing_profiles_setup(
@@ -1306,19 +1522,27 @@ impl SetupEngine {
                 scheduler,
                 scheduler_settings,
                 language,
+                notices,
             );
         }
 
         // Capture the live state before prompting. Key generation, encryption
         // sidecars, and host-key trust may all happen during prompting.
-        let previous = LiveConfigSnapshot::capture(profiles_path)?;
-        let params = match prompter.prompt_setup_params(lang_opt, config_dir, profiles_path) {
-            Ok(params) => params,
-            Err(error) => {
-                previous.restore()?;
-                return Err(error);
-            }
-        };
+        let mut previous = LiveConfigSnapshot::capture(profiles_path)?;
+        crate::config::model::create_secure_dir(config_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(config_dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let params =
+            match prompter.prompt_setup_params(lang_opt, config_dir, profiles_path, notices) {
+                Ok(params) => params,
+                Err(error) => {
+                    previous.restore()?;
+                    return Err(error);
+                }
+            };
         let config = match Self::validate_and_build(params) {
             Ok(config) => config,
             Err(error) => {
@@ -1327,6 +1551,7 @@ impl SetupEngine {
             }
         };
 
+        previous.track_directory(Path::new(&config.reports.output_dir))?;
         if let Err(error) = std::fs::create_dir_all(&config.reports.output_dir) {
             previous.restore()?;
             return Err(error.into());
@@ -1341,6 +1566,7 @@ impl SetupEngine {
         if let Err(error) =
             config.save_to_profiles_path_with_config_dir(&staged_profiles, config_dir)
         {
+            drop(staged_dir);
             previous.restore()?;
             return Err(error);
         }
@@ -1348,13 +1574,14 @@ impl SetupEngine {
             match crate::config::model::ResticProfileConfig::load_from_path(&staged_profiles) {
                 Ok(staged) => staged,
                 Err(error) => {
+                    drop(staged_dir);
                     previous.restore()?;
                     return Err(error);
                 }
             };
         let msg = crate::i18n::I18nMessages::get(language);
 
-        crate::logger::interactive_notice(msg.initializing_backend_repo);
+        notices.notice(msg.initializing_backend_repo);
 
         let init_result = initialize_backend_targets(
             &staged_profiles,
@@ -1388,15 +1615,26 @@ impl SetupEngine {
             tracing::error!("{}", err_msg);
 
             if !non_interactive {
-                let save_anyway = prompter
-                    .prompt_confirm_save_on_init_failure(msg.backend_init_failed_save_prompt)?;
-                if !save_anyway {
-                    previous.restore()?;
-                    let prefix = match language {
-                        Language::Ko => "저장소 초기화 실패로 설정을 취소했습니다",
-                        Language::En => "Setup cancelled due to repository initialization failure",
-                    };
-                    return Err(anyhow::anyhow!("{prefix}: {err_msg}"));
+                match prompter.prompt_init_failure_decision(msg.backend_init_failed_save_prompt)? {
+                    SetupInitFailureDecision::Save => {}
+                    SetupInitFailureDecision::Cancel => {
+                        drop(staged_dir);
+                        previous.restore()?;
+                        return Err(SetupCancellationError::new(
+                            SetupCancellationKind::InitializationFailure,
+                            err_msg,
+                        )
+                        .into());
+                    }
+                    SetupInitFailureDecision::InputInterrupted => {
+                        drop(staged_dir);
+                        previous.restore()?;
+                        return Err(SetupCancellationError::new(
+                            SetupCancellationKind::InputInterrupted,
+                            "setup input interrupted (Ctrl-C)",
+                        )
+                        .into());
+                    }
                 }
             } else {
                 let prefix = match language {
@@ -1409,6 +1647,7 @@ impl SetupEngine {
 
         if initialization_failed {
             if let Err(error) = save_pending_setup(&config, profiles_path) {
+                drop(staged_dir);
                 previous.restore()?;
                 discard_pending_setup(profiles_path)?;
                 return Err(error);
@@ -1425,11 +1664,13 @@ impl SetupEngine {
                 profiles_path,
             )
         {
+            drop(staged_dir);
             previous.restore()?;
             return Err(error);
         }
         discard_pending_setup(profiles_path)?;
         if let Err(error) = scheduler.enable_preserving_state(profiles_path, scheduler_settings) {
+            drop(staged_dir);
             previous.restore()?;
             return Err(error);
         }
@@ -1446,6 +1687,7 @@ impl SetupEngine {
         scheduler: &S,
         scheduler_settings: &crate::runner::scheduler::SchedulerSettings,
         language: Language,
+        notices: &mut dyn SetupNoticeSink,
     ) -> Result<()> {
         if !profiles_path.is_file() {
             let message = match language {
@@ -1469,6 +1711,8 @@ impl SetupEngine {
         }
 
         let targets = profiles.backend_initialization_targets()?;
+        let msg = crate::i18n::I18nMessages::get(language);
+        notices.notice(msg.initializing_backend_repo);
         let init_result = initialize_backend_targets(profiles_path, &targets, runner);
         if let Err(error) = init_result {
             let message = append_sftp_diagnostics(
@@ -1480,6 +1724,7 @@ impl SetupEngine {
                 &profiles,
                 profiles_path,
             );
+            tracing::error!("{}", message);
             let prefix = match language {
                 Language::Ko => "비대화형 설정의 저장소 초기화에 실패했습니다",
                 Language::En => "Non-interactive setup failed repository initialization",
@@ -1849,6 +2094,7 @@ pub fn redact_backend_initialization_error(
 
 struct LiveConfigSnapshot {
     files: Vec<(std::path::PathBuf, Option<Vec<u8>>)>,
+    directories_absent_before_run: Vec<PathBuf>,
 }
 
 impl LiveConfigSnapshot {
@@ -1864,11 +2110,64 @@ impl LiveConfigSnapshot {
             .into_iter()
             .map(|path| Ok((path.clone(), secure_file_state(&path)?)))
             .collect::<Result<Vec<_>>>()?;
-        Ok(Self { files })
+        let mut snapshot = Self {
+            files,
+            directories_absent_before_run: Vec::new(),
+        };
+        snapshot.track_directory(&config_dir)?;
+        Ok(snapshot)
+    }
+
+    fn track_directory(&mut self, path: &Path) -> Result<()> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!(
+                    "setup directory must not be a symbolic link: {}",
+                    path.display()
+                )
+            }
+            Ok(metadata) if !metadata.file_type().is_dir() => {
+                anyhow::bail!("setup path is not a directory: {}", path.display())
+            }
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !self
+                    .directories_absent_before_run
+                    .iter()
+                    .any(|known| known == path)
+                {
+                    self.directories_absent_before_run.push(path.to_path_buf());
+                }
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn restore(&self) -> Result<()> {
-        restore_secure_file_state(&self.files)
+        restore_secure_file_state(&self.files)?;
+        let mut directories = self.directories_absent_before_run.clone();
+        directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+        for directory in directories {
+            match std::fs::symlink_metadata(&directory) {
+                Ok(metadata) if metadata.file_type().is_symlink() => continue,
+                Ok(metadata) if !metadata.file_type().is_dir() => continue,
+                Ok(_) => match std::fs::remove_dir(&directory) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_error) if _error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                        // Preserve a directory if the operator or another component populated
+                        // it during the transaction.
+                    }
+                    Err(error) => {
+                        return Err(error.into());
+                    }
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
     }
 }
 
