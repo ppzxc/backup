@@ -1540,6 +1540,21 @@ pub fn normalize_runtime_sftp_configuration(
     Ok(changed)
 }
 
+/// Normalizes managed SFTP options and persists the result with the configuration file's secure
+/// permissions when a migration was needed.
+pub fn normalize_and_save_runtime_sftp_configuration(
+    config: &mut crate::config::model::ResticProfileConfig,
+    profiles_path: &Path,
+    capabilities: &crate::platform::PlatformCapabilities,
+) -> Result<bool> {
+    if !normalize_runtime_sftp_configuration(config, profiles_path, capabilities)? {
+        return Ok(false);
+    }
+    let yaml = serde_yaml::to_string(config)?;
+    crate::config::model::save_secure_file(profiles_path, &yaml)?;
+    Ok(true)
+}
+
 fn identity_from_sftp_tokens(tokens: &[String]) -> Option<&str> {
     tokens
         .windows(2)
@@ -2155,10 +2170,7 @@ impl SetupEngine {
         }
         let mut profiles =
             crate::config::model::ResticProfileConfig::load_from_path(profiles_path)?;
-        if normalize_runtime_sftp_configuration(&mut profiles, profiles_path, capabilities)? {
-            let yaml = serde_yaml::to_string(&profiles)?;
-            crate::config::model::save_secure_file(profiles_path, &yaml)?;
-        }
+        normalize_and_save_runtime_sftp_configuration(&mut profiles, profiles_path, capabilities)?;
         let profile_names = profiles.profile_names();
         if profile_names.is_empty() {
             let message = match language {
@@ -2795,12 +2807,56 @@ const RCLONE_DEPENDENCY_URL: &str =
     "https://downloads.rclone.org/v1.68.1/rclone-v1.68.1-linux-amd64.zip";
 const RESTICPROFILE_DEPENDENCY_URL: &str = "https://github.com/creativeprojects/resticprofile/releases/download/v0.28.0/resticprofile_0.28.0_linux_amd64.tar.gz";
 
+#[derive(Clone, Copy)]
+struct DependencyArtifact {
+    binary: &'static str,
+    url: &'static str,
+    archive: &'static str,
+    checksum: &'static str,
+}
+
+impl DependencyArtifact {
+    fn extraction_command(&self, archive_path: &str, target_dir: &str) -> String {
+        match self.binary {
+            "restic" => format!("bunzip2 -c {archive_path} > {target_dir}/restic"),
+            "rclone" => format!(
+                "rm -rf /tmp/backup-dependency-rclone && unzip -q {archive_path} -d /tmp/backup-dependency-rclone && find /tmp/backup-dependency-rclone -type f -name rclone -exec cp {{}} {target_dir}/rclone \\;"
+            ),
+            "resticprofile" => format!(
+                "rm -rf /tmp/backup-dependency-resticprofile && mkdir -p /tmp/backup-dependency-resticprofile && tar -xzf {archive_path} -C /tmp/backup-dependency-resticprofile && cp /tmp/backup-dependency-resticprofile/resticprofile {target_dir}/resticprofile"
+            ),
+            _ => unreachable!("all dependency artifacts have a supported extraction strategy"),
+        }
+    }
+}
+
+const DEPENDENCY_ARTIFACTS: [DependencyArtifact; 3] = [
+    DependencyArtifact {
+        binary: "restic",
+        url: RESTIC_DEPENDENCY_URL,
+        archive: "restic.bz2",
+        checksum: "3d4d43c169a9e28ea76303b1e8b810f0dcede7478555fdaa8959971ad499e324",
+    },
+    DependencyArtifact {
+        binary: "rclone",
+        url: RCLONE_DEPENDENCY_URL,
+        archive: "rclone.zip",
+        checksum: "34f34743b1831523cd2e0aff74447b717e2d62fe1b598e91703899e0c0689568",
+    },
+    DependencyArtifact {
+        binary: "resticprofile",
+        url: RESTICPROFILE_DEPENDENCY_URL,
+        archive: "resticprofile.tar.gz",
+        checksum: "8a8b8c611ea86beb9eb095417e851c88e3f1f9e2fda894ea9b2664a94368716a",
+    },
+];
+
 pub fn run_setup_dependencies_with_runner_at_dir<R: CommandRunner + ?Sized>(
     runner: &R,
     install_dir: &Path,
     language: Language,
 ) -> Result<String> {
-    run_setup_dependencies_with_runner_at_dir_internal(runner, install_dir, language, true)
+    run_setup_dependencies_with_runner_at_dir_internal(runner, install_dir, language)
 }
 
 pub fn run_setup_dependencies_with_verified_online_downloads<R: CommandRunner + ?Sized>(
@@ -2808,14 +2864,13 @@ pub fn run_setup_dependencies_with_verified_online_downloads<R: CommandRunner + 
     install_dir: &Path,
     language: Language,
 ) -> Result<String> {
-    run_setup_dependencies_with_runner_at_dir_internal(runner, install_dir, language, true)
+    run_setup_dependencies_with_runner_at_dir_internal(runner, install_dir, language)
 }
 
 fn run_setup_dependencies_with_runner_at_dir_internal<R: CommandRunner + ?Sized>(
     runner: &R,
     install_dir: &Path,
     language: Language,
-    verify_downloads: bool,
 ) -> Result<String> {
     let mut report = String::new();
     let mut failures = Vec::new();
@@ -2827,103 +2882,129 @@ fn run_setup_dependencies_with_runner_at_dir_internal<R: CommandRunner + ?Sized>
     std::fs::create_dir_all(install_dir)?;
     let install_target_dir = install_dir.to_string_lossy().into_owned();
 
-    let binaries = [
-        ("restic", RESTIC_DEPENDENCY_URL),
-        ("rclone", RCLONE_DEPENDENCY_URL),
-        ("resticprofile", RESTICPROFILE_DEPENDENCY_URL),
-    ];
-
-    for (bin, url) in &binaries {
-        let status = runner.run("which", &[bin]);
+    for artifact in DEPENDENCY_ARTIFACTS {
+        let status = runner.run("which", &[artifact.binary]);
         match status {
             Ok(out) if out.status_code == 0 => {
                 let path = out.stdout.trim().to_string();
                 if path.is_empty() {
-                    failures.push(format!("{bin}: which returned an empty executable path"));
-                    report.push_str(&format!("{bin}: FAILED (empty executable path)\n"));
+                    failures.push(format!(
+                        "{}: which returned an empty executable path",
+                        artifact.binary
+                    ));
+                    report.push_str(&format!(
+                        "{}: FAILED (empty executable path)\n",
+                        artifact.binary
+                    ));
                 } else {
-                    match runner.run(bin, &["version"]) {
+                    match runner.run(artifact.binary, &["version"]) {
                         Ok(version) if version.status_code == 0 => {
-                            report.push_str(&format!("{}: OK ({})\n", bin, path));
+                            report.push_str(&format!("{}: OK ({})\n", artifact.binary, path));
                         }
                         Ok(version) => {
                             failures.push(format!(
-                                "{bin}: execution verification failed with status {}",
-                                version.status_code
+                                "{}: execution verification failed with status {}",
+                                artifact.binary, version.status_code
                             ));
-                            report.push_str(&format!("{bin}: FAILED (execution verification)\n"));
+                            report.push_str(&format!(
+                                "{}: FAILED (execution verification)\n",
+                                artifact.binary
+                            ));
                         }
                         Err(error) => {
-                            failures.push(format!("{bin}: execution verification failed: {error}"));
-                            report.push_str(&format!("{bin}: FAILED (execution verification)\n"));
+                            failures.push(format!(
+                                "{}: execution verification failed: {error}",
+                                artifact.binary
+                            ));
+                            report.push_str(&format!(
+                                "{}: FAILED (execution verification)\n",
+                                artifact.binary
+                            ));
                         }
                     }
                 }
             }
             _ => {
-                report.push_str(&format!("{}: MISSING -> Installing from {}\n", bin, url));
-                let cmd = if verify_downloads {
-                    build_verified_download_command(bin, url, &install_target_dir)
-                } else {
-                    build_download_command(bin, url, &install_target_dir)
-                };
+                report.push_str(&format!(
+                    "{}: MISSING -> Installing from {}\n",
+                    artifact.binary, artifact.url
+                ));
+                let cmd = build_verified_download_command(
+                    artifact.binary,
+                    artifact.url,
+                    &install_target_dir,
+                );
                 let install = runner.run("sh", &["-c", &cmd]);
                 match install {
-                    Ok(out) if out.status_code == 0 => match runner.run("which", &[bin]) {
-                        Ok(verify)
-                            if verify.status_code == 0 && !verify.stdout.trim().is_empty() =>
-                        {
-                            match runner.run(bin, &["version"]) {
-                                Ok(version) if version.status_code == 0 => {
-                                    report.push_str(&format!(
-                                        "{}: Installed to {}\n",
-                                        bin,
-                                        verify.stdout.trim()
-                                    ));
-                                }
-                                Ok(version) => {
-                                    failures.push(format!(
-                                        "{bin}: execution verification failed with status {}",
-                                        version.status_code
-                                    ));
-                                    report.push_str(&format!(
-                                        "{bin}: FAILED (execution verification)\n"
-                                    ));
-                                }
-                                Err(error) => {
-                                    failures.push(format!(
-                                        "{bin}: execution verification failed: {error}"
-                                    ));
-                                    report.push_str(&format!(
-                                        "{bin}: FAILED (execution verification)\n"
-                                    ));
+                    Ok(out) if out.status_code == 0 => {
+                        match runner.run("which", &[artifact.binary]) {
+                            Ok(verify)
+                                if verify.status_code == 0 && !verify.stdout.trim().is_empty() =>
+                            {
+                                match runner.run(artifact.binary, &["version"]) {
+                                    Ok(version) if version.status_code == 0 => {
+                                        report.push_str(&format!(
+                                            "{}: Installed to {}\n",
+                                            artifact.binary,
+                                            verify.stdout.trim()
+                                        ));
+                                    }
+                                    Ok(version) => {
+                                        failures.push(format!(
+                                            "{}: execution verification failed with status {}",
+                                            artifact.binary, version.status_code
+                                        ));
+                                        report.push_str(&format!(
+                                            "{}: FAILED (execution verification)\n",
+                                            artifact.binary
+                                        ));
+                                    }
+                                    Err(error) => {
+                                        failures.push(format!(
+                                            "{}: execution verification failed: {error}",
+                                            artifact.binary
+                                        ));
+                                        report.push_str(&format!(
+                                            "{}: FAILED (execution verification)\n",
+                                            artifact.binary
+                                        ));
+                                    }
                                 }
                             }
+                            Ok(verify) => {
+                                failures.push(format!(
+                                    "{}: installation verification failed with status {}",
+                                    artifact.binary, verify.status_code
+                                ));
+                                report.push_str(&format!(
+                                    "{}: FAILED (verification)\n",
+                                    artifact.binary
+                                ));
+                            }
+                            Err(error) => {
+                                failures.push(format!(
+                                    "{}: installation verification failed: {error}",
+                                    artifact.binary
+                                ));
+                                report.push_str(&format!(
+                                    "{}: FAILED (verification)\n",
+                                    artifact.binary
+                                ));
+                            }
                         }
-                        Ok(verify) => {
-                            failures.push(format!(
-                                "{bin}: installation verification failed with status {}",
-                                verify.status_code
-                            ));
-                            report.push_str(&format!("{bin}: FAILED (verification)\n"));
-                        }
-                        Err(error) => {
-                            failures
-                                .push(format!("{bin}: installation verification failed: {error}"));
-                            report.push_str(&format!("{bin}: FAILED (verification)\n"));
-                        }
-                    },
+                    }
                     Ok(out) => {
                         failures.push(format!(
-                            "{bin}: installation failed with status {}: {}",
+                            "{}: installation failed with status {}: {}",
+                            artifact.binary,
                             out.status_code,
                             out.stderr.trim()
                         ));
-                        report.push_str(&format!("{bin}: FAILED (installation)\n"));
+                        report.push_str(&format!("{}: FAILED (installation)\n", artifact.binary));
                     }
                     Err(error) => {
-                        failures.push(format!("{bin}: installation failed: {error}"));
-                        report.push_str(&format!("{bin}: FAILED (installation)\n"));
+                        failures.push(format!("{}: installation failed: {error}", artifact.binary));
+                        report.push_str(&format!("{}: FAILED (installation)\n", artifact.binary));
                     }
                 }
             }
@@ -2940,37 +3021,17 @@ fn run_setup_dependencies_with_runner_at_dir_internal<R: CommandRunner + ?Sized>
 }
 
 pub fn build_verified_download_command(bin: &str, url: &str, target_dir: &str) -> String {
-    let (archive, checksum) = match (bin, url) {
-        ("restic", RESTIC_DEPENDENCY_URL) => (
-            "restic.bz2",
-            "3d4d43c169a9e28ea76303b1e8b810f0dcede7478555fdaa8959971ad499e324",
-        ),
-        ("rclone", RCLONE_DEPENDENCY_URL) => (
-            "rclone.zip",
-            "34f34743b1831523cd2e0aff74447b717e2d62fe1b598e91703899e0c0689568",
-        ),
-        ("resticprofile", RESTICPROFILE_DEPENDENCY_URL) => (
-            "resticprofile.tar.gz",
-            "8a8b8c611ea86beb9eb095417e851c88e3f1f9e2fda894ea9b2664a94368716a",
-        ),
-        _ => {
-            return format!(
-                "echo 'Unsupported verified dependency artifact: {bin} {url}' >&2; exit 1"
-            );
-        }
+    let Some(artifact) = DEPENDENCY_ARTIFACTS
+        .iter()
+        .find(|artifact| artifact.binary == bin && artifact.url == url)
+    else {
+        return format!("echo 'Unsupported verified dependency artifact: {bin} {url}' >&2; exit 1");
     };
+    let archive = artifact.archive;
+    let checksum = artifact.checksum;
     let archive_path = format!("/tmp/backup-dependency-{archive}");
     let checksum_path = format!("/tmp/backup-dependency-{archive}.sha256");
-    let extraction = match bin {
-        "restic" => format!("bunzip2 -c {archive_path} > {target_dir}/restic"),
-        "rclone" => format!(
-            "rm -rf /tmp/backup-dependency-rclone && unzip -q {archive_path} -d /tmp/backup-dependency-rclone && find /tmp/backup-dependency-rclone -type f -name rclone -exec cp {{}} {target_dir}/rclone \\;"
-        ),
-        "resticprofile" => format!(
-            "rm -rf /tmp/backup-dependency-resticprofile && mkdir -p /tmp/backup-dependency-resticprofile && tar -xzf {archive_path} -C /tmp/backup-dependency-resticprofile && cp /tmp/backup-dependency-resticprofile/resticprofile {target_dir}/resticprofile"
-        ),
-        _ => unreachable!(),
-    };
+    let extraction = artifact.extraction_command(&archive_path, target_dir);
     format!(
         "curl -fsSL {url} -o {archive_path} && printf '%s  %s\\n' {checksum} {archive_path} > {checksum_path} && sha256sum -c {checksum_path} && {extraction} && chmod +x {target_dir}/{bin} && rm -f {archive_path} {checksum_path}"
     )

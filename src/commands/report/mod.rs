@@ -491,7 +491,12 @@ impl RealReportData {
 
         let (chrony_enabled, chrony_active, chrony_sources, chrony_tracking, time_sync_status) =
             collect_time_sync_info(runner, capabilities);
-        let (chrony_conf_perm, _) = get_file_perm_and_safety(Path::new("/etc/chrony.conf"), 0o644);
+        let chrony_conf_perm =
+            if capabilities.time_sync_method() == crate::platform::TimeSyncMethod::Chrony {
+                get_file_perm_and_safety(Path::new("/etc/chrony.conf"), 0o644).0
+            } else {
+                "not-applicable".into()
+            };
 
         let (timer_enabled, timer_active, next_run) = collect_scheduler_info(runner, capabilities);
         let os_info = collect_os_info(runner);
@@ -2390,6 +2395,19 @@ mod tests {
             ..storage
         };
         assert!(!storage_is_configured(&incomplete));
+    }
+
+    #[test]
+    fn timedatectl_parser_distinguishes_synchronized_unsynchronized_and_malformed_output() {
+        assert!(super::timedatectl_output_is_synchronized(
+            "System clock synchronized: yes\nNTP service: active\n"
+        ));
+        assert!(!super::timedatectl_output_is_synchronized(
+            "System clock synchronized: no\nNTP service: inactive\n"
+        ));
+        assert!(!super::timedatectl_output_is_synchronized(
+            "clock status: maybe"
+        ));
     }
 }
 

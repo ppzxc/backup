@@ -5,7 +5,7 @@ RUN sed -i 's/enabled=1/enabled=0/g' /etc/yum/pluginconf.d/fastestmirror.conf ||
  && sed -i 's/mirrorlist/#mirrorlist/g' /etc/yum.repos.d/CentOS-*.repo \
  && sed -i 's/#baseurl=http:\/\/mirror.centos.org\/centos\/\$releasever/baseurl=http:\/\/vault.centos.org\/6.10/g' /etc/yum.repos.d/CentOS-*.repo
 
-RUN yum install -y openssh-clients cronie ntp tar coreutils which \
+RUN yum install -y openssh-clients openssh-server cronie ntp tar coreutils which \
  && yum clean all
 
 # Keep the legacy services explicit so the compatibility runner can exercise the same probes as

@@ -16,6 +16,7 @@ fn centos6_runner_declares_the_supported_x86_64_toolchain() {
     for required in [
         "FROM centos:6",
         "openssh-clients",
+        "openssh-server",
         "cronie",
         "ntp",
         "x86_64",
@@ -38,6 +39,7 @@ fn centos6_runner_declares_the_supported_x86_64_toolchain() {
         "backup-centos6/profiles.yaml report",
         "export PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin",
         "ssh-keyscan",
+        "sshd",
         "StrictHostKeyChecking=yes",
     ] {
         assert!(script.contains(required), "CentOS smoke missing {required}");

@@ -949,14 +949,11 @@ fn dispatch_inner(
                             init_profiles_path.display()
                         )
                     })?;
-                if crate::commands::setup::normalize_runtime_sftp_configuration(
+                crate::commands::setup::normalize_and_save_runtime_sftp_configuration(
                     &mut config,
                     &init_profiles_path,
                     &context.platform_capabilities,
-                )? {
-                    let yaml = serde_yaml::to_string(&config)?;
-                    crate::config::model::save_secure_file(&init_profiles_path, &yaml)?;
-                }
+                )?;
                 let targets = backend_initialization_targets(&config)?;
                 let mut output = Vec::new();
                 let mut failures = Vec::new();
@@ -1482,14 +1479,11 @@ fn load_profiles(context: &CliRuntimeContext) -> Result<ResticProfileConfig> {
             path.display()
         )
     })?;
-    if crate::commands::setup::normalize_runtime_sftp_configuration(
+    crate::commands::setup::normalize_and_save_runtime_sftp_configuration(
         &mut config,
         &path,
         &context.platform_capabilities,
-    )? {
-        let yaml = serde_yaml::to_string(&config)?;
-        crate::config::model::save_secure_file(&path, &yaml)?;
-    }
+    )?;
     Ok(config)
 }
 

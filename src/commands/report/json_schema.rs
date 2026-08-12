@@ -233,7 +233,7 @@ pub fn render_json_real(report_type: ReportType, data: &RealReportData) -> Resul
                 scheduler_status: data.scheduler_status.clone(),
                 sources: data.chrony_sources.clone(),
                 tracking: data.chrony_tracking.clone(),
-                conf_permission: format!("-rw-r--r-- 1 root root 813 /etc/chrony.conf"),
+                conf_permission: data.chrony_conf_perm.clone(),
             };
             Ok(serde_json::to_string_pretty(&res)?)
         }

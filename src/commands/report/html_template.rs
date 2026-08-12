@@ -495,12 +495,6 @@ fn render_environment_html(data: &RealReportData) -> String {
 }
 
 fn render_time_sync_html(data: &RealReportData) -> String {
-    let chrony_conf_perm_display = if data.chrony_conf_perm.is_empty() {
-        "-rw-r--r-- 1 root root 813  7월 22 09:48 /etc/chrony.conf".to_string()
-    } else {
-        data.chrony_conf_perm.clone()
-    };
-
     format!(
         r#"<!DOCTYPE html>
 <html lang="ko">
@@ -580,7 +574,7 @@ fn render_time_sync_html(data: &RealReportData) -> String {
         data.chrony_active,
         data.chrony_sources,
         data.chrony_tracking,
-        chrony_conf_perm_display,
+        data.chrony_conf_perm,
         data.audit.system_manager_name("시스템 운영팀"),
         data.audit.security_officer_name("정보보안책임자"),
     )

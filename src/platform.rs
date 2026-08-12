@@ -115,7 +115,14 @@ impl PlatformCapabilities {
     pub fn from_release_metadata(release: &str, architecture: &str) -> Self {
         let release_lower = release.to_ascii_lowercase();
         if release_lower.contains("centos")
-            && release_lower.contains("6.10")
+            && release_lower
+                .split_whitespace()
+                .map(|token| {
+                    token.trim_matches(|character: char| {
+                        !character.is_ascii_digit() && character != '.'
+                    })
+                })
+                .any(|token| token == "6.10")
             && architecture == "x86_64"
         {
             return Self::centos_6_10_x86_64();
@@ -293,9 +300,29 @@ fn extract_version(value: &str) -> Option<String> {
 pub fn ntpq_output_is_synchronized(output: &str) -> bool {
     output.lines().any(|line| {
         let trimmed = line.trim_start();
-        trimmed.starts_with('*')
-            || trimmed
-                .split_whitespace()
-                .any(|field| field.starts_with('*'))
+        trimmed
+            .split_whitespace()
+            .next()
+            .is_some_and(|peer| peer.starts_with('*') && peer.len() > 1)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ntpq_output_is_synchronized;
+
+    #[test]
+    fn ntpq_parser_accepts_a_selected_peer() {
+        assert!(ntpq_output_is_synchronized(
+            "     remote           refid      st t when poll reach   delay   offset  jitter\n*10.0.0.1        .GPS.            1 u   32   64  377    0.123    0.456   0.789\n"
+        ));
+    }
+
+    #[test]
+    fn ntpq_parser_rejects_unselected_and_malformed_output() {
+        assert!(!ntpq_output_is_synchronized(
+            "     remote           refid      st t when poll reach   delay   offset  jitter\n+10.0.0.1        .INIT.          16 u    -   64    0    0.000    0.000   0.000\n"
+        ));
+        assert!(!ntpq_output_is_synchronized("*\nnot an ntpq peer list\n"));
+    }
 }

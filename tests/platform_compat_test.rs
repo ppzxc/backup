@@ -43,6 +43,19 @@ fn platform_detection_does_not_treat_other_centos_6_releases_as_6_10() {
         PlatformCapabilities::from_release_metadata("CentOS Linux release 6.9 (Final)", "x86_64");
 
     assert_ne!(capabilities.profile, PlatformProfile::Centos6X86_64);
+    assert_ne!(
+        PlatformCapabilities::from_release_metadata(
+            "CentOS Linux release 6.10.1 (Final)",
+            "x86_64"
+        )
+        .profile,
+        PlatformProfile::Centos6X86_64
+    );
+    assert_ne!(
+        PlatformCapabilities::from_release_metadata("CentOS Linux release 7.6.10 (Core)", "x86_64")
+            .profile,
+        PlatformProfile::Centos6X86_64
+    );
 }
 
 #[test]
@@ -306,6 +319,7 @@ fn report_exposes_generic_legacy_time_sync_and_scheduler_fields() {
 
     assert_eq!(data.time_sync_method, "ntpd");
     assert_eq!(data.scheduler_backend, "cron");
+    assert_eq!(data.chrony_conf_perm, "not-applicable");
 }
 
 #[test]
