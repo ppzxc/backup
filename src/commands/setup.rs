@@ -366,10 +366,11 @@ impl SetupPrompter for InquirePrompter {
 
                 let pwd = p.password.clone().unwrap_or_else(generate_secure_password);
                 let sftp = if backend == "sftp" {
-                    Some(resolve_reused_sftp_config(
+                    Some(resolve_reused_sftp_config_with_capabilities(
                         &repo,
                         p.option.as_ref(),
                         config_dir,
+                        &self.platform_capabilities,
                     )?)
                 } else {
                     None
@@ -396,10 +397,11 @@ impl SetupPrompter for InquirePrompter {
                         };
                         let sec_pwd = sec_prof.password.clone().unwrap_or_default();
                         let sftp = if sec_backend == "sftp" {
-                            Some(resolve_reused_sftp_config(
+                            Some(resolve_reused_sftp_config_with_capabilities(
                                 &sec_repo,
                                 sec_prof.option.as_ref(),
                                 config_dir,
+                                &self.platform_capabilities,
                             )?)
                         } else {
                             None
@@ -1073,6 +1075,20 @@ pub fn resolve_reused_sftp_config(
     options: Option<&std::collections::BTreeMap<String, String>>,
     config_dir: &Path,
 ) -> Result<SftpConfig> {
+    resolve_reused_sftp_config_with_capabilities(
+        repository,
+        options,
+        config_dir,
+        &crate::platform::PlatformCapabilities::default(),
+    )
+}
+
+pub fn resolve_reused_sftp_config_with_capabilities(
+    repository: &str,
+    options: Option<&std::collections::BTreeMap<String, String>>,
+    config_dir: &Path,
+    capabilities: &crate::platform::PlatformCapabilities,
+) -> Result<SftpConfig> {
     let (user, host, port) = parse_sftp_repository(repository)?;
     let options = options.ok_or_else(|| {
         anyhow::anyhow!(
@@ -1092,7 +1108,8 @@ pub fn resolve_reused_sftp_config(
                 "existing sftp.args has no managed identity; explicit SFTP reconfiguration is required"
             )
         })?;
-        let additional_args = validate_reused_sftp_args(&tokens, Path::new(key_file), config_dir)?;
+        let additional_args =
+            validate_reused_sftp_args(&tokens, Path::new(key_file), config_dir, capabilities)?;
         return Ok(SftpConfig {
             host,
             port,
@@ -1170,6 +1187,7 @@ fn validate_reused_sftp_args(
     tokens: &[String],
     key_file: &Path,
     config_dir: &Path,
+    capabilities: &crate::platform::PlatformCapabilities,
 ) -> Result<Vec<String>> {
     if !is_managed_sftp_key_path(key_file, config_dir) {
         anyhow::bail!(
@@ -1181,7 +1199,8 @@ fn validate_reused_sftp_args(
             "existing managed SFTP identity is missing; explicit SFTP reconfiguration is required"
         );
     }
-    let policy = SftpAuthPolicy::for_config_dir(key_file, config_dir)?;
+    let policy =
+        SftpAuthPolicy::for_config_dir_with_capabilities(key_file, config_dir, capabilities)?;
     let known_hosts = policy
         .known_hosts_file()
         .to_str()
@@ -1201,10 +1220,15 @@ fn validate_reused_sftp_args(
     }
 
     let options = parse_sftp_option_values(tokens)?;
+    let strict_host_key_checking = if capabilities.ssh_accept_new {
+        "accept-new"
+    } else {
+        "yes"
+    };
     let required = [
         ("IdentitiesOnly", "yes"),
         ("BatchMode", "yes"),
-        ("StrictHostKeyChecking", "accept-new"),
+        ("StrictHostKeyChecking", strict_host_key_checking),
         ("UserKnownHostsFile", known_hosts),
     ];
     for (key, expected_value) in required {
@@ -1297,6 +1321,223 @@ fn validate_reused_sftp_args(
         );
     }
     Ok(additional_args)
+}
+
+/// Corrects only wizard-managed SFTP options at runtime. A legacy configuration is left
+/// untouched when its managed trust file is absent or its identity is outside the application
+/// configuration directory; arbitrary SSH options are never guessed.
+pub fn correct_managed_sftp_options_with_capabilities(
+    repository: &str,
+    options: &mut std::collections::BTreeMap<String, String>,
+    config_dir: &Path,
+    capabilities: &crate::platform::PlatformCapabilities,
+) -> Result<bool> {
+    if !repository.starts_with("sftp:") {
+        return Ok(false);
+    }
+    let known_hosts = config_dir.join(crate::config::model::SFTP_KNOWN_HOSTS_FILENAME);
+    if !is_regular_sftp_key_file(&known_hosts) {
+        return Ok(false);
+    }
+    if options.contains_key("sftp.args") && options.contains_key("sftp.command") {
+        return Ok(false);
+    }
+
+    if let Some(args) = options.get("sftp.args").cloned() {
+        let mut tokens = tokenize_sftp_arguments(&args)?;
+        let original_key_file = identity_from_sftp_tokens(&tokens)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "managed SFTP runtime correction requires an explicit identity file"
+                )
+            })?;
+        let mut key_file = original_key_file.clone();
+        if !is_managed_sftp_key_path(Path::new(&key_file), config_dir)
+            || !is_regular_sftp_key_file(&resolve_sftp_key_path(Path::new(&key_file), config_dir))
+        {
+            return Ok(false);
+        }
+        let key_basename = Path::new(&key_file)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let expected_algorithm = capabilities.ssh_key_algorithm();
+        let expected_names = [
+            expected_algorithm.key_name(false),
+            expected_algorithm.key_name(true),
+        ];
+        if !expected_names.contains(&key_basename) {
+            if !capabilities.is_centos_6()
+                || !matches!(key_basename, "id_ed25519" | "id_ed25519_secondary")
+            {
+                return Ok(false);
+            }
+            let rsa_name = if key_basename.ends_with("_secondary") {
+                "id_rsa_secondary"
+            } else {
+                "id_rsa"
+            };
+            let rsa_path = config_dir.join(rsa_name);
+            if !is_regular_sftp_key_file(&rsa_path) {
+                return Ok(false);
+            }
+            let replacement = if Path::new(&key_file).is_absolute() {
+                rsa_path.to_string_lossy().into_owned()
+            } else {
+                rsa_name.into()
+            };
+            for index in 0..tokens.len() {
+                if tokens[index] == "-i"
+                    && tokens.get(index + 1).map(String::as_str) == Some(&key_file)
+                {
+                    tokens[index + 1] = replacement.clone();
+                } else if let Some(value) = tokens[index].strip_prefix("-oIdentityFile=") {
+                    if value == key_file {
+                        tokens[index] = format!("-oIdentityFile={replacement}");
+                    }
+                }
+            }
+            key_file = replacement;
+        }
+        let key_path = resolve_sftp_key_path(Path::new(&key_file), config_dir);
+        if !is_managed_sftp_key_path(Path::new(&key_file), config_dir)
+            || !is_regular_sftp_key_file(&key_path)
+        {
+            return Ok(false);
+        }
+        let parsed = parse_sftp_option_values(&tokens)?;
+        let known_host_values = parsed
+            .iter()
+            .filter(|(key, _)| sftp_option_key_is(key, "UserKnownHostsFile"))
+            .map(|(_, value)| *value)
+            .collect::<Vec<_>>();
+        if known_host_values.len() > 1
+            || (known_host_values.len() == 1
+                && resolve_sftp_key_path(Path::new(known_host_values[0]), config_dir)
+                    != known_hosts)
+        {
+            return Ok(false);
+        }
+        let strict_values = parsed
+            .iter()
+            .filter(|(key, _)| sftp_option_key_is(key, "StrictHostKeyChecking"))
+            .map(|(_, value)| *value)
+            .collect::<Vec<_>>();
+        if strict_values.len() > 1 {
+            return Ok(false);
+        }
+        let expected = if capabilities.ssh_accept_new {
+            "accept-new"
+        } else {
+            "yes"
+        };
+        let mut has_strict_host_key_checking = false;
+        let mut has_known_hosts = false;
+        for index in 0..tokens.len() {
+            if tokens[index] == "-o" {
+                if let Some(value) = tokens.get_mut(index + 1) {
+                    let key = value.split_once('=').map(|(key, _)| key.to_owned());
+                    if let Some(key) = key {
+                        if sftp_option_key_is(&key, "StrictHostKeyChecking") {
+                            has_strict_host_key_checking = true;
+                            *value = format!("{key}={expected}");
+                        } else if sftp_option_key_is(&key, "UserKnownHostsFile") {
+                            has_known_hosts = true;
+                        }
+                    }
+                }
+            } else if let Some(value) = tokens[index].strip_prefix("-o").map(str::to_owned) {
+                if let Some((key, _)) = value.split_once('=') {
+                    if sftp_option_key_is(key, "StrictHostKeyChecking") {
+                        has_strict_host_key_checking = true;
+                        tokens[index] = format!("-o{key}={expected}");
+                    } else if sftp_option_key_is(key, "UserKnownHostsFile") {
+                        has_known_hosts = true;
+                    }
+                }
+            }
+        }
+        if !has_strict_host_key_checking {
+            tokens.extend(["-o".into(), format!("StrictHostKeyChecking={expected}")]);
+        }
+        if !has_known_hosts {
+            tokens.extend([
+                "-o".into(),
+                format!("UserKnownHostsFile={}", known_hosts.display()),
+            ]);
+        }
+        let additional_args =
+            validate_reused_sftp_args(&tokens, Path::new(&key_file), config_dir, capabilities)?;
+        let (user, host, port) = parse_sftp_repository(repository)?;
+        let sftp = crate::config::model::SftpConfig {
+            host,
+            port,
+            user,
+            key_file: Some(key_file),
+            additional_args,
+        };
+        let corrected =
+            sftp.sftp_args_for_config_dir_with_capabilities(config_dir, capabilities)?;
+        let changed = corrected != args;
+        if changed {
+            options.insert("sftp.args".into(), corrected);
+        }
+        return Ok(changed);
+    }
+
+    let Some(command) = options.get("sftp.command").cloned() else {
+        return Ok(false);
+    };
+    let mut command_options = std::collections::BTreeMap::new();
+    command_options.insert("sftp.command".into(), command);
+    let reused = resolve_reused_sftp_config_with_capabilities(
+        repository,
+        Some(&command_options),
+        config_dir,
+        capabilities,
+    )?;
+    let corrected = reused.sftp_args_for_config_dir_with_capabilities(config_dir, capabilities)?;
+    options.remove("sftp.command");
+    options.insert("sftp.args".into(), corrected);
+    Ok(true)
+}
+
+/// Applies the same conservative SFTP migration to every repository option in a profiles file.
+/// This is shared by setup, backend initialization, and normal command loading so a legacy
+/// configuration is corrected before any resticprofile process consumes it.
+pub fn normalize_runtime_sftp_configuration(
+    config: &mut crate::config::model::ResticProfileConfig,
+    profiles_path: &Path,
+    capabilities: &crate::platform::PlatformCapabilities,
+) -> Result<bool> {
+    let config_dir = profiles_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut changed = false;
+    for profile in config.profiles.values_mut() {
+        if let (Some(repository), Some(options)) =
+            (profile.repository.as_deref(), profile.option.as_mut())
+        {
+            changed |= correct_managed_sftp_options_with_capabilities(
+                repository,
+                options,
+                config_dir,
+                capabilities,
+            )?;
+        }
+        if let Some(copy) = profile.copy.as_mut() {
+            if let (Some(repository), Some(options)) =
+                (copy.repository.as_deref(), copy.option.as_mut())
+            {
+                changed |= correct_managed_sftp_options_with_capabilities(
+                    repository,
+                    options,
+                    config_dir,
+                    capabilities,
+                )?;
+            }
+        }
+    }
+    Ok(changed)
 }
 
 fn identity_from_sftp_tokens(tokens: &[String]) -> Option<&str> {
@@ -1717,6 +1958,7 @@ impl SetupEngine {
                 scheduler_settings,
                 language,
                 notices,
+                &platform_capabilities,
             );
         }
 
@@ -1898,6 +2140,7 @@ impl SetupEngine {
         scheduler_settings: &crate::runner::scheduler::SchedulerSettings,
         language: Language,
         notices: &mut dyn SetupNoticeSink,
+        capabilities: &crate::platform::PlatformCapabilities,
     ) -> Result<()> {
         if !profiles_path.is_file() {
             let message = match language {
@@ -1910,7 +2153,12 @@ impl SetupEngine {
             };
             anyhow::bail!(message);
         }
-        let profiles = crate::config::model::ResticProfileConfig::load_from_path(profiles_path)?;
+        let mut profiles =
+            crate::config::model::ResticProfileConfig::load_from_path(profiles_path)?;
+        if normalize_runtime_sftp_configuration(&mut profiles, profiles_path, capabilities)? {
+            let yaml = serde_yaml::to_string(&profiles)?;
+            crate::config::model::save_secure_file(profiles_path, &yaml)?;
+        }
         let profile_names = profiles.profile_names();
         if profile_names.is_empty() {
             let message = match language {
@@ -2408,12 +2656,16 @@ impl LiveConfigSnapshot {
     }
 }
 
-const WIZARD_STATE_FILENAMES: [&str; 6] = [
+const WIZARD_STATE_FILENAMES: [&str; 10] = [
     "enc",
     "id_ed25519",
     "id_ed25519.pub",
     "id_ed25519_secondary",
     "id_ed25519_secondary.pub",
+    "id_rsa",
+    "id_rsa.pub",
+    "id_rsa_secondary",
+    "id_rsa_secondary.pub",
     SFTP_KNOWN_HOSTS_FILENAME,
 ];
 
@@ -2537,12 +2789,18 @@ pub fn resolve_dependency_install_dir(home_dir: &Path) -> Result<std::path::Path
     Ok(home_dir.join(".local/bin"))
 }
 
+const RESTIC_DEPENDENCY_URL: &str =
+    "https://github.com/restic/restic/releases/download/v0.16.4/restic_0.16.4_linux_amd64.bz2";
+const RCLONE_DEPENDENCY_URL: &str =
+    "https://downloads.rclone.org/v1.68.1/rclone-v1.68.1-linux-amd64.zip";
+const RESTICPROFILE_DEPENDENCY_URL: &str = "https://github.com/creativeprojects/resticprofile/releases/download/v0.28.0/resticprofile_0.28.0_linux_amd64.tar.gz";
+
 pub fn run_setup_dependencies_with_runner_at_dir<R: CommandRunner + ?Sized>(
     runner: &R,
     install_dir: &Path,
     language: Language,
 ) -> Result<String> {
-    run_setup_dependencies_with_runner_at_dir_internal(runner, install_dir, language, false)
+    run_setup_dependencies_with_runner_at_dir_internal(runner, install_dir, language, true)
 }
 
 pub fn run_setup_dependencies_with_verified_online_downloads<R: CommandRunner + ?Sized>(
@@ -2570,18 +2828,9 @@ fn run_setup_dependencies_with_runner_at_dir_internal<R: CommandRunner + ?Sized>
     let install_target_dir = install_dir.to_string_lossy().into_owned();
 
     let binaries = [
-        (
-            "restic",
-            "https://github.com/restic/restic/releases/download/v0.16.4/restic_0.16.4_linux_amd64.bz2",
-        ),
-        (
-            "rclone",
-            "https://downloads.rclone.org/rclone-current-linux-amd64.zip",
-        ),
-        (
-            "resticprofile",
-            "https://github.com/creativeprojects/resticprofile/releases/download/v0.28.0/resticprofile_0.28.0_linux_amd64.tar.gz",
-        ),
+        ("restic", RESTIC_DEPENDENCY_URL),
+        ("rclone", RCLONE_DEPENDENCY_URL),
+        ("resticprofile", RESTICPROFILE_DEPENDENCY_URL),
     ];
 
     for (bin, url) in &binaries {
@@ -2690,31 +2939,32 @@ fn run_setup_dependencies_with_runner_at_dir_internal<R: CommandRunner + ?Sized>
     }
 }
 
-pub fn build_verified_download_command(bin: &str, _url: &str, target_dir: &str) -> String {
-    let (url, archive, checksum) = match bin {
-        "restic" => (
-            "https://github.com/restic/restic/releases/download/v0.16.4/restic_0.16.4_linux_amd64.bz2",
+pub fn build_verified_download_command(bin: &str, url: &str, target_dir: &str) -> String {
+    let (archive, checksum) = match (bin, url) {
+        ("restic", RESTIC_DEPENDENCY_URL) => (
             "restic.bz2",
             "3d4d43c169a9e28ea76303b1e8b810f0dcede7478555fdaa8959971ad499e324",
         ),
-        "rclone" => (
-            "https://downloads.rclone.org/v1.68.1/rclone-v1.68.1-linux-amd64.zip",
+        ("rclone", RCLONE_DEPENDENCY_URL) => (
             "rclone.zip",
             "34f34743b1831523cd2e0aff74447b717e2d62fe1b598e91703899e0c0689568",
         ),
-        "resticprofile" => (
-            "https://github.com/creativeprojects/resticprofile/releases/download/v0.28.0/resticprofile_0.28.0_linux_amd64.tar.gz",
+        ("resticprofile", RESTICPROFILE_DEPENDENCY_URL) => (
             "resticprofile.tar.gz",
             "8a8b8c611ea86beb9eb095417e851c88e3f1f9e2fda894ea9b2664a94368716a",
         ),
-        _ => return format!("echo Unknown binary {bin}"),
+        _ => {
+            return format!(
+                "echo 'Unsupported verified dependency artifact: {bin} {url}' >&2; exit 1"
+            );
+        }
     };
     let archive_path = format!("/tmp/backup-dependency-{archive}");
     let checksum_path = format!("/tmp/backup-dependency-{archive}.sha256");
     let extraction = match bin {
         "restic" => format!("bunzip2 -c {archive_path} > {target_dir}/restic"),
         "rclone" => format!(
-            "rm -rf /tmp/backup-dependency-rclone && unzip -q {archive_path} -d /tmp/backup-dependency-rclone && cp /tmp/backup-dependency-rclone/rclone-v1.68.1-linux-amd64/rclone {target_dir}/rclone"
+            "rm -rf /tmp/backup-dependency-rclone && unzip -q {archive_path} -d /tmp/backup-dependency-rclone && find /tmp/backup-dependency-rclone -type f -name rclone -exec cp {{}} {target_dir}/rclone \\;"
         ),
         "resticprofile" => format!(
             "rm -rf /tmp/backup-dependency-resticprofile && mkdir -p /tmp/backup-dependency-resticprofile && tar -xzf {archive_path} -C /tmp/backup-dependency-resticprofile && cp /tmp/backup-dependency-resticprofile/resticprofile {target_dir}/resticprofile"

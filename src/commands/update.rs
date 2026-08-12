@@ -167,7 +167,7 @@ pub fn perform_self_replace_at_path_with_runner_and_checksum<R: CommandRunner + 
         return Err(anyhow!("Downloaded update package was not created"));
     }
     if let Some(expected_checksum) = expected_checksum {
-        verify_archive_checksum(&archive_path, expected_checksum)?;
+        crate::commands::setup::verify_sha256_file(&archive_path, expected_checksum)?;
     }
 
     // 2. 압축 해제
@@ -254,23 +254,6 @@ pub fn execute_update_check_with_runner<R: CommandRunner + ?Sized>(
             current_version
         ))
     }
-}
-
-fn verify_archive_checksum(path: &Path, expected: &str) -> Result<()> {
-    let expected = expected.trim().to_ascii_lowercase();
-    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(anyhow!("invalid SHA-256 artifact digest"));
-    }
-    use sha2::{Digest, Sha256};
-    let actual = Sha256::digest(std::fs::read(path)?);
-    let actual = actual
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    if actual != expected {
-        return Err(anyhow!("update archive SHA-256 mismatch"));
-    }
-    Ok(())
 }
 
 pub fn execute_update_check(current_version: &str) -> Result<String> {

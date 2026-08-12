@@ -38,6 +38,14 @@ fn platform_detection_recognizes_centos_release_without_os_release_file() {
 }
 
 #[test]
+fn platform_detection_does_not_treat_other_centos_6_releases_as_6_10() {
+    let capabilities =
+        PlatformCapabilities::from_release_metadata("CentOS Linux release 6.9 (Final)", "x86_64");
+
+    assert_ne!(capabilities.profile, PlatformProfile::Centos6X86_64);
+}
+
+#[test]
 fn modern_profile_keeps_systemd_chrony_and_ed25519_defaults() {
     let capabilities = PlatformCapabilities::modern_linux_x86_64();
 
@@ -139,6 +147,80 @@ fn legacy_sftp_connection_registers_host_key_before_strict_connection() {
 }
 
 #[test]
+fn legacy_sftp_reuse_accepts_the_strict_host_key_policy_it_generates() {
+    use std::collections::BTreeMap;
+
+    let capabilities = PlatformCapabilities::centos_6_10_x86_64();
+    let temp = tempfile::tempdir().unwrap();
+    let key = temp.path().join("id_rsa");
+    std::fs::write(&key, "private key").unwrap();
+    std::fs::write(
+        temp.path().join("known_hosts"),
+        "[sftp.example]:22 ssh-rsa AAAA\n",
+    )
+    .unwrap();
+    let mut options = BTreeMap::new();
+    options.insert(
+        "sftp.args".into(),
+        format!(
+            "-i {} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile={}",
+            key.display(),
+            temp.path().join("known_hosts").display()
+        ),
+    );
+
+    let reused = backup::commands::setup::resolve_reused_sftp_config_with_capabilities(
+        "sftp:backup@sftp.example:/backup",
+        Some(&options),
+        temp.path(),
+        &capabilities,
+    )
+    .unwrap();
+
+    assert_eq!(reused.key_file.as_deref(), Some(key.to_str().unwrap()));
+}
+
+#[test]
+fn runtime_sftp_correction_requires_a_managed_known_hosts_file() {
+    use std::collections::BTreeMap;
+
+    let capabilities = PlatformCapabilities::centos_6_10_x86_64();
+    let temp = tempfile::tempdir().unwrap();
+    let key = temp.path().join("id_rsa");
+    std::fs::write(&key, "private key").unwrap();
+    let mut options = BTreeMap::from([(
+        "sftp.args".into(),
+        format!(
+            "-i {} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+            key.display()
+        ),
+    )]);
+
+    let changed = backup::commands::setup::correct_managed_sftp_options_with_capabilities(
+        "sftp:backup@sftp.example:/backup",
+        &mut options,
+        temp.path(),
+        &capabilities,
+    )
+    .unwrap();
+
+    assert!(!changed);
+    assert!(options["sftp.args"].contains("accept-new"));
+
+    std::fs::write(temp.path().join("known_hosts"), "").unwrap();
+    let changed = backup::commands::setup::correct_managed_sftp_options_with_capabilities(
+        "sftp:backup@sftp.example:/backup",
+        &mut options,
+        temp.path(),
+        &capabilities,
+    )
+    .unwrap();
+
+    assert!(changed);
+    assert!(options["sftp.args"].contains("StrictHostKeyChecking=yes"));
+}
+
+#[test]
 fn ntpd_diagnostic_is_used_when_chrony_is_not_available() {
     let capabilities = PlatformCapabilities::centos_6_10_x86_64();
     let runner = StrictCommandRunner::new([StrictCommandRunner::expectation(
@@ -156,6 +238,27 @@ fn ntpd_diagnostic_is_used_when_chrony_is_not_available() {
 
     assert_eq!(status, DoctorStatus::Pass);
     assert!(detail.contains("ntpd"));
+    runner.assert_exhausted().unwrap();
+}
+
+#[test]
+fn ntpd_diagnostic_warns_when_no_peer_is_selected() {
+    let capabilities = PlatformCapabilities::centos_6_10_x86_64();
+    let runner = StrictCommandRunner::new([StrictCommandRunner::expectation(
+        "ntpq",
+        ["-pn"],
+        &[],
+        CommandOutput {
+            status_code: 0,
+            stdout: "     remote           refid      st t when poll reach   delay   offset  jitter\nserver.example .INIT. 16 u - 64 0 0.000 0.000 0.000".into(),
+            stderr: String::new(),
+        },
+    )]);
+
+    let (status, detail) = check_time_sync_with_capabilities(&capabilities, &runner);
+
+    assert_eq!(status, DoctorStatus::Warn);
+    assert!(detail.contains("synchronization unavailable"));
     runner.assert_exhausted().unwrap();
 }
 
@@ -206,6 +309,59 @@ fn report_exposes_generic_legacy_time_sync_and_scheduler_fields() {
 }
 
 #[test]
+fn report_marks_failed_timedatectl_as_unavailable() {
+    let mut capabilities = PlatformCapabilities::modern_linux_x86_64();
+    capabilities.chrony_available = false;
+    capabilities.ntpd_available = false;
+    let meta = backup::commands::report::AuditReportMeta::new("host", "now")
+        .with_platform_capabilities(capabilities);
+    let runner = support::MockExecutor::new();
+    runner.push_output(
+        "timedatectl",
+        CommandOutput {
+            status_code: 1,
+            stdout: String::new(),
+            stderr: "timedatectl failed".into(),
+        },
+    );
+
+    let data = backup::commands::report::RealReportData::collect_with_meta_with_runner(
+        &backup::commands::report::ReportConfig::default(),
+        &meta,
+        &runner,
+    );
+
+    assert_eq!(data.time_sync_status, "unavailable");
+}
+
+#[test]
+fn report_queries_the_scheduler_unit_registered_by_backup_scheduler() {
+    let capabilities = PlatformCapabilities::modern_linux_x86_64();
+    let meta = backup::commands::report::AuditReportMeta::new("host", "now")
+        .with_platform_capabilities(capabilities);
+    let runner = support::MockExecutor::new();
+
+    let _ = backup::commands::report::RealReportData::collect_with_meta_with_runner(
+        &backup::commands::report::ReportConfig::default(),
+        &meta,
+        &runner,
+    );
+
+    let calls = runner.get_calls();
+    assert!(calls.iter().any(|(program, args)| {
+        program == "systemctl"
+            && args
+                == &[
+                    "is-enabled".to_string(),
+                    "backup-pipeline.timer".to_string(),
+                ]
+    }));
+    assert!(!calls.iter().any(|(program, args)| {
+        program == "systemctl" && args.iter().any(|arg| arg == "backup.timer")
+    }));
+}
+
+#[test]
 fn cron_registration_fails_before_crontab_when_crond_capability_is_false() {
     let mut capabilities = PlatformCapabilities::centos_6_10_x86_64();
     capabilities.crond_running = false;
@@ -222,6 +378,35 @@ fn cron_registration_fails_before_crontab_when_crond_capability_is_false() {
 
     assert!(error.to_string().contains("crond is not running"));
     assert!(runner.calls().is_empty());
+}
+
+#[test]
+fn cron_status_and_disable_can_inspect_state_when_crond_is_stopped() {
+    let mut capabilities = PlatformCapabilities::centos_6_10_x86_64();
+    capabilities.crond_running = false;
+    let settings = SchedulerSettings::auto().with_platform_capabilities(capabilities);
+    let runner = support::MockExecutor::new();
+    runner.push_output(
+        "crontab",
+        CommandOutput {
+            status_code: 0,
+            stdout: "0 3 * * * /usr/bin/backup # backup-pipeline\n".into(),
+            stderr: String::new(),
+        },
+    );
+    let scheduler = backup::runner::scheduler::SystemScheduler::new(&runner, "/usr/bin/backup");
+
+    assert!(
+        backup::runner::scheduler::BackupScheduler::status_with_settings(&scheduler, &settings)
+            .unwrap()
+            .contains("active")
+    );
+    // The exact temporary path is intentionally not part of the public contract; a successful
+    // disable proves the daemon state is not incorrectly required for removal operations.
+    assert!(
+        backup::runner::scheduler::BackupScheduler::disable_with_settings(&scheduler, &settings,)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -252,4 +437,25 @@ fn offline_dependency_install_requires_and_verifies_sha256_manifest() {
     assert!(install_dir.join("restic").is_file());
     assert!(install_dir.join("rclone").is_file());
     assert!(install_dir.join("resticprofile").is_file());
+}
+
+#[test]
+fn verified_dependency_command_uses_the_current_artifact_url_without_legacy_fallback() {
+    let command = backup::commands::setup::build_verified_download_command(
+        "rclone",
+        "https://downloads.rclone.org/v1.68.1/rclone-v1.68.1-linux-amd64.zip",
+        "/usr/local/bin",
+    );
+
+    assert!(
+        command.contains("https://downloads.rclone.org/v1.68.1/rclone-v1.68.1-linux-amd64.zip")
+    );
+    assert!(command.contains("sha256sum -c"));
+    let rejected = backup::commands::setup::build_verified_download_command(
+        "rclone",
+        "https://downloads.example.test/rclone-current-linux-amd64.zip",
+        "/usr/local/bin",
+    );
+    assert!(rejected.contains("Unsupported verified dependency artifact"));
+    assert!(!rejected.contains("sha256sum -c"));
 }

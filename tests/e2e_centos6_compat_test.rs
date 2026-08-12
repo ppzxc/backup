@@ -26,6 +26,22 @@ fn centos6_runner_declares_the_supported_x86_64_toolchain() {
         );
     }
     assert!(!dockerfile.contains("systemd PID 1"));
+
+    let script = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/test_centos6.sh"),
+    )
+    .unwrap();
+    for required in [
+        "backup-centos6/profiles.yaml run",
+        "backup-centos6/profiles.yaml restore",
+        "backup-centos6/profiles.yaml doctor",
+        "backup-centos6/profiles.yaml report",
+        "export PATH=/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin",
+        "ssh-keyscan",
+        "StrictHostKeyChecking=yes",
+    ] {
+        assert!(script.contains(required), "CentOS smoke missing {required}");
+    }
 }
 
 #[test]

@@ -627,7 +627,10 @@ fn collect_time_sync_info<R: CommandRunner + ?Sized>(
 ) -> (String, String, String, String, String) {
     match capabilities.time_sync_method() {
         crate::platform::TimeSyncMethod::Ntpd => match runner.run("ntpq", &["-pn"]) {
-            Ok(output) if output.status_code == 0 => {
+            Ok(output)
+                if output.status_code == 0
+                    && crate::platform::ntpq_output_is_synchronized(&output.stdout) =>
+            {
                 let value = output.stdout.trim().to_owned();
                 (
                     "not-applicable".into(),
@@ -637,12 +640,19 @@ fn collect_time_sync_info<R: CommandRunner + ?Sized>(
                     "active".into(),
                 )
             }
-            Ok(output) => (
+            Ok(output) if output.status_code == 0 => (
                 "not-applicable".into(),
                 "not-applicable".into(),
                 output.stderr.clone(),
                 output.stderr,
                 "inactive".into(),
+            ),
+            Ok(output) => (
+                "not-applicable".into(),
+                "not-applicable".into(),
+                output.stderr.clone(),
+                output.stderr,
+                "unavailable".into(),
             ),
             Err(error) => (
                 "not-applicable".into(),
@@ -664,17 +674,42 @@ fn collect_time_sync_info<R: CommandRunner + ?Sized>(
         }
         crate::platform::TimeSyncMethod::Timedatectl => {
             let output = runner.run("timedatectl", &["status"]);
-            let detail = match output {
-                Ok(output) => output.stdout,
-                Err(error) => error.to_string(),
-            };
-            (
-                "not-applicable".into(),
-                "not-applicable".into(),
-                detail.clone(),
-                detail,
-                "active".into(),
-            )
+            match output {
+                Ok(output)
+                    if output.status_code == 0
+                        && timedatectl_output_is_synchronized(&output.stdout) =>
+                {
+                    let detail = output.stdout;
+                    (
+                        "not-applicable".into(),
+                        "not-applicable".into(),
+                        detail.clone(),
+                        detail,
+                        "active".into(),
+                    )
+                }
+                Ok(output) if output.status_code == 0 => (
+                    "not-applicable".into(),
+                    "not-applicable".into(),
+                    output.stdout.clone(),
+                    output.stdout,
+                    "inactive".into(),
+                ),
+                Ok(output) => (
+                    "not-applicable".into(),
+                    "not-applicable".into(),
+                    output.stderr.clone(),
+                    output.stderr,
+                    "unavailable".into(),
+                ),
+                Err(error) => (
+                    "not-applicable".into(),
+                    "not-applicable".into(),
+                    error.to_string(),
+                    error.to_string(),
+                    "unavailable".into(),
+                ),
+            }
         }
         crate::platform::TimeSyncMethod::Unavailable => (
             "not-applicable".into(),
@@ -687,8 +722,11 @@ fn collect_time_sync_info<R: CommandRunner + ?Sized>(
 }
 
 fn check_systemd_timer_status<R: CommandRunner + ?Sized>(runner: &R) -> (String, String, String) {
-    let (enabled, active) = check_service_status(runner, "backup.timer");
-    let list_out = runner.run("systemctl", &["list-timers", "backup.timer", "--no-legend"]);
+    let (enabled, active) = check_service_status(runner, "backup-pipeline.timer");
+    let list_out = runner.run(
+        "systemctl",
+        &["list-timers", "backup-pipeline.timer", "--no-legend"],
+    );
 
     let next_run = match list_out {
         Ok(out) => {
@@ -756,6 +794,13 @@ fn collect_os_info<R: CommandRunner + ?Sized>(runner: &R) -> String {
         }
     }
     "Linux System".to_string()
+}
+
+fn timedatectl_output_is_synchronized(output: &str) -> bool {
+    output.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("system clock synchronized: yes") || lower.contains("ntp service: active")
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

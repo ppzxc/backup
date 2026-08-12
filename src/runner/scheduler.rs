@@ -192,6 +192,13 @@ impl<'a, E: CommandRunner> SystemScheduler<'a, E> {
             if !capabilities.cron_available {
                 bail!("cron is unavailable according to the platform capability probe");
             }
+        }
+        Ok(())
+    }
+
+    fn ensure_cron_registration_capability(&self, settings: &SchedulerSettings) -> Result<()> {
+        self.ensure_cron_capability(settings)?;
+        if let Some(capabilities) = settings.platform_capabilities() {
             if !capabilities.crond_running {
                 bail!("crond is not running; refusing to register a cron schedule");
             }
@@ -260,7 +267,7 @@ impl<'a, E: CommandRunner> BackupScheduler for SystemScheduler<'a, E> {
             return Ok("Scheduled daily backup run with systemd".into());
         }
 
-        self.ensure_cron_capability(settings)?;
+        self.ensure_cron_registration_capability(settings)?;
         let existing = self.cron_contents()?;
         let filtered = existing
             .lines()

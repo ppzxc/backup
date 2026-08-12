@@ -115,7 +115,7 @@ impl PlatformCapabilities {
     pub fn from_release_metadata(release: &str, architecture: &str) -> Self {
         let release_lower = release.to_ascii_lowercase();
         if release_lower.contains("centos")
-            && (release_lower.contains("release 6") || release_lower.contains("6.10"))
+            && release_lower.contains("6.10")
             && architecture == "x86_64"
         {
             return Self::centos_6_10_x86_64();
@@ -286,4 +286,16 @@ fn extract_version(value: &str) -> Option<String> {
                     .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
         })
         .map(str::to_owned)
+}
+
+/// Returns whether `ntpq -pn` selected a peer for synchronization. A successful command with
+/// only an unselected peer list is not evidence that the clock is synchronized.
+pub fn ntpq_output_is_synchronized(output: &str) -> bool {
+    output.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with('*')
+            || trimmed
+                .split_whitespace()
+                .any(|field| field.starts_with('*'))
+    })
 }

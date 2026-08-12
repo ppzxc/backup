@@ -942,13 +942,21 @@ fn dispatch_inner(
                     required_profiles_path(context)?
                 };
                 require_regular_profiles_file(&init_profiles_path)?;
-                let config = ResticProfileConfig::load_from_path(&init_profiles_path)
+                let mut config = ResticProfileConfig::load_from_path(&init_profiles_path)
                     .with_context(|| {
                         format!(
                             "failed to load unified profiles configuration at {}",
                             init_profiles_path.display()
                         )
                     })?;
+                if crate::commands::setup::normalize_runtime_sftp_configuration(
+                    &mut config,
+                    &init_profiles_path,
+                    &context.platform_capabilities,
+                )? {
+                    let yaml = serde_yaml::to_string(&config)?;
+                    crate::config::model::save_secure_file(&init_profiles_path, &yaml)?;
+                }
                 let targets = backend_initialization_targets(&config)?;
                 let mut output = Vec::new();
                 let mut failures = Vec::new();
@@ -1468,12 +1476,21 @@ fn required_profiles_path(context: &CliRuntimeContext) -> Result<PathBuf> {
 fn load_profiles(context: &CliRuntimeContext) -> Result<ResticProfileConfig> {
     let path = required_profiles_path(context)?;
     require_regular_profiles_file(&path)?;
-    ResticProfileConfig::load_from_path(&path).with_context(|| {
+    let mut config = ResticProfileConfig::load_from_path(&path).with_context(|| {
         format!(
             "failed to load unified profiles configuration at {}",
             path.display()
         )
-    })
+    })?;
+    if crate::commands::setup::normalize_runtime_sftp_configuration(
+        &mut config,
+        &path,
+        &context.platform_capabilities,
+    )? {
+        let yaml = serde_yaml::to_string(&config)?;
+        crate::config::model::save_secure_file(&path, &yaml)?;
+    }
+    Ok(config)
 }
 
 fn require_regular_profiles_file(path: &std::path::Path) -> Result<()> {

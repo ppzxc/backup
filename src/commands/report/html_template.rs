@@ -526,6 +526,7 @@ fn render_time_sync_html(data: &RealReportData) -> String {
   <h2>1. NTP 시각 동기화 서비스 상태</h2>
   <table class="meta-table">
     <tr><td class="label">time_sync_method</td><td>{}</td><td class="label">time_sync_status</td><td>{}</td></tr>
+    <tr><td class="label">scheduler_backend</td><td>{}</td><td class="label">scheduler_status</td><td>{}</td></tr>
   </table>
   <table class="data-table">
     <thead><tr><th>점검 항목</th><th>ISMS 합격 기준</th><th>현재 상태</th><th>결과</th></tr></thead>
@@ -544,9 +545,9 @@ fn render_time_sync_html(data: &RealReportData) -> String {
       </tr>
     </tbody>
   </table>
-  <h2>2. 타임서버 연동 목록 (chronyc sources -v)</h2>
+  <h2>2. 타임서버 연동 목록</h2>
   <div class="pre-block">{}</div>
-  <h2>3. 시각 오차 상세 (chronyc tracking)</h2>
+  <h2>3. 시각 오차 상세</h2>
   <div class="pre-block">{}</div>
   <h2>4. 설정 파일 권한 확인</h2>
   <table class="data-table">
@@ -572,6 +573,8 @@ fn render_time_sync_html(data: &RealReportData) -> String {
         data.hostname,
         data.time_sync_method,
         data.time_sync_status,
+        data.scheduler_backend,
+        data.scheduler_status,
         data.chrony_enabled,
         data.chrony_enabled,
         data.chrony_active,

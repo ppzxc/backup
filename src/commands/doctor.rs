@@ -490,13 +490,18 @@ pub fn check_time_sync_with_capabilities<C: CommandRunner + ?Sized>(
 ) -> (DoctorStatus, String) {
     if capabilities.time_sync_method() == crate::platform::TimeSyncMethod::Ntpd {
         return match runner.run("ntpq", &["-pn"]) {
-            Ok(out) if out.status_code == 0 && !out.stdout.trim().is_empty() => (
-                DoctorStatus::Pass,
-                format!(
-                    "ntpd active ({})",
-                    out.stdout.lines().next().unwrap_or("synced")
-                ),
-            ),
+            Ok(out)
+                if out.status_code == 0
+                    && crate::platform::ntpq_output_is_synchronized(&out.stdout) =>
+            {
+                (
+                    DoctorStatus::Pass,
+                    format!(
+                        "ntpd active ({})",
+                        out.stdout.lines().next().unwrap_or("synced")
+                    ),
+                )
+            }
             Ok(out) => (
                 DoctorStatus::Warn,
                 format!(
