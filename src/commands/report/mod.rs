@@ -365,6 +365,10 @@ pub struct RealReportData {
     pub snapshots: Vec<serde_json::Value>,
     pub audit: crate::config::model::AuditConfig,
     pub os_info: String,
+    pub time_sync_method: String,
+    pub time_sync_status: String,
+    pub scheduler_backend: String,
+    pub scheduler_status: String,
     pub failure_diagnostic: Option<String>,
     restore_drill_evidence: Option<RestoreDrillEvidence>,
 }
@@ -446,6 +450,21 @@ impl RealReportData {
         meta: &AuditReportMeta,
         runner: &R,
     ) -> Self {
+        let capabilities = meta.platform_capabilities.clone().unwrap_or_default();
+        Self::collect_with_report_config_with_runner_and_capabilities(
+            config,
+            meta,
+            runner,
+            &capabilities,
+        )
+    }
+
+    pub fn collect_with_report_config_with_runner_and_capabilities<R: CommandRunner + ?Sized>(
+        config: &ReportConfig,
+        meta: &AuditReportMeta,
+        runner: &R,
+        capabilities: &crate::platform::PlatformCapabilities,
+    ) -> Self {
         let hostname = if meta.host_name.is_empty() {
             "localhost".into()
         } else {
@@ -470,11 +489,11 @@ impl RealReportData {
         let (backup_env_file_perm, backup_env_file_safe) =
             get_file_perm_and_safety(backup_env_file, 0o600);
 
-        let (chrony_enabled, chrony_active) = check_service_status(runner, "chrony");
-        let (chrony_sources, chrony_tracking) = collect_chrony_info(runner);
+        let (chrony_enabled, chrony_active, chrony_sources, chrony_tracking, time_sync_status) =
+            collect_time_sync_info(runner, capabilities);
         let (chrony_conf_perm, _) = get_file_perm_and_safety(Path::new("/etc/chrony.conf"), 0o644);
 
-        let (timer_enabled, timer_active, next_run) = check_systemd_timer_status(runner);
+        let (timer_enabled, timer_active, next_run) = collect_scheduler_info(runner, capabilities);
         let os_info = collect_os_info(runner);
 
         let audit = config.audit.clone();
@@ -495,11 +514,16 @@ impl RealReportData {
             chrony_tracking,
             chrony_conf_perm,
             timer_enabled,
-            timer_active,
+            timer_active: timer_active.clone(),
             next_run,
             snapshots: vec![],
             audit,
             os_info,
+            time_sync_method: format!("{:?}", capabilities.time_sync_method()).to_ascii_lowercase(),
+            time_sync_status,
+            scheduler_backend: format!("{:?}", capabilities.scheduler_selection())
+                .to_ascii_lowercase(),
+            scheduler_status: timer_active.clone(),
             failure_diagnostic: None,
             restore_drill_evidence: None,
         }
@@ -597,6 +621,71 @@ fn collect_chrony_info<R: CommandRunner + ?Sized>(runner: &R) -> (String, String
     (sources, tracking)
 }
 
+fn collect_time_sync_info<R: CommandRunner + ?Sized>(
+    runner: &R,
+    capabilities: &crate::platform::PlatformCapabilities,
+) -> (String, String, String, String, String) {
+    match capabilities.time_sync_method() {
+        crate::platform::TimeSyncMethod::Ntpd => match runner.run("ntpq", &["-pn"]) {
+            Ok(output) if output.status_code == 0 => {
+                let value = output.stdout.trim().to_owned();
+                (
+                    "not-applicable".into(),
+                    "not-applicable".into(),
+                    value.clone(),
+                    value,
+                    "active".into(),
+                )
+            }
+            Ok(output) => (
+                "not-applicable".into(),
+                "not-applicable".into(),
+                output.stderr.clone(),
+                output.stderr,
+                "inactive".into(),
+            ),
+            Err(error) => (
+                "not-applicable".into(),
+                "not-applicable".into(),
+                error.to_string(),
+                error.to_string(),
+                "unavailable".into(),
+            ),
+        },
+        crate::platform::TimeSyncMethod::Chrony => {
+            let (enabled, active) = check_service_status(runner, "chrony");
+            let (sources, tracking) = collect_chrony_info(runner);
+            let status = if active == "active" {
+                "active"
+            } else {
+                "inactive"
+            };
+            (enabled, active, sources, tracking, status.into())
+        }
+        crate::platform::TimeSyncMethod::Timedatectl => {
+            let output = runner.run("timedatectl", &["status"]);
+            let detail = match output {
+                Ok(output) => output.stdout,
+                Err(error) => error.to_string(),
+            };
+            (
+                "not-applicable".into(),
+                "not-applicable".into(),
+                detail.clone(),
+                detail,
+                "active".into(),
+            )
+        }
+        crate::platform::TimeSyncMethod::Unavailable => (
+            "not-applicable".into(),
+            "not-applicable".into(),
+            "unavailable".into(),
+            "unavailable".into(),
+            "unavailable".into(),
+        ),
+    }
+}
+
 fn check_systemd_timer_status<R: CommandRunner + ?Sized>(runner: &R) -> (String, String, String) {
     let (enabled, active) = check_service_status(runner, "backup.timer");
     let list_out = runner.run("systemctl", &["list-timers", "backup.timer", "--no-legend"]);
@@ -614,6 +703,39 @@ fn check_systemd_timer_status<R: CommandRunner + ?Sized>(runner: &R) -> (String,
     };
 
     (enabled, active, next_run)
+}
+
+fn collect_scheduler_info<R: CommandRunner + ?Sized>(
+    runner: &R,
+    capabilities: &crate::platform::PlatformCapabilities,
+) -> (String, String, String) {
+    match capabilities.scheduler_selection() {
+        crate::platform::SchedulerSelection::Systemd => check_systemd_timer_status(runner),
+        crate::platform::SchedulerSelection::Cron => match runner.run("crontab", &["-l"]) {
+            Ok(output) if output.status_code == 0 => {
+                let active = output
+                    .stdout
+                    .lines()
+                    .any(|line| line.contains("# backup-pipeline"));
+                (
+                    if active { "enabled" } else { "disabled" }.into(),
+                    if active { "active" } else { "inactive" }.into(),
+                    "cron schedule".into(),
+                )
+            }
+            Ok(_) => (
+                "disabled".into(),
+                "inactive".into(),
+                "No cron scheduled".into(),
+            ),
+            Err(error) => ("unknown".into(), "unknown".into(), error.to_string()),
+        },
+        crate::platform::SchedulerSelection::Unavailable => (
+            "not-applicable".into(),
+            "unavailable".into(),
+            "No supported scheduler".into(),
+        ),
+    }
 }
 
 fn collect_os_info<R: CommandRunner + ?Sized>(runner: &R) -> String {
@@ -744,6 +866,7 @@ pub struct AuditReportMeta {
     pub host_name: String,
     pub timestamp: String,
     pub profiles_path: Option<PathBuf>,
+    pub platform_capabilities: Option<crate::platform::PlatformCapabilities>,
 }
 
 impl AuditReportMeta {
@@ -753,6 +876,7 @@ impl AuditReportMeta {
             host_name: "localhost".into(),
             timestamp,
             profiles_path: None,
+            platform_capabilities: None,
         }
     }
 
@@ -761,11 +885,20 @@ impl AuditReportMeta {
         self
     }
 
+    pub fn with_platform_capabilities(
+        mut self,
+        capabilities: crate::platform::PlatformCapabilities,
+    ) -> Self {
+        self.platform_capabilities = Some(capabilities);
+        self
+    }
+
     pub fn new(host_name: impl Into<String>, timestamp: impl Into<String>) -> Self {
         Self {
             host_name: host_name.into(),
             timestamp: timestamp.into(),
             profiles_path: None,
+            platform_capabilities: None,
         }
     }
 }

@@ -29,6 +29,13 @@ pub fn is_newer_version(current: &str, latest: &str) -> bool {
 pub fn fetch_latest_release_info_with_runner<R: CommandRunner + ?Sized>(
     runner: &R,
 ) -> Result<(String, String)> {
+    let (tag, url, _) = fetch_latest_release_info_with_checksum(runner)?;
+    Ok((tag, url))
+}
+
+fn fetch_latest_release_info_with_checksum<R: CommandRunner + ?Sized>(
+    runner: &R,
+) -> Result<(String, String, Option<String>)> {
     let output = runner.run(
         "curl",
         &[
@@ -56,6 +63,7 @@ pub fn fetch_latest_release_info_with_runner<R: CommandRunner + ?Sized>(
 
     let target_asset_name = format!("backup-{}-x86_64-unknown-linux-musl.tar.gz", tag_name);
     let mut download_url = String::new();
+    let mut checksum = None;
 
     if let Some(assets) = json["assets"].as_array() {
         for asset in assets {
@@ -63,6 +71,10 @@ pub fn fetch_latest_release_info_with_runner<R: CommandRunner + ?Sized>(
                 if name == target_asset_name {
                     if let Some(url) = asset["browser_download_url"].as_str() {
                         download_url = url.to_string();
+                        checksum = asset["digest"]
+                            .as_str()
+                            .and_then(|digest| digest.strip_prefix("sha256:"))
+                            .map(str::to_owned);
                         break;
                     }
                 }
@@ -77,7 +89,7 @@ pub fn fetch_latest_release_info_with_runner<R: CommandRunner + ?Sized>(
         );
     }
 
-    Ok((tag_name, download_url))
+    Ok((tag_name, download_url, checksum))
 }
 
 pub fn fetch_latest_release_info() -> Result<(String, String)> {
@@ -109,6 +121,22 @@ pub fn perform_self_replace_at_path_with_runner<R: CommandRunner + ?Sized>(
     staging_parent: &Path,
     runner: &R,
 ) -> Result<()> {
+    perform_self_replace_at_path_with_runner_and_checksum(
+        download_url,
+        current_exe,
+        staging_parent,
+        runner,
+        None,
+    )
+}
+
+pub fn perform_self_replace_at_path_with_runner_and_checksum<R: CommandRunner + ?Sized>(
+    download_url: &str,
+    current_exe: &Path,
+    staging_parent: &Path,
+    runner: &R,
+    expected_checksum: Option<&str>,
+) -> Result<()> {
     if let Some(parent) = current_exe.parent() {
         if !parent.exists() {
             return Err(anyhow!(
@@ -137,6 +165,9 @@ pub fn perform_self_replace_at_path_with_runner<R: CommandRunner + ?Sized>(
     }
     if !archive_path.is_file() {
         return Err(anyhow!("Downloaded update package was not created"));
+    }
+    if let Some(expected_checksum) = expected_checksum {
+        verify_archive_checksum(&archive_path, expected_checksum)?;
     }
 
     // 2. 압축 해제
@@ -198,9 +229,21 @@ pub fn execute_update_check_with_runner<R: CommandRunner + ?Sized>(
     runner: &R,
 ) -> Result<String> {
     tracing::info!(current_version = %current_version, "Checking for software updates");
-    let (latest_tag, download_url) = fetch_latest_release_info_with_runner(runner)?;
+    let (latest_tag, download_url, checksum) = fetch_latest_release_info_with_checksum(runner)?;
     if is_newer_version(current_version, &latest_tag) {
-        perform_self_replace_with_runner(&download_url, runner)?;
+        let checksum = checksum
+            .ok_or_else(|| anyhow!("latest release does not provide a SHA-256 artifact digest"))?;
+        let current_exe = std::env::current_exe()?;
+        let staging_parent = current_exe
+            .parent()
+            .ok_or_else(|| anyhow!("current executable has no parent directory"))?;
+        perform_self_replace_at_path_with_runner_and_checksum(
+            &download_url,
+            &current_exe,
+            staging_parent,
+            runner,
+            Some(&checksum),
+        )?;
         Ok(format!(
             "Updating from {} to {}...\nSuccessfully updated backup to version {}!",
             current_version, latest_tag, latest_tag
@@ -211,6 +254,23 @@ pub fn execute_update_check_with_runner<R: CommandRunner + ?Sized>(
             current_version
         ))
     }
+}
+
+fn verify_archive_checksum(path: &Path, expected: &str) -> Result<()> {
+    let expected = expected.trim().to_ascii_lowercase();
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(anyhow!("invalid SHA-256 artifact digest"));
+    }
+    use sha2::{Digest, Sha256};
+    let actual = Sha256::digest(std::fs::read(path)?);
+    let actual = actual
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if actual != expected {
+        return Err(anyhow!("update archive SHA-256 mismatch"));
+    }
+    Ok(())
 }
 
 pub fn execute_update_check(current_version: &str) -> Result<String> {

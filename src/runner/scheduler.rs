@@ -22,6 +22,7 @@ pub struct SchedulerSettings {
     pub mode: SchedulerMode,
     pub calendar: String,
     pub force_cron: bool,
+    platform_capabilities: Option<crate::platform::PlatformCapabilities>,
 }
 
 impl SchedulerSettings {
@@ -30,12 +31,25 @@ impl SchedulerSettings {
             mode,
             calendar: calendar.into(),
             force_cron: false,
+            platform_capabilities: None,
         }
     }
 
     pub fn with_force_cron(mut self, force_cron: bool) -> Self {
         self.force_cron = force_cron;
         self
+    }
+
+    pub fn with_platform_capabilities(
+        mut self,
+        capabilities: crate::platform::PlatformCapabilities,
+    ) -> Self {
+        self.platform_capabilities = Some(capabilities);
+        self
+    }
+
+    pub fn platform_capabilities(&self) -> Option<&crate::platform::PlatformCapabilities> {
+        self.platform_capabilities.as_ref()
     }
 
     pub fn auto() -> Self {
@@ -102,11 +116,21 @@ impl<'a, E: CommandRunner> SystemScheduler<'a, E> {
 
     fn systemd_available(&self, settings: &SchedulerSettings) -> Result<bool> {
         match settings.mode {
-            SchedulerMode::Systemd => Ok(true),
+            SchedulerMode::Systemd => {
+                if let Some(capabilities) = settings.platform_capabilities() {
+                    if !capabilities.systemd_available {
+                        bail!("systemd is unavailable according to the platform capability probe");
+                    }
+                }
+                Ok(true)
+            }
             SchedulerMode::Cron => Ok(false),
             SchedulerMode::Auto => {
                 if settings.force_cron {
                     return Ok(false);
+                }
+                if let Some(capabilities) = settings.platform_capabilities() {
+                    return Ok(capabilities.systemd_available);
                 }
                 match self.executor.run("systemctl", &["--version"]) {
                     Ok(output) if output.status_code == 0 => Ok(true),
@@ -160,6 +184,18 @@ impl<'a, E: CommandRunner> SystemScheduler<'a, E> {
         file.flush()?;
         let path = file.path().to_string_lossy().into_owned();
         self.checked("crontab", &[&path])?;
+        Ok(())
+    }
+
+    fn ensure_cron_capability(&self, settings: &SchedulerSettings) -> Result<()> {
+        if let Some(capabilities) = settings.platform_capabilities() {
+            if !capabilities.cron_available {
+                bail!("cron is unavailable according to the platform capability probe");
+            }
+            if !capabilities.crond_running {
+                bail!("crond is not running; refusing to register a cron schedule");
+            }
+        }
         Ok(())
     }
 
@@ -224,6 +260,7 @@ impl<'a, E: CommandRunner> BackupScheduler for SystemScheduler<'a, E> {
             return Ok("Scheduled daily backup run with systemd".into());
         }
 
+        self.ensure_cron_capability(settings)?;
         let existing = self.cron_contents()?;
         let filtered = existing
             .lines()
@@ -278,6 +315,7 @@ impl<'a, E: CommandRunner> BackupScheduler for SystemScheduler<'a, E> {
             self.checked_or_missing("systemctl", &["reset-failed", "backup-pipeline.service"])?;
             return Ok("Disabled scheduled backup run with systemd".into());
         }
+        self.ensure_cron_capability(settings)?;
         let existing = self.cron_contents()?;
         let filtered = existing
             .lines()
@@ -317,6 +355,7 @@ impl<'a, E: CommandRunner> BackupScheduler for SystemScheduler<'a, E> {
             }
             bail!("systemctl failed: {}", error_message(&output));
         }
+        self.ensure_cron_capability(settings)?;
         let cron = self.cron_contents()?;
         Ok(if cron.contains(CRON_MARKER) {
             "active (cron)".into()

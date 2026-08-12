@@ -15,6 +15,7 @@ pub enum DoctorStatus {
     Fail,
     Warn,
     Unavailable,
+    NotApplicable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +91,25 @@ impl SystemHealthDiagnoser {
         runner: &C,
         config_path: Option<&Path>,
         host_name: &str,
+    ) -> SystemHealthSnapshot {
+        Self::diagnose_with_runner_and_host_and_capabilities(
+            rclone,
+            runner,
+            config_path,
+            host_name,
+            &crate::platform::PlatformCapabilities::default(),
+        )
+    }
+
+    pub fn diagnose_with_runner_and_host_and_capabilities<
+        R: RcloneRunner + ?Sized,
+        C: CommandRunner + ?Sized,
+    >(
+        rclone: &R,
+        runner: &C,
+        config_path: Option<&Path>,
+        host_name: &str,
+        capabilities: &crate::platform::PlatformCapabilities,
     ) -> SystemHealthSnapshot {
         let timestamp = format!("{:?}", std::time::SystemTime::now());
 
@@ -261,20 +281,55 @@ impl SystemHealthDiagnoser {
         });
 
         // 3. Time Sync Item
-        let (ntp_status, ntp_detail) = check_ntp_sync_with_runner(runner);
+        let (ntp_status, ntp_detail) = check_time_sync_with_capabilities(capabilities, runner);
         items.push(DoctorItem {
             category: DoctorCategory::System,
             criterion: "시각 동기화 (ISMS-P 2.10.1)".into(),
             status: ntp_status,
             detail: ntp_detail,
         });
+        items.push(DoctorItem {
+            category: DoctorCategory::System,
+            criterion: "time_sync_method".into(),
+            status: if matches!(
+                capabilities.time_sync_method(),
+                crate::platform::TimeSyncMethod::Unavailable
+            ) {
+                DoctorStatus::Unavailable
+            } else {
+                DoctorStatus::Pass
+            },
+            detail: format!("{:?}", capabilities.time_sync_method()),
+        });
+        if !capabilities.chrony_available {
+            items.push(DoctorItem {
+                category: DoctorCategory::System,
+                criterion: "chrony_service".into(),
+                status: DoctorStatus::NotApplicable,
+                detail: "chrony is not applicable; using the detected time-sync provider".into(),
+            });
+        }
 
-        let (scheduler_status, scheduler_detail) = check_scheduler_with_runner(runner);
+        let (scheduler_status, scheduler_detail) =
+            check_scheduler_with_capabilities(capabilities, runner);
         items.push(DoctorItem {
             category: DoctorCategory::System,
             criterion: "타이머 스케줄러 헬스체크".into(),
             status: scheduler_status,
             detail: scheduler_detail,
+        });
+        items.push(DoctorItem {
+            category: DoctorCategory::System,
+            criterion: "scheduler_backend".into(),
+            status: if matches!(
+                capabilities.scheduler_selection(),
+                crate::platform::SchedulerSelection::Unavailable
+            ) {
+                DoctorStatus::Unavailable
+            } else {
+                DoctorStatus::Pass
+            },
+            detail: format!("{:?}", capabilities.scheduler_selection()),
         });
 
         // 4. Restore Drill RTO Item: use the same concrete tagged-snapshot Evidence seam as
@@ -426,6 +481,35 @@ pub fn check_ntp_sync() -> (DoctorStatus, String) {
 }
 
 pub fn check_ntp_sync_with_runner<C: CommandRunner + ?Sized>(runner: &C) -> (DoctorStatus, String) {
+    check_time_sync_with_capabilities(&crate::platform::PlatformCapabilities::default(), runner)
+}
+
+pub fn check_time_sync_with_capabilities<C: CommandRunner + ?Sized>(
+    capabilities: &crate::platform::PlatformCapabilities,
+    runner: &C,
+) -> (DoctorStatus, String) {
+    if capabilities.time_sync_method() == crate::platform::TimeSyncMethod::Ntpd {
+        return match runner.run("ntpq", &["-pn"]) {
+            Ok(out) if out.status_code == 0 && !out.stdout.trim().is_empty() => (
+                DoctorStatus::Pass,
+                format!(
+                    "ntpd active ({})",
+                    out.stdout.lines().next().unwrap_or("synced")
+                ),
+            ),
+            Ok(out) => (
+                DoctorStatus::Warn,
+                format!(
+                    "ntpd synchronization unavailable (exit {})",
+                    out.status_code
+                ),
+            ),
+            Err(error) => (
+                DoctorStatus::Unavailable,
+                format!("ntpd unavailable: {error}"),
+            ),
+        };
+    }
     if let Ok(out) = runner.run("chronyc", &["tracking"]) {
         if out.status_code == 0
             && (out.stdout.contains("Reference ID")
@@ -496,12 +580,32 @@ pub fn run_doctor_contract_with_runner_and_diagnostics<
     config_path: Option<&Path>,
     host_name: &str,
 ) -> Result<(String, bool, String)> {
-    tracing::info!("Executing system health diagnostics checks");
-    let snapshot = SystemHealthDiagnoser::diagnose_with_runner_and_host(
+    run_doctor_contract_with_runner_and_diagnostics_with_capabilities(
         rclone,
         runner,
         config_path,
         host_name,
+        &crate::platform::PlatformCapabilities::default(),
+    )
+}
+
+pub fn run_doctor_contract_with_runner_and_diagnostics_with_capabilities<
+    R: RcloneRunner + ?Sized,
+    C: CommandRunner + ?Sized,
+>(
+    rclone: &R,
+    runner: &C,
+    config_path: Option<&Path>,
+    host_name: &str,
+    capabilities: &crate::platform::PlatformCapabilities,
+) -> Result<(String, bool, String)> {
+    tracing::info!("Executing system health diagnostics checks");
+    let snapshot = SystemHealthDiagnoser::diagnose_with_runner_and_host_and_capabilities(
+        rclone,
+        runner,
+        config_path,
+        host_name,
+        capabilities,
     );
     let passed = snapshot
         .items
@@ -510,6 +614,55 @@ pub fn run_doctor_contract_with_runner_and_diagnostics<
     let output = format_doctor_output(&snapshot);
     debug_assert_eq!(passed, output.exit_status == 0);
     Ok((output.stdout, passed, output.stderr))
+}
+
+fn check_scheduler_with_capabilities<C: CommandRunner + ?Sized>(
+    capabilities: &crate::platform::PlatformCapabilities,
+    runner: &C,
+) -> (DoctorStatus, String) {
+    match capabilities.scheduler_selection() {
+        crate::platform::SchedulerSelection::Systemd => check_scheduler_with_runner(runner),
+        crate::platform::SchedulerSelection::Cron => {
+            if !capabilities.crond_running {
+                return (DoctorStatus::Unavailable, "crond is not running".into());
+            }
+            match runner.run("crontab", &["-l"]) {
+                Ok(output) if output.status_code == 0 => {
+                    let active = output
+                        .stdout
+                        .lines()
+                        .any(|line| line.contains("# backup-pipeline"));
+                    (
+                        if active {
+                            DoctorStatus::Pass
+                        } else {
+                            DoctorStatus::Warn
+                        },
+                        if active {
+                            "backup-pipeline cron entry active".into()
+                        } else {
+                            "backup-pipeline cron entry inactive".into()
+                        },
+                    )
+                }
+                Ok(output) if output.status_code == 1 && output.stderr.contains("no crontab") => {
+                    (DoctorStatus::Warn, "no backup-pipeline cron entry".into())
+                }
+                Ok(output) => (
+                    DoctorStatus::Fail,
+                    format!("crontab query failed (exit {})", output.status_code),
+                ),
+                Err(error) => (
+                    DoctorStatus::Unavailable,
+                    format!("cron unavailable: {error}"),
+                ),
+            }
+        }
+        crate::platform::SchedulerSelection::Unavailable => (
+            DoctorStatus::Unavailable,
+            "no supported scheduler capability".into(),
+        ),
+    }
 }
 
 fn check_scheduler_with_runner<C: CommandRunner + ?Sized>(runner: &C) -> (DoctorStatus, String) {
@@ -565,6 +718,7 @@ fn doctor_status_label(status: &DoctorStatus) -> &'static str {
         DoctorStatus::Warn => "Warn",
         DoctorStatus::Fail => "Fail",
         DoctorStatus::Unavailable => "Unavailable",
+        DoctorStatus::NotApplicable => "NotApplicable",
     }
 }
 

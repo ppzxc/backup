@@ -22,6 +22,8 @@ pub struct RetentionPolicyJson {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleStatusJson {
     pub on_calendar: String,
+    pub scheduler_backend: String,
+    pub scheduler_status: String,
     pub timer_enabled: String,
     pub timer_active: String,
     pub next_run: String,
@@ -96,6 +98,8 @@ pub struct NtpSyncReportJson {
     pub hostname: String,
     pub report_date: String,
     pub chrony_service: ChronyServiceJson,
+    pub time_sync_method: String,
+    pub time_sync_status: String,
     pub sources: String,
     pub tracking: String,
     pub conf_permission: String,
@@ -147,6 +151,8 @@ pub fn render_json_real(report_type: ReportType, data: &RealReportData) -> Resul
                 },
                 schedule: ScheduleStatusJson {
                     on_calendar: "*-*-* 02:00:00".into(),
+                    scheduler_backend: data.scheduler_backend.clone(),
+                    scheduler_status: data.scheduler_status.clone(),
                     timer_enabled: data.timer_enabled.clone(),
                     timer_active: data.timer_active.clone(),
                     next_run: data.next_run.clone(),
@@ -219,6 +225,8 @@ pub fn render_json_real(report_type: ReportType, data: &RealReportData) -> Resul
                     enabled: data.chrony_enabled.clone(),
                     active: data.chrony_active.clone(),
                 },
+                time_sync_method: data.time_sync_method.clone(),
+                time_sync_status: data.time_sync_status.clone(),
                 sources: data.chrony_sources.clone(),
                 tracking: data.chrony_tracking.clone(),
                 conf_permission: format!("-rw-r--r-- 1 root root 813 /etc/chrony.conf"),

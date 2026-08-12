@@ -325,13 +325,30 @@ pub fn run_database_stage<R: ResticRunner + ?Sized>(
     runner: &R,
     dry_run: bool,
 ) -> Result<String> {
-    let _span = info_span!("database").entered();
-    info!("Executing database backup stage");
-    crate::commands::database::execute_database_backup_from_profiles(
+    run_database_stage_with_capabilities(
         config,
         config_path,
         runner,
         dry_run,
+        &crate::platform::PlatformCapabilities::default(),
+    )
+}
+
+pub fn run_database_stage_with_capabilities<R: ResticRunner + ?Sized>(
+    config: &crate::config::model::ResticProfileConfig,
+    config_path: &Path,
+    runner: &R,
+    dry_run: bool,
+    capabilities: &crate::platform::PlatformCapabilities,
+) -> Result<String> {
+    let _span = info_span!("database").entered();
+    info!("Executing database backup stage");
+    crate::commands::database::execute_database_backup_from_profiles_with_capabilities(
+        config,
+        config_path,
+        runner,
+        dry_run,
+        capabilities,
     )
 }
 

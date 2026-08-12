@@ -7,6 +7,48 @@ use anyhow::{Result, bail};
 use secrecy::{ExposeSecret, SecretString};
 use std::path::Path;
 
+/// Checks the platform support matrix before a Database Backup Adapter launches a dump client.
+/// CentOS 6.10 deliberately supports the MariaDB 5.5.56 stream only; PostgreSQL must fail at
+/// this seam rather than failing later with an unavailable client binary.
+pub fn ensure_database_supported_on_platform(
+    capabilities: &crate::platform::PlatformCapabilities,
+    database: &str,
+    version: &str,
+) -> Result<()> {
+    if capabilities.supports_database(database, version) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "database {database} {version} is not supported on {}",
+        if capabilities.is_centos_6() {
+            "CentOS 6.10 (supported database: MariaDB 5.5.56)"
+        } else {
+            capabilities.os_name.as_str()
+        }
+    )
+}
+
+pub fn ensure_database_type_supported_on_platform(
+    capabilities: &crate::platform::PlatformCapabilities,
+    database_type: DatabaseType,
+) -> Result<()> {
+    if capabilities.is_centos_6() && database_type == DatabaseType::Postgres {
+        anyhow::bail!(
+            "PostgreSQL Database Stream is not supported on CentOS 6.10; supported database is MariaDB 5.5.56"
+        );
+    }
+    if capabilities.is_centos_6()
+        && (database_type == DatabaseType::Mysql
+            && capabilities.mariadb_client_version.as_deref() != Some("5.5.56"))
+    {
+        anyhow::bail!(
+            "MariaDB Database Stream requires mysqldump 5.5.56 on CentOS 6.10; detected {:?}",
+            capabilities.mariadb_client_version
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatabaseDumpValidation {
     pub database_type: DatabaseType,
@@ -59,6 +101,22 @@ pub fn execute_database_backup_from_profiles<R: ResticRunner + ?Sized>(
     runner: &R,
     dry_run: bool,
 ) -> Result<String> {
+    execute_database_backup_from_profiles_with_capabilities(
+        config,
+        config_path,
+        runner,
+        dry_run,
+        &crate::platform::PlatformCapabilities::default(),
+    )
+}
+
+pub fn execute_database_backup_from_profiles_with_capabilities<R: ResticRunner + ?Sized>(
+    config: &crate::config::model::ResticProfileConfig,
+    config_path: &Path,
+    runner: &R,
+    dry_run: bool,
+    capabilities: &crate::platform::PlatformCapabilities,
+) -> Result<String> {
     let database = config
         .application
         .as_ref()
@@ -66,6 +124,7 @@ pub fn execute_database_backup_from_profiles<R: ResticRunner + ?Sized>(
         .ok_or_else(|| {
             anyhow::anyhow!("Database Backup Adapter is not configured; run backup setup first")
         })?;
+    ensure_database_type_supported_on_platform(capabilities, database.db_type)?;
     let config_dir = config_path.parent().unwrap_or(Path::new("."));
     // Dry-runs render the dump command but never launch a child process, so they
     // may inspect a fixture sidecar without treating it as an executable secret.

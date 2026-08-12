@@ -128,6 +128,7 @@ impl<W: Write> SetupNoticeSink for TuiSetupNoticeRenderer<W> {
 pub struct SetupRunOptions<'a> {
     scheduler_settings: &'a crate::runner::scheduler::SchedulerSettings,
     notices: &'a mut dyn SetupNoticeSink,
+    platform_capabilities: crate::platform::PlatformCapabilities,
 }
 
 impl<'a> SetupRunOptions<'a> {
@@ -138,7 +139,16 @@ impl<'a> SetupRunOptions<'a> {
         Self {
             scheduler_settings,
             notices,
+            platform_capabilities: crate::platform::PlatformCapabilities::default(),
         }
+    }
+
+    pub fn with_platform_capabilities(
+        mut self,
+        capabilities: crate::platform::PlatformCapabilities,
+    ) -> Self {
+        self.platform_capabilities = capabilities;
+        self
     }
 }
 
@@ -176,6 +186,7 @@ pub trait SetupPrompter {
 
 pub struct InquirePrompter {
     restore_drill_overrides: crate::cli::RestoreDrillSetupOverrides,
+    platform_capabilities: crate::platform::PlatformCapabilities,
 }
 
 fn prompt_text_with_default(msg: &str, default_val: &str, lang: Language) -> Result<String> {
@@ -205,7 +216,16 @@ impl InquirePrompter {
     ) -> Self {
         Self {
             restore_drill_overrides,
+            platform_capabilities: crate::platform::PlatformCapabilities::default(),
         }
+    }
+
+    pub fn with_platform_capabilities(
+        mut self,
+        capabilities: crate::platform::PlatformCapabilities,
+    ) -> Self {
+        self.platform_capabilities = capabilities;
+        self
     }
 }
 
@@ -213,6 +233,7 @@ impl Default for InquirePrompter {
     fn default() -> Self {
         Self {
             restore_drill_overrides: crate::cli::RestoreDrillSetupOverrides::default(),
+            platform_capabilities: crate::platform::PlatformCapabilities::default(),
         }
     }
 }
@@ -403,8 +424,17 @@ impl SetupPrompter for InquirePrompter {
 
                 let (repository, sftp_config, s3_config) = if backend == "sftp" {
                     let runner = SystemExecutor;
-                    let (repo_uri, conf) =
-                        prompt_sftp_storage(msg, lang, config_dir, "id_ed25519", &runner, notices)?;
+                    let (repo_uri, conf) = prompt_sftp_storage(
+                        msg,
+                        lang,
+                        config_dir,
+                        self.platform_capabilities
+                            .ssh_key_algorithm()
+                            .key_name(false),
+                        &self.platform_capabilities,
+                        &runner,
+                        notices,
+                    )?;
                     (repo_uri, Some(conf), None)
                 } else if backend == "s3" {
                     let mode_choice = inquire::Select::new(
@@ -515,7 +545,10 @@ impl SetupPrompter for InquirePrompter {
                             msg,
                             lang,
                             config_dir,
-                            "id_ed25519_secondary",
+                            self.platform_capabilities
+                                .ssh_key_algorithm()
+                                .key_name(true),
+                            &self.platform_capabilities,
                             &runner,
                             notices,
                         )?;
@@ -800,6 +833,7 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
     lang: Language,
     config_dir: &Path,
     key_name: &str,
+    capabilities: &crate::platform::PlatformCapabilities,
     runner: &R,
     notices: &mut dyn SetupNoticeSink,
 ) -> Result<(String, SftpConfig)> {
@@ -829,7 +863,13 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
     };
 
     if generate_key {
-        generate_sftp_keypair(&key_path, &pub_path, &key_path_str, runner)?;
+        generate_sftp_keypair(
+            &key_path,
+            &pub_path,
+            &key_path_str,
+            runner,
+            capabilities.ssh_key_algorithm(),
+        )?;
     }
 
     #[cfg(unix)]
@@ -867,13 +907,14 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
     loop {
         // Perform SFTP connection test
         notices.notice(msg.sftp_testing_connection);
-        let test_result = verify_sftp_connection_with_config_dir(
+        let test_result = verify_sftp_connection_with_config_dir_and_capabilities(
             &user,
             &host,
             port,
             &key_path_str,
             config_dir,
             runner,
+            capabilities,
         );
 
         let success = match test_result {
@@ -933,7 +974,13 @@ fn prompt_sftp_storage<R: crate::runner::executor::CommandRunner>(
                     .raw_prompt()?
                     .index;
                 if selection_idx == 1 {
-                    generate_sftp_keypair(&key_path, &pub_path, &key_path_str, runner)?;
+                    generate_sftp_keypair(
+                        &key_path,
+                        &pub_path,
+                        &key_path_str,
+                        runner,
+                        capabilities.ssh_key_algorithm(),
+                    )?;
                 }
                 #[cfg(unix)]
                 {
@@ -992,6 +1039,7 @@ fn generate_sftp_keypair<R: crate::runner::executor::CommandRunner>(
     pub_path: &Path,
     key_path_str: &str,
     runner: &R,
+    algorithm: crate::platform::SshKeyAlgorithm,
 ) -> Result<()> {
     if key_path.exists() {
         std::fs::remove_file(key_path)?;
@@ -1001,7 +1049,14 @@ fn generate_sftp_keypair<R: crate::runner::executor::CommandRunner>(
     }
     let output = runner.run(
         "ssh-keygen",
-        &["-t", "ed25519", "-N", "", "-f", key_path_str],
+        &[
+            "-t",
+            algorithm.ssh_keygen_type(),
+            "-N",
+            "",
+            "-f",
+            key_path_str,
+        ],
     )?;
     if output.status_code != 0 {
         anyhow::bail!("ssh-keygen failed: {}", output.stderr);
@@ -1395,10 +1450,39 @@ pub fn verify_sftp_connection_with_config_dir<R: crate::runner::executor::Comman
     config_dir: &Path,
     runner: &R,
 ) -> Result<(), String> {
+    verify_sftp_connection_with_config_dir_and_capabilities(
+        user,
+        host,
+        port,
+        key_path,
+        config_dir,
+        runner,
+        &crate::platform::PlatformCapabilities::default(),
+    )
+}
+
+pub fn verify_sftp_connection_with_config_dir_and_capabilities<
+    R: crate::runner::executor::CommandRunner,
+>(
+    user: &str,
+    host: &str,
+    port: u16,
+    key_path: &str,
+    config_dir: &Path,
+    runner: &R,
+    capabilities: &crate::platform::PlatformCapabilities,
+) -> Result<(), String> {
     let port_str = port.to_string();
     let remote_target = format!("{}@{}", user, host);
-    let policy = SftpAuthPolicy::for_config_dir(Path::new(key_path), config_dir)
-        .map_err(|error| error.to_string())?;
+    if !capabilities.ssh_accept_new {
+        pre_register_sftp_host_key_with_capabilities(host, port, config_dir, runner, capabilities)?;
+    }
+    let policy = SftpAuthPolicy::for_config_dir_with_capabilities(
+        Path::new(key_path),
+        config_dir,
+        capabilities,
+    )
+    .map_err(|error| error.to_string())?;
     let auth_args = policy
         .argument_tokens()
         .map_err(|error| error.to_string())?;
@@ -1427,6 +1511,54 @@ pub fn verify_sftp_connection_with_config_dir<R: crate::runner::executor::Comman
         }
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Registers a legacy OpenSSH host key in the application-owned trust file. It never overwrites
+/// an existing file and therefore preserves later host-key change detection.
+pub fn pre_register_sftp_host_key_with_capabilities<R: crate::runner::executor::CommandRunner>(
+    host: &str,
+    port: u16,
+    config_dir: &Path,
+    runner: &R,
+    capabilities: &crate::platform::PlatformCapabilities,
+) -> Result<(), String> {
+    if capabilities.ssh_accept_new {
+        return Ok(());
+    }
+    let port = port.to_string();
+    let host_with_port = format!("[{host}]:{port}");
+    let output = runner
+        .run("ssh-keyscan", &["-T", "5", "-p", &port, host])
+        .map_err(|error| format!("ssh-keyscan failed: {error}"))?;
+    if output.status_code != 0 || output.stdout.trim().is_empty() {
+        return Err(if output.stderr.trim().is_empty() {
+            format!("ssh-keyscan failed with exit code {}", output.status_code)
+        } else {
+            output.stderr.trim().to_owned()
+        });
+    }
+    let path = crate::config::model::ensure_sftp_known_hosts_file(config_dir)
+        .map_err(|error| error.to_string())?;
+    let existing = std::fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    if !existing.lines().any(|line| {
+        line.split_whitespace().next().is_some_and(|hosts| {
+            hosts
+                .split(',')
+                .any(|candidate| candidate == host || candidate == host_with_port)
+        })
+    }) {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .map_err(|error| error.to_string())?;
+        if !existing.is_empty() && !existing.ends_with('\n') {
+            writeln!(file).map_err(|error| error.to_string())?;
+        }
+        file.write_all(output.stdout.as_bytes())
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 pub fn format_sftp_repository_url(user: &str, host: &str, port: u16, path: &str) -> String {
@@ -1564,6 +1696,7 @@ impl SetupEngine {
         let SetupRunOptions {
             scheduler_settings,
             notices,
+            platform_capabilities,
         } = options;
         let config_dir = if let Some(parent) = profiles_path.parent() {
             if parent.as_os_str().is_empty() {
@@ -1624,9 +1757,11 @@ impl SetupEngine {
         let staged_profiles = staged_dir
             .path()
             .join(crate::config::model::DEFAULT_PROFILES_FILENAME);
-        if let Err(error) =
-            config.save_to_profiles_path_with_config_dir(&staged_profiles, config_dir)
-        {
+        if let Err(error) = config.save_to_profiles_path_with_config_dir_and_capabilities(
+            &staged_profiles,
+            config_dir,
+            &platform_capabilities,
+        ) {
             drop(staged_dir);
             previous.restore()?;
             return Err(error);
@@ -2407,6 +2542,23 @@ pub fn run_setup_dependencies_with_runner_at_dir<R: CommandRunner + ?Sized>(
     install_dir: &Path,
     language: Language,
 ) -> Result<String> {
+    run_setup_dependencies_with_runner_at_dir_internal(runner, install_dir, language, false)
+}
+
+pub fn run_setup_dependencies_with_verified_online_downloads<R: CommandRunner + ?Sized>(
+    runner: &R,
+    install_dir: &Path,
+    language: Language,
+) -> Result<String> {
+    run_setup_dependencies_with_runner_at_dir_internal(runner, install_dir, language, true)
+}
+
+fn run_setup_dependencies_with_runner_at_dir_internal<R: CommandRunner + ?Sized>(
+    runner: &R,
+    install_dir: &Path,
+    language: Language,
+    verify_downloads: bool,
+) -> Result<String> {
     let mut report = String::new();
     let mut failures = Vec::new();
     report.push_str(match language {
@@ -2461,7 +2613,11 @@ pub fn run_setup_dependencies_with_runner_at_dir<R: CommandRunner + ?Sized>(
             }
             _ => {
                 report.push_str(&format!("{}: MISSING -> Installing from {}\n", bin, url));
-                let cmd = build_download_command(bin, url, &install_target_dir);
+                let cmd = if verify_downloads {
+                    build_verified_download_command(bin, url, &install_target_dir)
+                } else {
+                    build_download_command(bin, url, &install_target_dir)
+                };
                 let install = runner.run("sh", &["-c", &cmd]);
                 match install {
                     Ok(out) if out.status_code == 0 => match runner.run("which", &[bin]) {
@@ -2532,6 +2688,257 @@ pub fn run_setup_dependencies_with_runner_at_dir<R: CommandRunner + ?Sized>(
             failures.join("; ")
         )
     }
+}
+
+pub fn build_verified_download_command(bin: &str, _url: &str, target_dir: &str) -> String {
+    let (url, archive, checksum) = match bin {
+        "restic" => (
+            "https://github.com/restic/restic/releases/download/v0.16.4/restic_0.16.4_linux_amd64.bz2",
+            "restic.bz2",
+            "3d4d43c169a9e28ea76303b1e8b810f0dcede7478555fdaa8959971ad499e324",
+        ),
+        "rclone" => (
+            "https://downloads.rclone.org/v1.68.1/rclone-v1.68.1-linux-amd64.zip",
+            "rclone.zip",
+            "34f34743b1831523cd2e0aff74447b717e2d62fe1b598e91703899e0c0689568",
+        ),
+        "resticprofile" => (
+            "https://github.com/creativeprojects/resticprofile/releases/download/v0.28.0/resticprofile_0.28.0_linux_amd64.tar.gz",
+            "resticprofile.tar.gz",
+            "8a8b8c611ea86beb9eb095417e851c88e3f1f9e2fda894ea9b2664a94368716a",
+        ),
+        _ => return format!("echo Unknown binary {bin}"),
+    };
+    let archive_path = format!("/tmp/backup-dependency-{archive}");
+    let checksum_path = format!("/tmp/backup-dependency-{archive}.sha256");
+    let extraction = match bin {
+        "restic" => format!("bunzip2 -c {archive_path} > {target_dir}/restic"),
+        "rclone" => format!(
+            "rm -rf /tmp/backup-dependency-rclone && unzip -q {archive_path} -d /tmp/backup-dependency-rclone && cp /tmp/backup-dependency-rclone/rclone-v1.68.1-linux-amd64/rclone {target_dir}/rclone"
+        ),
+        "resticprofile" => format!(
+            "rm -rf /tmp/backup-dependency-resticprofile && mkdir -p /tmp/backup-dependency-resticprofile && tar -xzf {archive_path} -C /tmp/backup-dependency-resticprofile && cp /tmp/backup-dependency-resticprofile/resticprofile {target_dir}/resticprofile"
+        ),
+        _ => unreachable!(),
+    };
+    format!(
+        "curl -fsSL {url} -o {archive_path} && printf '%s  %s\\n' {checksum} {archive_path} > {checksum_path} && sha256sum -c {checksum_path} && {extraction} && chmod +x {target_dir}/{bin} && rm -f {archive_path} {checksum_path}"
+    )
+}
+
+/// Dependency setup seam with an optional offline, checksum-verified artifact directory. The
+/// established online runner remains source-compatible for existing integrations; an explicit
+/// archive directory is never allowed to fall back to a network download.
+pub fn run_setup_dependencies_with_options<R: CommandRunner + ?Sized>(
+    runner: &R,
+    install_dir: &Path,
+    language: Language,
+    dependency_archive_dir: Option<&Path>,
+) -> Result<String> {
+    let Some(archive_dir) = dependency_archive_dir else {
+        return run_setup_dependencies_with_runner_at_dir(runner, install_dir, language);
+    };
+    install_dependencies_from_verified_archive(runner, install_dir, archive_dir, language)
+}
+
+/// Verifies a SHA-256 digest using an independent, literal expected value. This is public so
+/// release and offline-install contract tests can exercise the security seam without launching
+/// an installer.
+pub fn verify_sha256_bytes(bytes: &[u8], expected_hex: &str) -> Result<()> {
+    let expected = expected_hex.trim().to_ascii_lowercase();
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!("expected SHA-256 digest must contain exactly 64 hexadecimal characters");
+    }
+    use sha2::{Digest, Sha256};
+    let actual = Sha256::digest(bytes);
+    let actual = actual
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if actual != expected {
+        anyhow::bail!("SHA-256 checksum mismatch: expected {expected}, got {actual}");
+    }
+    Ok(())
+}
+
+pub fn verify_sha256_file(path: &Path, expected_hex: &str) -> Result<()> {
+    verify_sha256_bytes(&std::fs::read(path)?, expected_hex)
+}
+
+fn install_dependencies_from_verified_archive<R: CommandRunner + ?Sized>(
+    runner: &R,
+    install_dir: &Path,
+    archive_dir: &Path,
+    language: Language,
+) -> Result<String> {
+    if !archive_dir.is_dir() {
+        anyhow::bail!(
+            "dependency archive directory is not a directory: {}",
+            archive_dir.display()
+        );
+    }
+    let checksum_file = ["SHA256SUMS", "checksums.sha256", "dependency-sha256sums"]
+        .iter()
+        .map(|name| archive_dir.join(name))
+        .find(|path| path.is_file())
+        .ok_or_else(|| anyhow::anyhow!("dependency archive must include a SHA-256 manifest"))?;
+    let manifest = std::fs::read_to_string(&checksum_file)?;
+    let mut checksums = std::collections::HashMap::new();
+    for line in manifest.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(checksum) = fields.next() else {
+            continue;
+        };
+        let Some(filename) = fields.next() else {
+            continue;
+        };
+        if checksum.len() == 64 && checksum.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            checksums.insert(
+                filename.trim_start_matches('*').to_owned(),
+                checksum.to_owned(),
+            );
+        }
+    }
+
+    std::fs::create_dir_all(install_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(install_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let mut report = match language {
+        Language::Ko => "오프라인 의존성 artifact를 checksum 검증하는 중...\n".to_owned(),
+        Language::En => "Verifying offline dependency artifacts with SHA-256...\n".to_owned(),
+    };
+    let mut failures = Vec::new();
+    for binary in ["restic", "rclone", "resticprofile"] {
+        let Some(source) = find_dependency_artifact(archive_dir, binary)? else {
+            failures.push(format!("{binary}: artifact is missing"));
+            continue;
+        };
+        let filename = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(binary);
+        let Some(expected) = checksums.get(filename).or_else(|| checksums.get(binary)) else {
+            failures.push(format!("{binary}: checksum is missing from manifest"));
+            continue;
+        };
+        if let Err(error) = verify_sha256_file(&source, expected) {
+            failures.push(format!("{binary}: {error}"));
+            continue;
+        }
+        let target = install_dir.join(binary);
+        let staged = install_dir.join(format!(".{binary}.staged"));
+        if source.extension().and_then(|value| value.to_str()) == Some("bz2") {
+            let command = format!(
+                "bunzip2 -c {} > {}",
+                shell_quote_path(&source),
+                shell_quote_path(&staged)
+            );
+            let output = runner.run("sh", &["-c", &command])?;
+            if output.status_code != 0 {
+                failures.push(format!("{binary}: bzip2 extraction failed"));
+                continue;
+            }
+        } else if source.extension().and_then(|value| value.to_str()) == Some("zip") {
+            let command = format!(
+                "unzip -p {} '*/{}' > {}",
+                shell_quote_path(&source),
+                binary,
+                shell_quote_path(&staged)
+            );
+            let output = runner.run("sh", &["-c", &command])?;
+            if output.status_code != 0 {
+                failures.push(format!("{binary}: zip extraction failed"));
+                continue;
+            }
+        } else if source
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.ends_with(".tar.gz"))
+        {
+            let extracted_dir = install_dir.join(format!(".{binary}-extract"));
+            std::fs::create_dir_all(&extracted_dir)?;
+            let output = runner.run(
+                "tar",
+                &[
+                    "-xzf",
+                    source.to_string_lossy().as_ref(),
+                    "-C",
+                    extracted_dir.to_string_lossy().as_ref(),
+                ],
+            )?;
+            if output.status_code != 0 {
+                failures.push(format!("{binary}: tar extraction failed"));
+                let _ = std::fs::remove_dir_all(&extracted_dir);
+                continue;
+            }
+            let extracted = find_extracted_binary(&extracted_dir, binary)?
+                .ok_or_else(|| anyhow::anyhow!("{binary}: extracted executable is missing"))?;
+            std::fs::copy(extracted, &staged)?;
+            let _ = std::fs::remove_dir_all(&extracted_dir);
+        } else {
+            std::fs::copy(&source, &staged)?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o700))?;
+        }
+        std::fs::rename(staged, &target)?;
+        report.push_str(&format!(
+            "{binary}: verified and installed to {}\n",
+            target.display()
+        ));
+    }
+    if failures.is_empty() {
+        Ok(report)
+    } else {
+        anyhow::bail!(
+            "offline dependency verification failed: {}\n{report}",
+            failures.join("; ")
+        )
+    }
+}
+
+fn find_dependency_artifact(archive_dir: &Path, binary: &str) -> Result<Option<PathBuf>> {
+    let direct = archive_dir.join(binary);
+    if direct.is_file() {
+        return Ok(Some(direct));
+    }
+    let mut candidates = std::fs::read_dir(archive_dir)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_file())
+        .filter(|path| {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            name.starts_with(binary)
+                && (name.ends_with(".bz2") || name.ends_with(".zip") || name.ends_with(".tar.gz"))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    Ok(candidates.into_iter().next())
+}
+
+fn find_extracted_binary(root: &Path, binary: &str) -> Result<Option<PathBuf>> {
+    for entry in std::fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            if let Some(found) = find_extracted_binary(&path, binary)? {
+                return Ok(Some(found));
+            }
+        } else if path.file_name().and_then(|value| value.to_str()) == Some(binary) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn shell_quote_path(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
 
 pub fn generate_secure_password() -> String {

@@ -242,6 +242,19 @@ impl BackupConfig {
         profiles_yaml_path: &Path,
         sftp_config_dir: &Path,
     ) -> Result<()> {
+        self.save_to_profiles_path_with_config_dir_and_capabilities(
+            profiles_yaml_path,
+            sftp_config_dir,
+            &crate::platform::PlatformCapabilities::default(),
+        )
+    }
+
+    pub fn save_to_profiles_path_with_config_dir_and_capabilities(
+        &self,
+        profiles_yaml_path: &Path,
+        sftp_config_dir: &Path,
+        capabilities: &crate::platform::PlatformCapabilities,
+    ) -> Result<()> {
         self.validate()?;
         let config_dir = profiles_config_dir(profiles_yaml_path);
         if !config_dir.exists() {
@@ -338,7 +351,7 @@ impl BackupConfig {
             opt_map.remove("sftp.command");
             opt_map.insert(
                 "sftp.args".into(),
-                sftp.sftp_args_for_config_dir(sftp_config_dir)?,
+                sftp.sftp_args_for_config_dir_with_capabilities(sftp_config_dir, capabilities)?,
             );
             primary_profile.option = Some(opt_map);
         }
@@ -393,7 +406,10 @@ impl BackupConfig {
                     opt_map.remove("sftp.command");
                     opt_map.insert(
                         "sftp.args".into(),
-                        sftp.sftp_args_for_config_dir(sftp_config_dir)?,
+                        sftp.sftp_args_for_config_dir_with_capabilities(
+                            sftp_config_dir,
+                            capabilities,
+                        )?,
                     );
                     secondary_profile.option = Some(opt_map);
                 }
@@ -410,7 +426,7 @@ impl BackupConfig {
                 ensure_sftp_known_hosts_file(sftp_config_dir)?;
                 Some(std::collections::BTreeMap::from([(
                     "sftp.args".into(),
-                    sftp.sftp_args_for_config_dir(sftp_config_dir)?,
+                    sftp.sftp_args_for_config_dir_with_capabilities(sftp_config_dir, capabilities)?,
                 )]))
             } else {
                 None
@@ -827,6 +843,7 @@ pub struct SftpConfig {
 pub struct SftpAuthPolicy {
     identity_file: PathBuf,
     known_hosts_file: PathBuf,
+    strict_host_key_checking: bool,
 }
 
 impl SftpAuthPolicy {
@@ -858,6 +875,45 @@ impl SftpAuthPolicy {
         Ok(Self {
             identity_file: identity_file.to_path_buf(),
             known_hosts_file: config_dir.join(SFTP_KNOWN_HOSTS_FILENAME),
+            strict_host_key_checking: false,
+        })
+    }
+
+    /// Builds the same key-only policy for a discovered Platform Support Profile. Legacy
+    /// OpenSSH accepts neither `accept-new` nor Ed25519, so it uses RSA and a pre-registered
+    /// known_hosts entry with strict checking.
+    pub fn for_config_dir_with_capabilities(
+        identity_file: &Path,
+        config_dir: &Path,
+        capabilities: &crate::platform::PlatformCapabilities,
+    ) -> Result<Self> {
+        if identity_file.as_os_str().is_empty() || config_dir.as_os_str().is_empty() {
+            anyhow::bail!("SFTP identity and configuration paths cannot be empty");
+        }
+        if identity_file.to_str().is_none() || config_dir.to_str().is_none() {
+            anyhow::bail!("SFTP paths must be valid UTF-8 for SSH argument rendering");
+        }
+        if !is_managed_sftp_key_path(identity_file, config_dir) {
+            anyhow::bail!(
+                "SFTP identity must be one of the managed keys below {}",
+                config_dir.display()
+            );
+        }
+        let expected = capabilities.ssh_key_algorithm();
+        let basename = identity_file.file_name().and_then(|name| name.to_str());
+        let is_expected =
+            basename == Some(expected.key_name(false)) || basename == Some(expected.key_name(true));
+        if !is_expected {
+            anyhow::bail!(
+                "SFTP identity {} does not match the platform key algorithm {:?}",
+                identity_file.display(),
+                expected
+            );
+        }
+        Ok(Self {
+            identity_file: identity_file.to_path_buf(),
+            known_hosts_file: config_dir.join(SFTP_KNOWN_HOSTS_FILENAME),
+            strict_host_key_checking: !capabilities.ssh_accept_new,
         })
     }
 
@@ -888,7 +944,14 @@ impl SftpAuthPolicy {
             "-o".into(),
             "BatchMode=yes".into(),
             "-o".into(),
-            "StrictHostKeyChecking=accept-new".into(),
+            format!(
+                "StrictHostKeyChecking={}",
+                if self.strict_host_key_checking {
+                    "yes"
+                } else {
+                    "accept-new"
+                }
+            ),
             "-o".into(),
             format!("UserKnownHostsFile={known_hosts}"),
         ])
@@ -986,10 +1049,15 @@ fn normalized_path(path: &Path) -> PathBuf {
 /// Returns whether a key is one of the two identities managed by Setup Wizard.
 pub fn is_managed_sftp_key_path(identity_file: &Path, config_dir: &Path) -> bool {
     let identity_file = normalized_path(&config_relative_path(identity_file, config_dir));
-    ["id_ed25519", "id_ed25519_secondary"]
-        .iter()
-        .map(|name| normalized_path(&config_dir.join(name)))
-        .any(|expected| expected == identity_file)
+    [
+        "id_ed25519",
+        "id_ed25519_secondary",
+        "id_rsa",
+        "id_rsa_secondary",
+    ]
+    .iter()
+    .map(|name| normalized_path(&config_dir.join(name)))
+    .any(|expected| expected == identity_file)
 }
 
 fn config_relative_path(path: &Path, config_dir: &Path) -> PathBuf {
@@ -1047,6 +1115,36 @@ impl SftpConfig {
             .ok_or_else(|| anyhow::anyhow!("SFTP requires a managed SSH identity"))?;
         let key_path = config_relative_path(Path::new(key_file), config_dir);
         let policy = SftpAuthPolicy::for_config_dir(&key_path, config_dir)?;
+        if let Ok(metadata) = fs::symlink_metadata(&key_path) {
+            if metadata.file_type().is_symlink() {
+                anyhow::bail!("SFTP managed identity must not be a symbolic link");
+            }
+            if !metadata.file_type().is_file() {
+                anyhow::bail!("SFTP managed identity must be a regular file");
+            }
+        }
+        let mut tokens = policy.argument_tokens()?;
+        tokens.extend(self.additional_args.iter().cloned());
+        Ok(tokens
+            .iter()
+            .map(|token| quote_sftp_argument(token))
+            .collect::<Vec<_>>()
+            .join(" "))
+    }
+
+    pub fn sftp_args_for_config_dir_with_capabilities(
+        &self,
+        config_dir: &Path,
+        capabilities: &crate::platform::PlatformCapabilities,
+    ) -> Result<String> {
+        let key_file = self
+            .key_file
+            .as_deref()
+            .filter(|key| !key.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("SFTP requires a managed SSH identity"))?;
+        let key_path = config_relative_path(Path::new(key_file), config_dir);
+        let policy =
+            SftpAuthPolicy::for_config_dir_with_capabilities(&key_path, config_dir, capabilities)?;
         if let Ok(metadata) = fs::symlink_metadata(&key_path) {
             if metadata.file_type().is_symlink() {
                 anyhow::bail!("SFTP managed identity must not be a symbolic link");

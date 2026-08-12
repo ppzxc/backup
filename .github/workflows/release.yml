@@ -35,10 +35,13 @@ jobs:
           TARGET="x86_64-unknown-linux-musl"
           TAR_NAME="backup-${TAG}-${TARGET}.tar.gz"
           tar -czvf "${TAR_NAME}" -C target/x86_64-unknown-linux-musl/release backup
+          sha256sum "${TAR_NAME}" > "${TAR_NAME}.sha256"
           echo "TAR_NAME=${TAR_NAME}" >> $GITHUB_ENV
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: ${{ env.TAR_NAME }}
+          files: |
+            ${{ env.TAR_NAME }}
+            ${{ env.TAR_NAME }}.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

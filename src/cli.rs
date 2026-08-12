@@ -134,7 +134,11 @@ pub enum Command {
 #[derive(Subcommand)]
 pub enum SetupAction {
     /// Verify and download required binary dependencies (restic, rclone, resticprofile)
-    Dependencies,
+    Dependencies {
+        /// Use checksum-verified dependency artifacts from this offline directory.
+        #[arg(long, value_name = "PATH")]
+        dependency_archive_dir: Option<PathBuf>,
+    },
     /// Initialize primary and secondary Backend Adapter repositories
     BackendInit,
 }
@@ -252,6 +256,9 @@ pub struct CliRuntimeContext {
     pub home_dir: PathBuf,
     pub host_name: String,
     pub restore_drill_setup_overrides: RestoreDrillSetupOverrides,
+    pub platform_capabilities: crate::platform::PlatformCapabilities,
+    pub dependency_archive_dir: Option<PathBuf>,
+    platform_capabilities_injected: bool,
 }
 
 impl CliRuntimeContext {
@@ -297,6 +304,18 @@ impl CliRuntimeContext {
             home_dir: PathBuf::from("/tmp"),
             host_name: "localhost".into(),
             restore_drill_setup_overrides: RestoreDrillSetupOverrides::default(),
+            platform_capabilities: crate::platform::PlatformCapabilities::default(),
+            dependency_archive_dir: match &cli.command {
+                Command::Setup {
+                    action:
+                        Some(SetupAction::Dependencies {
+                            dependency_archive_dir,
+                        }),
+                    ..
+                } => dependency_archive_dir.clone(),
+                _ => None,
+            },
+            platform_capabilities_injected: false,
         })
     }
 
@@ -317,6 +336,20 @@ impl CliRuntimeContext {
         self
     }
 
+    pub fn with_platform_capabilities(
+        mut self,
+        capabilities: crate::platform::PlatformCapabilities,
+    ) -> Self {
+        self.platform_capabilities = capabilities;
+        self.platform_capabilities_injected = true;
+        self
+    }
+
+    pub fn with_dependency_archive_dir(mut self, path: Option<PathBuf>) -> Self {
+        self.dependency_archive_dir = path;
+        self
+    }
+
     pub fn with_restore_drill_setup_overrides(
         mut self,
         overrides: RestoreDrillSetupOverrides,
@@ -326,11 +359,16 @@ impl CliRuntimeContext {
     }
 
     pub fn scheduler_settings(&self) -> crate::runner::scheduler::SchedulerSettings {
-        crate::runner::scheduler::SchedulerSettings::new(
+        let settings = crate::runner::scheduler::SchedulerSettings::new(
             self.scheduler_mode,
             &self.scheduler_calendar,
         )
-        .with_force_cron(self.scheduler_force_cron)
+        .with_force_cron(self.scheduler_force_cron);
+        if self.platform_capabilities_injected {
+            settings.with_platform_capabilities(self.platform_capabilities.clone())
+        } else {
+            settings
+        }
     }
 }
 
@@ -519,7 +557,9 @@ fn option_behavior_class(option_axis: &str) -> String {
         | "verbose"
         | "yes" => "flag-enabled",
         "format" | "lang" | "profile" | "profiles" | "storage" => "enum-value",
-        "file" | "log_file" | "snapshot" | "target" => "path-or-text-value",
+        "dependency_archive_dir" | "file" | "log_file" | "snapshot" | "target" => {
+            "path-or-text-value"
+        }
         _ => "value-supplied",
     }
     .into()
@@ -847,7 +887,8 @@ fn run_setup_with_notice_sink(
         lang,
         adapters.resticprofile,
         adapters.scheduler,
-        crate::commands::setup::SetupRunOptions::new(&scheduler_settings, notices),
+        crate::commands::setup::SetupRunOptions::new(&scheduler_settings, notices)
+            .with_platform_capabilities(context.platform_capabilities.clone()),
     )
 }
 
@@ -862,14 +903,29 @@ fn dispatch_inner(
             non_interactive,
             action,
         } => match action {
-            Some(SetupAction::Dependencies) => {
+            Some(SetupAction::Dependencies {
+                dependency_archive_dir,
+            }) => {
                 let install_dir =
                     crate::commands::setup::resolve_dependency_install_dir(&context.home_dir)?;
-                let output = crate::commands::setup::run_setup_dependencies_with_runner_at_dir(
-                    adapters.command,
-                    &install_dir,
-                    context.language,
-                )?;
+                let archive_dir =
+                    dependency_archive_dir.or_else(|| context.dependency_archive_dir.clone());
+                let output = if archive_dir.is_none()
+                    && adapters.selection == AdapterSelection::System
+                {
+                    crate::commands::setup::run_setup_dependencies_with_verified_online_downloads(
+                        adapters.command,
+                        &install_dir,
+                        context.language,
+                    )?
+                } else {
+                    crate::commands::setup::run_setup_dependencies_with_options(
+                        adapters.command,
+                        &install_dir,
+                        context.language,
+                        archive_dir.as_deref(),
+                    )?
+                };
                 Ok(CommandOutcome::success_with_changes(
                     output,
                     "",
@@ -952,7 +1008,8 @@ fn dispatch_inner(
                 let prompter =
                     crate::commands::setup::InquirePrompter::with_restore_drill_overrides(
                         context.restore_drill_setup_overrides.clone(),
-                    );
+                    )
+                    .with_platform_capabilities(context.platform_capabilities.clone());
                 let setup_language = Some(
                     lang.as_deref()
                         .map(parse_language)
@@ -1042,12 +1099,14 @@ fn dispatch_inner(
         ),
         Command::Database { dry_run } => {
             let config = load_profiles(context)?;
-            let output = crate::commands::database::execute_database_backup_from_profiles(
-                &config,
-                &context.profiles_path,
-                adapters.restic,
-                dry_run,
-            )?;
+            let output =
+                crate::commands::database::execute_database_backup_from_profiles_with_capabilities(
+                    &config,
+                    &context.profiles_path,
+                    adapters.restic,
+                    dry_run,
+                    &context.platform_capabilities,
+                )?;
             Ok(CommandOutcome::success_with_changes(
                 output,
                 "",
@@ -1061,11 +1120,12 @@ fn dispatch_inner(
         }
         Command::Doctor => {
             let (output, passed, diagnostics) =
-                crate::commands::doctor::run_doctor_contract_with_runner_and_diagnostics(
+                crate::commands::doctor::run_doctor_contract_with_runner_and_diagnostics_with_capabilities(
                     adapters.rclone,
                     adapters.command,
                     Some(&context.profiles_path),
                     &context.host_name,
+                    &context.platform_capabilities,
                 )?;
             let mut outcome = CommandOutcome::success(output, "", Vec::new());
             if !passed {
@@ -1086,7 +1146,8 @@ fn dispatch_inner(
                 &context.host_name,
                 crate::commands::report::get_formatted_time().0,
             )
-            .with_profiles_path(&profiles_path);
+            .with_profiles_path(&profiles_path)
+            .with_platform_capabilities(context.platform_capabilities.clone());
             let output = ReportCommand::run_with_profile_adapters(
                 action,
                 file,
@@ -1258,11 +1319,12 @@ fn dispatch_run(
                 .is_some_and(|database| profiles.contains(&database.profile))
         {
             stage = "database";
-            primary_results.push(crate::commands::run::run_database_stage(
+            primary_results.push(crate::commands::run::run_database_stage_with_capabilities(
                 &config,
                 &context.profiles_path,
                 adapters.restic,
                 options.dry_run,
+                &context.platform_capabilities,
             )?);
         }
 

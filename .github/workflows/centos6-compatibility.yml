@@ -1,0 +1,46 @@
+name: CentOS 6 Compatibility
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "docker/Dockerfile.centos6"
+      - "scripts/test_centos6.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/centos6-compatibility.yml"
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run capability and compatibility contracts
+        run: |
+          cargo test --test platform_compat_test --test e2e_centos6_compat_test
+          cargo test --test scheduler_test --test cmd_doctor_test --test cmd_report_test
+      - name: Build and inspect CentOS 6 x86_64 compatibility image
+        run: |
+          ./scripts/test_centos6.sh
+
+  full-e2e:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run storage, database, report, restore, and scheduler matrix
+        run: cargo test --test e2e_isolated_container_test isolated_container_matrix_exercises_storage_database_and_systemd -- --exact --nocapture

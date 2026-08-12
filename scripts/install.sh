@@ -70,6 +70,7 @@ fi
 # 압축 파일 이름 규칙 (예: my-app-v1.0.0-x86_64-unknown-linux-gnu.tar.gz)
 FILE_NAME="${BIN_NAME}-${TAG}-${TARGET}.tar.gz"
 DOWNLOAD_URL="https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${FILE_NAME}"
+CHECKSUM_URL="${DOWNLOAD_URL}.sha256"
 
 # ==============================================================================
 # 3. 임시 디렉터리에 다운로드 및 압축 해제
@@ -82,6 +83,24 @@ if ! curl -fsSL "$DOWNLOAD_URL" -o "$TMP_DIR/release.tar.gz"; then
   echo "Error: 파일 다운로드 실패. URL을 확인해 주세요: $DOWNLOAD_URL" >&2
   exit 1
 fi
+
+echo "Verifying SHA-256 checksum..."
+if ! curl -fsSL "$CHECKSUM_URL" -o "$TMP_DIR/release.sha256"; then
+  echo "Error: release checksum을 가져올 수 없습니다: $CHECKSUM_URL" >&2
+  exit 1
+fi
+EXPECTED_CHECKSUM=$(awk 'NF { print $1; exit }' "$TMP_DIR/release.sha256")
+case "$EXPECTED_CHECKSUM" in
+  ''|*[!0-9A-Fa-f]*)
+    echo "Error: 유효하지 않은 SHA-256 checksum입니다." >&2
+    exit 1
+    ;;
+esac
+if [ "${#EXPECTED_CHECKSUM}" -ne 64 ]; then
+  echo "Error: SHA-256 checksum 길이가 올바르지 않습니다." >&2
+  exit 1
+fi
+printf '%s  %s\n' "$EXPECTED_CHECKSUM" "$TMP_DIR/release.tar.gz" | sha256sum -c -
 
 tar -xzf "$TMP_DIR/release.tar.gz" -C "$TMP_DIR"
 

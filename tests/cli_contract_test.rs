@@ -67,6 +67,7 @@ const CONTRACT_OPTION_AXES: &[&str] = &[
     "backup.run.skip_database",
     "backup.run.skip_retention",
     "backup.run.skip_secondary_sync",
+    "backup.setup.dependencies.dependency_archive_dir",
     "backup.setup.lang",
     "backup.setup.non_interactive",
     "backup.status.profile",
@@ -265,7 +266,12 @@ fn option_behavior_classes_cover_empty_whitespace_unicode_and_invalid_values() {
                     let mut argv = command_path_args(command_path);
                     argv.extend([flag.clone(), value.into()]);
                     let parsed = Cli::try_parse_from(&argv);
-                    if value.is_empty() && matches!(option, "file" | "log_file" | "profiles") {
+                    if value.is_empty()
+                        && matches!(
+                            option,
+                            "dependency_archive_dir" | "file" | "log_file" | "profiles"
+                        )
+                    {
                         assert!(parsed.is_err(), "{axis} accepted an empty path");
                     } else {
                         parsed.unwrap_or_else(|error| panic!("{axis} rejected {value:?}: {error}"));
@@ -453,7 +459,11 @@ fn contract_expectation(
     option_axis: Option<&String>,
 ) -> backup::cli::ContractExpectation {
     let succeeds = command_path == "backup" || command_path == "backup.version";
+    let offline_dependency_option = option_axis
+        .is_some_and(|axis| axis.as_str() == "backup.setup.dependencies.dependency_archive_dir");
     let adapter_trace = if command_path == "backup.doctor" {
+        Vec::new()
+    } else if offline_dependency_option {
         Vec::new()
     } else if command_path == "backup.update" {
         vec![
@@ -491,6 +501,8 @@ fn contract_expectation(
         },
         stderr: if command_path == "backup.doctor" {
             "doctor reported".into()
+        } else if offline_dependency_option {
+            "dependency archive directory".into()
         } else if succeeds {
             String::new()
         } else {
@@ -726,7 +738,7 @@ fn option_case(axis: &str) -> (&'static str, Vec<String>, Vec<String>) {
             vec!["primary".into()],
             vec![flag, "primary".into()],
         ),
-        "file" | "log_file" | "target" => (
+        "dependency_archive_dir" | "file" | "log_file" | "target" => (
             "path-or-text-value",
             vec!["/tmp/contract/output".into()],
             vec![flag, "/tmp/contract/output".into()],

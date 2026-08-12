@@ -7,7 +7,7 @@
 
 > **안전하고 규격화된 Linux 서버 백업 관리를 위한 Rust 기반 Restic 백업 자동화 CLI 도구**
 
-`backup`은 systemd 기반의 Linux 서버(RHEL, Rocky Linux, Ubuntu 등)에서 **Restic 백업 파이프라인**을 설치, 설정, 운영 및 자동화하고 ISMS-P 감사 증적 보고서를 생성하는 고성능 백업 관리 CLI 도구입니다.
+`backup`은 systemd 기반의 Linux 서버(RHEL, Rocky Linux, Ubuntu 등)와 정식 지원 기준선인 **CentOS 6.10 x86_64**에서 **Restic 백업 파이프라인**을 설치, 설정, 운영 및 자동화하고 ISMS-P 감사 증적 보고서를 생성하는 고성능 백업 관리 CLI 도구입니다.
 
 저장 백엔드로 **SFTP/NAS 스토리지** 및 **S3 호환 오브젝트 스토리지**(AWS S3, MinIO, Synology Rclone 등)를 지원하며, DB 스트리밍 백업, 1차/2차 저장소 마이그레이션, systemd 스케줄러 동기화, 모의복구 훈련(RTO 측정)까지 백업의 전 과정을 제어합니다.
 
@@ -39,6 +39,7 @@ cargo install --path .
   * **Doctor Diagnostic Engine**: ISMS-P 인증 감사 규정 검증(보안 권한, NTP 시각 동기화, DB 헤더 검증 및 RTO 측정 HTML 보고서 생성).
   * **Pipeline Engine**: DB 덤프 스트리밍 -> 1차 백업 -> 2차 2차 백업 복제 -> 보관 주기(Retention) 정리 수동/자동 원스톱 파이프라인 수행.
 * **보안 및 자격 증명 보호**: 비밀번호 및 Access Key 등 민감 자격 증명(`SecretString`) 마스킹 처리.
+* **Platform Capability 호환성**: 실행 시 한 번 탐지한 capability로 systemd/cron·crond, chrony/ntpd, Ed25519/RSA SFTP, report와 Database Stream을 선택합니다. CentOS 6에서는 MariaDB 5.5.56 Database Stream만 지원합니다.
 
 ---
 
@@ -87,6 +88,10 @@ $ cargo test
 
 # 시나리오 E2E 통합 테스트 실행
 $ cargo test --test e2e_full_workflow
+
+# 실제 CentOS 6.10 x86_64 Docker runtime smoke
+$ ./scripts/test_centos6.sh
+# 또는 cargo test --test e2e_centos6_compat_test -- --ignored --nocapture
 ```
 
 ### 2. 코드 커버리지 및 뮤테이션 측정
@@ -106,7 +111,7 @@ $ ./scripts/test_coverage.sh
 
 | 서브커맨드 | 주요 역할 및 설명 | 실행 예시 |
 | :--- | :--- | :--- |
-| **`setup`** | TUI 마법사로 환경/프로필 초기화, 바이너리 의존성 자동 설치, 저장소 초기화 | `backup setup`<br>`backup setup dependencies` |
+| **`setup`** | TUI 마법사로 환경/프로필 초기화, checksum 검증 의존성 설치, 저장소 초기화 | `backup setup`<br>`backup setup dependencies`<br>`backup setup dependencies --dependency-archive-dir /srv/backup-artifacts` |
 | **`run`** | 전체 백업 파이프라인 수동/드라이런 실행 (DB -> Primary -> Secondary -> Retention) | `backup run`<br>`backup run --dry-run` |
 | **`doctor`** | 권한, 시각 동기화(NTP), 모의복구 훈련(RTO) 진단 및 ISMS-P HTML 보고서 생성 | `backup doctor`<br>`backup doctor environment --file report.html` |
 | **`copy`** | 1차 저장소에서 2차 저장소로 스냅샷 동기화 및 복사 (별칭: `sync`) | `backup copy`<br>`backup sync --dry-run` |

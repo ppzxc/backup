@@ -183,3 +183,15 @@
 * **`backup status [--profile <name>]`**: 백업 프로필별 저장소 위치, 최신 스냅샷(ID/시각/용량) 및 파이프라인 상태 종합 동적 조회. profile 미지정 상태에서 active profile이 없으면 경고와 함께 `0`을 반환하고, 명시한 profile이 없거나 조회가 실패하면 warning과 함께 `1`을 반환합니다. 전체 조회 중 일부 profile만 실패한 경우 성공 결과와 warning을 함께 출력하고 `1`을 반환합니다. 명시 profile은 exact key만 허용하며 빈값·공백·양끝 공백·unknown profile은 adapter 호출 없이 `1`로 종료합니다.
 * **`backup update`**: 자기 자신(Rust 바이너리) 및 설정 갱신. Release 조회, 다운로드, 압축 해제, 실행 권한 설정, 교체 중 하나라도 실패하면 현재 실행 가능한 바이너리를 보존하고 rollback 후 오류 종료하며, 교체 성공이 확인된 경우에만 새 버전을 성공으로 보고합니다.
 * **`backup uninstall [--yes] [--purge]`**: `--purge`는 반드시 `--yes`와 함께 사용해야 하며, 누락 시 어떤 삭제도 하지 않고 exit code `1`로 종료합니다. 일반 uninstall은 TTY에서 `--yes`가 없으면 확인 prompt를 표시하고, 비대화형 환경에서는 `1`로 거부합니다. prompt 거부는 삭제 없이 `0`으로 종료하며, `--yes`는 prompt를 건너뛰고 승인된 scope만 실행합니다. 스케줄 해제와 바이너리 삭제를 수행하며, `--purge`가 함께 주어지면 `--profiles`가 가리키는 Unified Backup Configuration의 configuration scope와 sidecar/report/cache만 제거합니다. 지정된 scope 밖의 host 경로는 삭제하지 않습니다.
+
+### 16. Platform Support Profile (플랫폼 지원 프로필)
+* **설명**: 하나의 운영체제·아키텍처 조합에서 검증된 외부 실행 환경의 정식 지원 기준선.
+* **비고**: 정식 지원 범위는 현재 CentOS 6.10 x86_64와 modern Linux 기준선이다. OS 이름별 분기를 운영 명령에 흩뿌리지 않고 `PlatformCapabilities`로 해석한다.
+
+### 17. Platform Capability (플랫폼 capability)
+* **설명**: 한 번의 CLI 실행에서 탐지해 scheduler, 진단, report, SFTP 및 Database Backup Adapter에 주입하는 실행 가능성·호환성 사실.
+* **비고**: systemd/cron 및 `crond` 상태, chrony/ntpd 시간 동기화, Ed25519/RSA SSH, OpenSSH `accept-new`, Database Stream 지원 매트릭스를 포함한다. capability probe 실패는 unavailable로 보존하며 다른 scheduler로 등록 실패를 숨기지 않는다.
+
+### 18. External Dependency Artifact (외부 의존성 artifact)
+* **설명**: restic, rclone, resticprofile 또는 backup 실행 파일과 그 무결성 검증 자료를 묶은 배포 산출물.
+* **비고**: 온라인 설치는 기존 artifact 순서를 유지하고, offline 설치는 명시된 SHA-256 manifest를 먼저 검증한다. checksum이 없거나 불일치한 artifact는 설치하지 않으며 자동 legacy 버전 fallback은 하지 않는다.

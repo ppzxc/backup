@@ -251,6 +251,11 @@ fn render_all_html(data: &RealReportData) -> String {
     </thead>
     <tbody>
       <tr>
+        <td>scheduler_backend</td>
+        <td>{}</td>
+        <td>{}</td>
+      </tr>
+      <tr>
         <td>자동 실행 스케줄 (Calendar)</td>
         <td>*-*-* 02:00:00</td>
         <td><span class="badge badge-success">정상</span></td>
@@ -311,6 +316,8 @@ fn render_all_html(data: &RealReportData) -> String {
         data.config.retention.keep_daily,
         data.config.retention.keep_weekly,
         data.config.retention.keep_monthly,
+        data.scheduler_backend,
+        data.scheduler_status,
         data.timer_enabled,
         data.timer_active,
         data.next_run,
@@ -517,6 +524,9 @@ fn render_time_sync_html(data: &RealReportData) -> String {
     </tr>
   </table>
   <h2>1. NTP 시각 동기화 서비스 상태</h2>
+  <table class="meta-table">
+    <tr><td class="label">time_sync_method</td><td>{}</td><td class="label">time_sync_status</td><td>{}</td></tr>
+  </table>
   <table class="data-table">
     <thead><tr><th>점검 항목</th><th>ISMS 합격 기준</th><th>현재 상태</th><th>결과</th></tr></thead>
     <tbody>
@@ -560,6 +570,8 @@ fn render_time_sync_html(data: &RealReportData) -> String {
         COMMON_REPORT_CSS,
         data.timestamp,
         data.hostname,
+        data.time_sync_method,
+        data.time_sync_status,
         data.chrony_enabled,
         data.chrony_enabled,
         data.chrony_active,

@@ -54,7 +54,6 @@ fn main() {
             std::process::exit(2);
         }
     };
-
     let env_log_override = std::env::var("BACKUP_LOG")
         .or_else(|_| std::env::var("RUST_LOG"))
         .ok();
@@ -75,6 +74,11 @@ fn main() {
             let scheduler_calendar = std::env::var("BACKUP_TEST_SCHEDULE_CALENDAR")
                 .unwrap_or_else(|_| backup::runner::scheduler::DEFAULT_SCHEDULE_CALENDAR.into());
             let force_cron = std::env::var_os("BACKUP_TEST_FORCE_CRON").is_some();
+            let platform_capabilities = if matches!(&cli.command, backup::cli::Command::Version) {
+                backup::platform::PlatformCapabilities::default()
+            } else {
+                backup::platform::PlatformCapabilities::detect()
+            };
             let restore_drill_setup_overrides =
                 match RestoreDrillSetupOverrides::from_process_environment() {
                     Ok(overrides) => overrides,
@@ -86,6 +90,7 @@ fn main() {
             context
                 .with_environment(home_dir, host_name, scheduler_calendar)
                 .with_scheduler_force_cron(force_cron)
+                .with_platform_capabilities(platform_capabilities)
                 .with_restore_drill_setup_overrides(restore_drill_setup_overrides)
         }
         Err(error) => {
